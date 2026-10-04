@@ -259,6 +259,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models/{id...}", s.handleGetModel)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST /v1/completions", s.handleLegacyCompletions)
+	// Anthropic Messages API（供 Claude Code / Anthropic SDK）
+	mux.HandleFunc("POST /v1/messages", s.handleMessages)
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
 
 	// 内置 MCP server：OpenCode 以 remote MCP 方式注册它，用来调用客户端声明的工具。
 	// 既是路由，也当鉴权（URL 里的 token 是 128 位随机串）。
@@ -499,7 +502,7 @@ func (s *Server) handleUnknownV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOpenAIError(w, http.StatusNotFound, "invalid_request_error",
-		fmt.Sprintf("unknown endpoint %q; implemented: /v1/models, /v1/models/{id}, /v1/chat/completions, /v1/completions, /v1/usage",
+		fmt.Sprintf("unknown endpoint %q; implemented: /v1/models, /v1/models/{id}, /v1/chat/completions, /v1/completions, /v1/responses, /v1/messages, /v1/usage",
 			r.URL.Path),
 		"unknown_endpoint")
 }

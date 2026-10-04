@@ -67,6 +67,9 @@ type Config struct {
 	ResponsesEnabled bool
 	ResponseTTL      time.Duration
 
+	// Anthropic Messages API（/v1/messages，供 Claude Code / Anthropic SDK）
+	AnthropicEnabled bool
+
 	// 工具调用（把客户端 tools 经内置 MCP server 暴露给 OpenCode agent）
 	ToolCalling    bool          // 是否启用
 	ToolSoftFail   bool          // true=注册失败时降级为无工具继续；false=直接报错
@@ -303,6 +306,7 @@ func LoadConfig() (Config, error) {
 
 		ResponsesEnabled: loader.boolean("BRIDGE_RESPONSES_ENABLED", true),
 		ResponseTTL:      loader.dur("BRIDGE_RESPONSE_TTL", 30*time.Minute),
+		AnthropicEnabled: loader.boolean("BRIDGE_ANTHROPIC_ENABLED", true),
 
 		ToolCalling:    loader.boolean("BRIDGE_TOOL_CALLING", true),
 		ToolSoftFail:   loader.boolean("BRIDGE_TOOL_SOFT_FAIL", false),

@@ -389,6 +389,75 @@ def t_attach_responses():
         check("responses image", False, repr(e))
 
 
+# ---------------- Anthropic Messages API ----------------
+
+def anthropic(payload, sid):
+    req = urllib.request.Request(
+        ROOT + "/v1/messages", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "x-api-key": KEY,
+                 "anthropic-version": "2023-06-01", "X-Session-ID": sid})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        return json.loads(r.read())
+
+
+def t_anthropic_basic():
+    print("\n== anthropic: 非流式 ==")
+    try:
+        d = anthropic({"model": MODEL, "max_tokens": 128, "system": "你是助手",
+                       "messages": [{"role": "user", "content": "只回两个字：你好"}]}, u("anth"))
+        has_text = any(c.get("type") == "text" and c.get("text") for c in d.get("content", []))
+        check("type=message & text", d.get("type") == "message" and has_text, json.dumps(d)[:140])
+        check("stop_reason=end_turn", d.get("stop_reason") == "end_turn", str(d.get("stop_reason")))
+        check("usage present", isinstance(d.get("usage"), dict) and d["usage"].get("output_tokens", 0) > 0,
+              str(d.get("usage")))
+    except Exception as e:
+        check("anthropic basic", False, repr(e))
+
+
+def t_anthropic_tool():
+    print("\n== anthropic: tool_use 往返 ==")
+    try:
+        tools = [{"name": "get_weather", "description": "查天气",
+                  "input_schema": WEATHER["function"]["parameters"]}]
+        sid = u("anth-tool")
+        p = "必须调用 get_weather 查询北京天气，拿到结果后一句话回答。"
+        r1 = anthropic({"model": MODEL, "max_tokens": 256, "tools": tools,
+                        "messages": [{"role": "user", "content": p}]}, sid)
+        tu = next((c for c in r1.get("content", []) if c.get("type") == "tool_use"), None)
+        check("stop_reason=tool_use", r1.get("stop_reason") == "tool_use" and tu is not None,
+              json.dumps(r1)[:140])
+        if not tu:
+            return
+        check("tool_use has id/name/input",
+              bool(tu.get("id") and tu.get("name") and tu.get("input") is not None),
+              json.dumps(tu)[:120])
+        r2 = anthropic({"model": MODEL, "max_tokens": 256, "tools": tools, "messages": [
+            {"role": "user", "content": p}, {"role": "assistant", "content": [tu]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tu["id"],
+                                          "content": "北京 晴 26℃"}]}]}, sid)
+        check("final after tool_result",
+              r2.get("stop_reason") == "end_turn" and any(c.get("type") == "text" for c in r2.get("content", [])),
+              json.dumps(r2)[:120])
+    except Exception as e:
+        check("anthropic tool", False, repr(e))
+
+
+def t_anthropic_count_tokens():
+    print("\n== anthropic: count_tokens ==")
+    try:
+        req = urllib.request.Request(
+            ROOT + "/v1/messages/count_tokens",
+            data=json.dumps({"model": "claude-3-5-sonnet",
+                             "messages": [{"role": "user", "content": "hello world"}]}).encode(),
+            headers={"Content-Type": "application/json", "x-api-key": KEY})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            d = json.loads(r.read())
+        check("count_tokens returns input_tokens", isinstance(d.get("input_tokens"), int) and d["input_tokens"] > 0,
+              str(d))
+    except Exception as e:
+        check("anthropic count_tokens", False, repr(e))
+
+
 TESTS = {
     "tool_single": t_tool_single,
     "tool_multi": t_tool_multi,
@@ -401,12 +470,16 @@ TESTS = {
     "concurrency": t_concurrency,
     "attach_chat": t_attach_chat,
     "attach_responses": t_attach_responses,
+    "anthropic_basic": t_anthropic_basic,
+    "anthropic_tool": t_anthropic_tool,
+    "anthropic_count_tokens": t_anthropic_count_tokens,
 }
 
 GROUPS = {
     "tools": ["tool_single", "tool_multi", "tool_error", "tool_large", "tool_stream", "tool_reasoning"],
     "responses": ["responses_events", "responses_function_call"],
     "attach": ["attach_chat", "attach_responses"],
+    "anthropic": ["anthropic_basic", "anthropic_tool", "anthropic_count_tokens"],
 }
 
 if __name__ == "__main__":

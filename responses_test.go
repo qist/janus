@@ -484,7 +484,7 @@ func chainServer(t *testing.T, stub *httptest.Server) *Server {
 		Upstream: stub.URL, Username: "o", Password: "p",
 		Directory: "/tmp", APIKey: "sk-test", ConsoleURL: stub.URL,
 		DefaultModel: "p/m1", ResponsesEnabled: true, ResponseTTL: time.Minute,
-		MaxBodyBytes: 1 << 20, ToolAnnotations: false,
+		MaxBodyBytes: 1 << 20, ToolAnnotations: false, AnthropicEnabled: true,
 		IdlePollInterval:  200 * time.Millisecond,
 		ReconcileInterval: 300 * time.Millisecond,
 	}

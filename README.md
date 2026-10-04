@@ -262,6 +262,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 |---|---|---|
 | `BRIDGE_RESPONSES_ENABLED` | `true` | 是否开放 `/v1/responses` |
 | `BRIDGE_RESPONSE_TTL` | `30m` | 已保存响应的保留时长（`previous_response_id` 依赖） |
+| `BRIDGE_ANTHROPIC_ENABLED` | `true` | 是否开放 `/v1/messages`（Anthropic Messages API，供 Claude Code） |
 | `BRIDGE_DB` | 默认 `$XDG_DATA_HOME/janus/janus.db` | 持久化库路径（SQLite）。不设=默认路径；`memory`/`off`=纯内存。开启后**响应、会话映射与 Chat 历史快照**都落盘，Chat / Responses 均可跨进程重启续接 |
 | `BRIDGE_HISTORY_MAX_BYTES` | `1048576` | 落库的 Chat 历史快照上限（字节）；超过只存会话映射。0=不限 |
 | `BRIDGE_CONV_TTL` | `168h` | 持久化的会话映射/历史保留时长（janitor 清理） |
@@ -294,8 +295,27 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | POST | `/v1/responses` | OpenAI **Responses API**（流式 + 非流式） |
 | GET | `/v1/responses/{id}` | 取回已保存的响应 |
 | DELETE | `/v1/responses/{id}` | 删除响应 |
+| POST | `/v1/messages` | **Anthropic Messages API**（供 Claude Code / Anthropic SDK，流式 + 工具） |
+| POST | `/v1/messages/count_tokens` | Anthropic token 估算 |
 | POST | `/v1/completions` | 旧版补全，内部降级为单轮 chat |
 | * | `/v1/*` | 其余一律返回 OpenAI 格式 404（客户端不会因解析失败而崩） |
+
+### 使用 Anthropic / Claude Code
+
+Janus 同时兼容 **Anthropic Messages API**，Claude Code / Anthropic SDK 可直接指向它：
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:2810
+export ANTHROPIC_API_KEY=sk-bridge-dev        # = BRIDGE_API_KEY
+# Claude Code 发的是 claude-* 模型名，这些在 OpenCode 里不存在；
+# 建议设 BRIDGE_DEFAULT_MODEL 指定真正要用的模型，Janus 会自动回退，不会 404。
+```
+
+- `POST /v1/messages`：`system` + `messages`（text / image / tool_use / tool_result）、`tools[].input_schema`
+- 流式：`message_start → content_block_start/delta/stop → message_delta → message_stop`（工具块用 `input_json_delta`）
+- 工具：Anthropic `tool_use`（`id/name/input`）↔ 客户端声明的 tools；`tool_result` 回填给 agent
+- 鉴权：`x-api-key`（也接受 `Authorization: Bearer`）；`anthropic-version` / `anthropic-beta` 忽略
+- **模型回退**：请求里的 `model` 解析不到时，自动用 `BRIDGE_DEFAULT_MODEL` / 上游默认
 
 ### 查看模型
 

@@ -780,6 +780,28 @@ OpenCode session
 **完全相同**时，会被视为同一条会话线 —— 这正是"多轮自动续接"所依赖的匹配，无法同时满足
 "内容相同也要隔离"。规避：客户端带上 `user` 字段，或 `X-Session-ID` / `X-OpenCode-Session` 头。
 
+### 5.15 Anthropic Messages API（`/v1/messages`）
+
+让 Claude Code / Anthropic SDK 直接使用 Janus。与 Chat/Responses **共用同一套
+Store + executor + ToolBridge**，`anthropic.go` / `anthropic_stream.go` 只做形状转换：
+
+| Anthropic | 内部 |
+|---|---|
+| `system`（string / []block） | 前置一条 `role:system` 消息 |
+| user content `text` / `image` | 文本 + `ContentPart`（image_url） |
+| user content `tool_result` | `role:"tool"` 消息（`tool_call_id` = `tool_use_id`） |
+| assistant content `tool_use` | assistant 的 `tool_calls`（`input` → `arguments`） |
+| `tools[].input_schema` | `ToolSpec.parameters` |
+| `stop_reason` | `tool_use` / `max_tokens` / `end_turn` ↔ `finish_reason` |
+
+- 流式：`message_start → content_block_start → content_block_delta`（`text_delta` /
+  `input_json_delta`）`→ content_block_stop → message_delta → message_stop`
+- 鉴权 `x-api-key`（也接受 Bearer）；`anthropic-version`/`anthropic-beta` 忽略
+- **模型回退**：请求的 `model`（如 `claude-*`）在 OpenCode 里不存在时，自动用
+  `BRIDGE_DEFAULT_MODEL` / 上游默认，避免 404
+- `POST /v1/messages/count_tokens` 提供粗略 token 估算（Claude Code 会调用）
+- 开关 `BRIDGE_ANTHROPIC_ENABLED`（默认 true）
+
 ## 6. 配置
 
 配置来源优先级：**真实环境变量 > 配置文件 > 内置默认值**。

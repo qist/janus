@@ -89,6 +89,151 @@ func (s *responsesSSE) ping() {
 	s.flusher.Flush()
 }
 
+// responsesStream 是 Responses 流式的事件状态机。
+//
+// 它维护 output[] 的项顺序与各自的生命周期，保证事件序列严格符合 OpenAI：
+//
+//	reasoning: output_item.added → reasoning_summary_part.added
+//	           → reasoning_summary_text.delta* → reasoning_summary_text.done
+//	           → reasoning_summary_part.done → output_item.done
+//	message:   output_item.added → content_part.added
+//	           → output_text.delta* → output_text.done
+//	           → content_part.done → output_item.done
+//	function_call: output_item.added → function_call_arguments.delta
+//	           → function_call_arguments.done → output_item.done
+//
+// 事件里引用的 item id 与最终 response.output[] 里的完全一致。
+type responsesStream struct {
+	ss      *responsesSSE
+	nextIdx int
+	items   []ResponseItem
+
+	rOpen bool
+	rIdx  int
+	rID   string
+	rBuf  strings.Builder
+
+	tOpen bool
+	tIdx  int
+	tID   string
+	tBuf  strings.Builder
+}
+
+func newResponsesStream(ss *responsesSSE) *responsesStream {
+	return &responsesStream{ss: ss}
+}
+
+func (st *responsesStream) event(typ string, payload map[string]any) {
+	_ = st.ss.event(typ, payload)
+}
+
+func (st *responsesStream) reasoning(t string) {
+	if t == "" {
+		return
+	}
+	if !st.rOpen {
+		st.closeText() // item 生命周期必须连续
+		st.rIdx = st.nextIdx
+		st.nextIdx++
+		st.rID = reasoningPrefix + newID()[:24]
+		item := ResponseItem{Type: "reasoning", ID: st.rID,
+			Summary: []ResponseSummary{{Type: "summary_text"}}}
+		st.items = append(st.items, item)
+		st.event("response.output_item.added", map[string]any{"output_index": st.rIdx, "item": item})
+		st.event("response.reasoning_summary_part.added", map[string]any{
+			"output_index": st.rIdx, "summary_index": 0,
+			"part": map[string]any{"type": "summary_text", "text": ""}})
+		st.rOpen = true
+	}
+	st.rBuf.WriteString(t)
+	st.event("response.reasoning_summary_text.delta", map[string]any{
+		"output_index": st.rIdx, "summary_index": 0, "delta": t})
+}
+
+func (st *responsesStream) text(t string) {
+	if t == "" {
+		return
+	}
+	if !st.tOpen {
+		st.closeReasoning() // item 生命周期必须连续，不能交错
+		st.tIdx = st.nextIdx
+		st.nextIdx++
+		st.tID = outputMsgPrefix + newID()[:24]
+		item := ResponseItem{Type: "message", ID: st.tID, Role: "assistant", Status: "in_progress",
+			Content: []ResponseContent{{Type: "output_text", Annotations: []json.RawMessage{}}}}
+		st.items = append(st.items, item)
+		st.event("response.output_item.added", map[string]any{"output_index": st.tIdx, "item": item})
+		st.event("response.content_part.added", map[string]any{
+			"output_index": st.tIdx, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
+		st.tOpen = true
+	}
+	st.tBuf.WriteString(t)
+	st.event("response.output_text.delta", map[string]any{
+		"output_index": st.tIdx, "content_index": 0, "delta": t})
+}
+
+func (st *responsesStream) closeReasoning() {
+	if !st.rOpen {
+		return
+	}
+	txt := st.rBuf.String()
+	item := st.items[st.rIdx]
+	item.Summary[0].Text = txt
+	st.items[st.rIdx] = item
+	st.event("response.reasoning_summary_text.done", map[string]any{
+		"output_index": st.rIdx, "summary_index": 0, "text": txt})
+	st.event("response.reasoning_summary_part.done", map[string]any{
+		"output_index": st.rIdx, "summary_index": 0,
+		"part": map[string]any{"type": "summary_text", "text": txt}})
+	st.event("response.output_item.done", map[string]any{"output_index": st.rIdx, "item": st.items[st.rIdx]})
+	st.rOpen = false
+}
+
+func (st *responsesStream) closeText() {
+	if !st.tOpen {
+		return
+	}
+	txt := st.tBuf.String()
+	item := st.items[st.tIdx]
+	item.Status = "completed"
+	if len(item.Content) == 0 {
+		item.Content = []ResponseContent{{Type: "output_text"}}
+	}
+	item.Content[0].Text = txt
+	item.Content[0].Annotations = []json.RawMessage{}
+	st.items[st.tIdx] = item
+	st.event("response.output_text.done", map[string]any{
+		"output_index": st.tIdx, "content_index": 0, "text": txt})
+	st.event("response.content_part.done", map[string]any{
+		"output_index": st.tIdx, "content_index": 0,
+		"part": map[string]any{"type": "output_text", "text": txt, "annotations": []any{}}})
+	st.event("response.output_item.done", map[string]any{"output_index": st.tIdx, "item": st.items[st.tIdx]})
+	st.tOpen = false
+}
+
+func (st *responsesStream) functionCalls(pending []*pendingCall) {
+	for _, p := range pending {
+		idx := st.nextIdx
+		st.nextIdx++
+		item := ResponseItem{Type: "function_call", ID: fcPrefix + newID()[:24],
+			CallID: p.CallID, Name: p.ToolName, Arguments: p.Args, Status: "completed"}
+		st.items = append(st.items, item)
+		st.event("response.output_item.added", map[string]any{"output_index": idx, "item": item})
+		st.event("response.function_call_arguments.delta", map[string]any{
+			"output_index": idx, "item_id": item.ID, "delta": p.Args})
+		st.event("response.function_call_arguments.done", map[string]any{
+			"output_index": idx, "item_id": item.ID, "arguments": p.Args})
+		st.event("response.output_item.done", map[string]any{"output_index": idx, "item": item})
+	}
+}
+
+// closeAll 在收尾时关闭仍打开的输出项。
+func (st *responsesStream) closeAll() {
+	st.closeReasoning()
+	st.closeText()
+}
+
 // streamResponses 以 Responses SSE 格式驱动一轮执行。
 func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	req ResponsesRequest, conv *Conversation, sub *subscription, promptAt int64, model string) {
@@ -121,29 +266,16 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 
 	// 响应骨架（先发 created）
 	skeleton := s.newResponsesResponse(req, model, conv.Key, started)
-	_ = ss.event("response.created", map[string]any{"response": skeleton})
+	st := newResponsesStream(ss)
+	st.event("response.created", map[string]any{"response": skeleton})
 
 	sid := conv.snapshotSessionID()
 	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
 	ex.parallel = parallelDefault(req.ParallelToolCalls)
 	ex.budget = newTokenBudget(responsesMaxTokens(req))
-	ex.writeText = func(t string) error {
-		if t == "" {
-			return nil
-		}
-		return ss.event("response.output_text.delta", map[string]any{
-			"output_index": 0, "content_index": 0, "delta": t,
-		})
-	}
-	ex.writeReasoning = func(t string) error {
-		if t == "" {
-			return nil
-		}
-		return ss.event("response.reasoning_summary_text.delta", map[string]any{
-			"output_index": 0, "summary_index": 0, "delta": t,
-		})
-	}
+	ex.writeText = func(t string) error { st.text(t); return nil }
+	ex.writeReasoning = func(t string) error { st.reasoning(t); return nil }
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -177,7 +309,6 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 		conv.setPendingToolCalls(t.tools)
 	}
 
-	// 工具调用：发 function_call 项
 	s.metrics.addTokens(t.res.usage.PromptTokens, t.res.usage.CompletionTokens)
 	if t.outcome == "length" {
 		go func() {
@@ -186,28 +317,13 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 			_ = s.up.Interrupt(iCtx, sid)
 		}()
 	}
+
+	// 先关闭已打开的输出项（reasoning / message）
+	st.closeAll()
+
 	if len(t.tools) > 0 {
 		s.metrics.incToolCalls(len(t.tools))
-		// function_call 在最终 output[] 里的起始下标：reasoning 项占据 0。
-		base := 0
-		if strings.TrimSpace(t.res.reasoning) != "" {
-			base = 1
-		}
-		for i, p := range t.tools {
-			idx := base + i
-			item := ResponseItem{
-				Type: "function_call", ID: fcPrefix + newID()[:24],
-				CallID: p.CallID, Name: p.ToolName, Arguments: p.Args, Status: "completed",
-			}
-			_ = ss.event("response.output_item.added", map[string]any{"output_index": idx, "item": item})
-			_ = ss.event("response.function_call_arguments.delta", map[string]any{
-				"output_index": idx, "item_id": item.ID, "delta": p.Args,
-			})
-			_ = ss.event("response.function_call_arguments.done", map[string]any{
-				"output_index": idx, "item_id": item.ID, "arguments": p.Args,
-			})
-			_ = ss.event("response.output_item.done", map[string]any{"output_index": idx, "item": item})
-		}
+		st.functionCalls(t.tools)
 	} else if !responseHasContent(&ChatResponse{Choices: []Choice{{Message: AssistantMsg{
 		Content: t.res.text, ReasoningContent: t.res.reasoning,
 	}}}}) {
@@ -218,20 +334,21 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 		failed.Status = "failed"
 		e := openAIError{Message: msg, Type: typ, Code: code}
 		failed.Error = &e
-		_ = ss.event("response.failed", map[string]any{"response": failed})
+		st.event("response.failed", map[string]any{"response": failed})
 		return
 	}
 
-	out, text := buildResponsesOutput(t)
 	final := s.newResponsesResponse(req, model, conv.Key, started)
 	final.ID = skeleton.ID
 	final.Status = responsesStatus(t)
-	final.Output = out
-	final.OutputText = text
+	final.Output = st.items
+	if len(t.tools) == 0 {
+		final.OutputText = t.res.text
+	}
 	final.Usage = usageToResponses(t.res.usage)
 	applyIncomplete(final, t)
 	if req.Store == nil || *req.Store {
 		s.responses.put(final, conv.Key)
 	}
-	_ = ss.event("response.completed", map[string]any{"response": final})
+	st.event("response.completed", map[string]any{"response": final})
 }

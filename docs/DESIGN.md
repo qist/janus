@@ -584,7 +584,8 @@ desktop 端等其他会话一律不碰。
 
 ### 5.7.3 图片附件
 
-OpenAI 的 `content` 数组形态（`image_url`）在 Phase 1 已支持。
+OpenAI 的 `content` 数组形态（`image_url`）已支持；Responses 的 `input_image`
+（`image_url` 为字符串或 `{url}`）也已解析并转成同一套内部 `ContentPart`。
 关键实测结论：**上游只接受 `data:` URI**，传 `https://` 会得到
 400 `Unsupported attachment URI`。
 
@@ -595,6 +596,10 @@ OpenAI 的 `content` 数组形态（`image_url`）在 Phase 1 已支持。
 | `data:image/...;base64,...` | 校验 base64 合法性后直传 `files[].uri` |
 | `http(s)://...` | 下载（20s 超时 / 12MB 上限）→ 转 data URI |
 | `file://` 等 | 不支持，进失败列表 |
+
+**模型能力门控**（"模型支持就接收"）：`filterAttachmentsByModel` 按模型
+`capabilities.input` 过滤，纯文本模型收到图片/PDF 会丢弃并在 prompt 里说明，
+而不是硬塞导致上游报错。
 
 单次 prompt 最多 8 个附件。超限/下载失败/校验失败的 URL 进失败列表，由
 `attachFailureNote` 以文字补进 prompt：

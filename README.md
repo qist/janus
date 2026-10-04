@@ -582,14 +582,17 @@ agent 干活时（读文件、跑命令）会沉默很久。开启 `BRIDGE_TOOL_
 这些注释在**重放历史时会被自动剥掉**，不会污染上游上下文。若客户端自己做
 agent 循环、不希望 content 里混入这些标记，设 `BRIDGE_TOOL_ANNOTATIONS=false`。
 
-### 图片
+### 图片与附件
 
-OpenAI 的 `content` 数组形态（`image_url`）已支持：
+OpenAI 的 `content` 数组形态（`image_url`）已支持，Chat 与 Responses 都走同一套：
 
 - `data:image/...;base64,...` → 直接作为附件传给上游
 - `http(s)://...` → 先下载再转 base64（上游**只认 data URI**，实测 https 会 400）
 - 超过 12MB 或下载失败 → 降级，并在 prompt 里用文字说明"有张图看不到"，
   避免模型自信地回答"未看到图片"
+- **按模型能力门控**：查模型的 `capabilities.input`，支持 `image`/`pdf` 才附带；
+  纯文本模型收到图片会丢弃并说明（`模型支持就接收`）
+- Responses 的 `input` 里 `input_image`（`image_url` 字符串或 `{url}` 两种形态）已解析
 
 ### 指标（`/metrics`）
 

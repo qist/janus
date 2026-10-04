@@ -749,8 +749,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 图片：data URI 直传，http(s) 下载转 base64。失败的 URL 以文字说明补进 prompt，
 	// 免得模型以为用户根本没发图（实测会出现"未看到图片"这种误导性回答）。
 	files, failed := ExtractAttachments(ctx, delta, s.httpc)
+	// 模型不支持该模态就别硬塞（例如纯文本模型收到图片）：丢弃并说明。
+	if m := FindModel(ocModels, ref); len(files) > 0 {
+		var dropped []OCFileAttach
+		files, dropped = filterAttachmentsByModel(files, m)
+		for _, f := range dropped {
+			failed = append(failed, f.Name)
+		}
+	}
 	if len(failed) > 0 {
-		s.log.Warnf("attachments dropped for %s: %d url(s)", conv.Key, len(failed))
+		s.log.Warnf("attachments dropped for %s: %d item(s)", conv.Key, len(failed))
 		planText += attachFailureNote(failed)
 	}
 	if len(files) > 0 {

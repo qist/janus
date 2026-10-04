@@ -209,11 +209,64 @@ func attachFailureNote(failed []string) string {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("\n\n[注意] 以下图片未能附带，无法查看：\n")
+	sb.WriteString("\n\n[注意] 以下附件未能附带，无法查看：\n")
 	for _, u := range failed {
 		sb.WriteString("- ")
 		sb.WriteString(trimForErr(u))
 		sb.WriteString("\n")
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// attachModal 返回附件需要的输入模态（image / pdf / audio / video），
+// 无法判断时返回 ""（视为通用，不做限制）。
+func attachModal(f OCFileAttach) string {
+	u := strings.ToLower(f.URI)
+	if strings.HasPrefix(u, "data:") {
+		i := strings.Index(u, ";")
+		if i < 0 {
+			i = strings.Index(u, ",")
+		}
+		if i > len("data:") {
+			mime := u[len("data:"):i]
+			if j := strings.Index(mime, "/"); j > 0 {
+				return mime[:j]
+			}
+		}
+		return ""
+	}
+	switch strings.ToLower(path.Ext(f.Name)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg":
+		return "image"
+	case ".pdf":
+		return "pdf"
+	}
+	return ""
+}
+
+// modelSupportsModal 判断模型 capabilities.input 是否包含该模态。
+// m 为 nil 或模态未知时返回 true（不阻断）。
+func modelSupportsModal(m *OCModel, modal string) bool {
+	if m == nil || modal == "" {
+		return true
+	}
+	for _, in := range m.Capabilities.Input {
+		if strings.EqualFold(in, modal) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterAttachmentsByModel 丢弃模型不支持的附件（例如纯文本模型收到图片）。
+// 返回 (保留, 丢弃)。正是"模型支持就接收，不支持就不硬塞"。
+func filterAttachmentsByModel(files []OCFileAttach, m *OCModel) (kept, dropped []OCFileAttach) {
+	for _, f := range files {
+		if modelSupportsModal(m, attachModal(f)) {
+			kept = append(kept, f)
+		} else {
+			dropped = append(dropped, f)
+		}
+	}
+	return kept, dropped
 }

@@ -355,6 +355,40 @@ def t_concurrency():
     check(f"{n} clients no cross-talk", not bad, f"mismatch={bad}")
 
 
+# ---------------- 附件 ----------------
+
+PNG_1PX = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+           "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def t_attach_chat():
+    print("\n== attach: Chat 图片 ==")
+    try:
+        mk = u("attach-chat")
+        r = client.chat.completions.create(model=MODEL, user=mk, messages=[{
+            "role": "user", "content": [
+                {"type": "text", "text": "只回一个字：好"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + PNG_1PX}}]}])
+        txt = r.choices[0].message.content or ""
+        check("chat image accepted (200, 支持则附带/不支持则降级)", txt != "", repr(txt[:40]))
+    except Exception as e:
+        check("chat image", False, repr(e))
+
+
+def t_attach_responses():
+    print("\n== attach: Responses input_image ==")
+    try:
+        names, datas = sse_events({"model": MODEL, "stream": True, "input": [{
+            "role": "user", "content": [
+                {"type": "input_text", "text": "只回一个字：好"},
+                {"type": "input_image", "image_url": "data:image/png;base64," + PNG_1PX}]}]})
+        done = datas[-1].get("response", {}) if datas else {}
+        check("responses image accepted (completed)", done.get("status") == "completed" and bool(done.get("output")),
+              f"status={done.get('status')} out={len(done.get('output') or [])}")
+    except Exception as e:
+        check("responses image", False, repr(e))
+
+
 TESTS = {
     "tool_single": t_tool_single,
     "tool_multi": t_tool_multi,
@@ -365,11 +399,14 @@ TESTS = {
     "responses_events": t_responses_events,
     "responses_function_call": t_responses_function_call,
     "concurrency": t_concurrency,
+    "attach_chat": t_attach_chat,
+    "attach_responses": t_attach_responses,
 }
 
 GROUPS = {
     "tools": ["tool_single", "tool_multi", "tool_error", "tool_large", "tool_stream", "tool_reasoning"],
     "responses": ["responses_events", "responses_function_call"],
+    "attach": ["attach_chat", "attach_responses"],
 }
 
 if __name__ == "__main__":

@@ -315,9 +315,10 @@ func responsesInputToMessages(input json.RawMessage) ([]ChatMessage, map[string]
 	for _, it := range items {
 		switch it.Type {
 		case "", "message":
+			text, parts := responsesContentParts(it.Content)
 			msgs = append(msgs, ChatMessage{
 				Role:    orDefault(it.Role, "user"),
-				Content: MessageContent{Text: responsesContentText(it.Content)},
+				Content: MessageContent{Text: text, Parts: parts, IsArray: len(parts) > 0},
 			})
 		case "function_call":
 			msgs = append(msgs, ChatMessage{
@@ -371,6 +372,57 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// responsesContentParts 解析 message 的 content：文本 + 图片（input_image / image_url）。
+// 图片转成内部 ContentPart（与 Chat 的 content 数组同形），供 ExtractAttachments 处理。
+func responsesContentParts(raw json.RawMessage) (string, []ContentPart) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, nil
+	}
+	var parts []struct {
+		Type     string          `json:"type"`
+		Text     string          `json:"text"`
+		ImageURL json.RawMessage `json:"image_url"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return "", nil
+	}
+	var b strings.Builder
+	var out []ContentPart
+	for _, p := range parts {
+		switch p.Type {
+		case "", "input_text", "output_text", "text":
+			b.WriteString(p.Text)
+		case "input_image", "image_url":
+			if u := imageURLString(p.ImageURL); u != "" {
+				out = append(out, ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: u}})
+			}
+		}
+	}
+	return b.String(), out
+}
+
+// imageURLString 兼容 image_url 是字符串或 {"url": "..."} 两种形态。
+func imageURLString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj.URL
+	}
+	return ""
 }
 
 // ---------- 输出转换 ----------
@@ -586,11 +638,29 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	planText := Flatten(inputMsgs)
+	// 附件：data URI 直传 / http(s) 下载；模型不支持该模态就丢弃并说明。
+	files, failed := ExtractAttachments(ctx, inputMsgs, s.httpc)
+	if m := FindModel(ocModels, ref); len(files) > 0 {
+		var dropped []OCFileAttach
+		files, dropped = filterAttachmentsByModel(files, m)
+		for _, f := range dropped {
+			failed = append(failed, f.Name)
+		}
+	}
+	if len(failed) > 0 {
+		s.log.Warnf("responses attachments dropped: %d item(s)", len(failed))
+		planText += attachFailureNote(failed)
+	}
 	sub = s.bus.Subscribe(conv.snapshotSessionID(), 512)
 	defer sub.cancel()
 
 	promptAt := time.Now().UnixMilli()
-	resp, err := s.up.Prompt(ctx, conv.snapshotSessionID(), OCPromptReq{Text: planText})
+	resp, err := s.up.Prompt(ctx, conv.snapshotSessionID(), OCPromptReq{Text: planText, Files: files})
+	if err != nil && len(files) > 0 {
+		// 附件让上游失败时降级重发纯文本，保住对话本身（与 chat 路径一致）
+		s.log.Warnf("responses prompt with %d attachment(s) failed, retrying as plain text: %v", len(files), err)
+		resp, err = s.up.Prompt(ctx, conv.snapshotSessionID(), OCPromptReq{Text: planText})
+	}
 	if err != nil {
 		if newSession {
 			s.resetSession(conv)

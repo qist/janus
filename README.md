@@ -132,6 +132,11 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
       "requests": 82, "cost_usd": 0 }
   ],
   "by_day": [ { "date": "2026-10-03", "requests": 2815, "cost_usd": 5.176 } ],
+  "go": {                       // Go 套餐三窗口限额（非 Go 账号时省略）
+    "rolling": { "status": "ok", "percent": 4,  "resets_in_sec": 10900 },
+    "weekly":  { "status": "ok", "percent": 50, "resets_in_sec": 43100 },
+    "monthly": { "status": "ok", "percent": 25, "resets_in_sec": 2411600 }
+  },
   "fetched_at": "2026-10-03T14:20:24Z",
   "source": "https://opencode.ai/console/api"
 }
@@ -147,8 +152,14 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `GET {console}/usage/summary` | 总消耗（tokens + cost） |
 | `GET {console}/usage/models` | 按模型分组 |
 | `GET {console}/usage/cost-by-day` | 按天分组 |
+| `GET {go}/v1/usage` | Go 套餐 5h 滚动 / 周 / 月限额（inference 主机） |
 
 金额单位是 **micro-cents**（1 USD = 1e8 micro-cents），桥已换算成 `*_usd`。
+
+`go` 区块来自 inference 主机（默认 `https://opencode.ai/inference/go/v1/usage`），
+用同一个 OAuth token 鉴权。它是**非公开接口**（OpenCode 只在 console 页面展示，
+尚未提供官方 API），失败或非 Go 账号时静默省略，不影响其余字段。每个窗口给出
+已用百分比 `percent`、重置时间 `resets_at` 和倒计时 `resets_in_sec`；超过 100% 会被限流。
 
 **重要限制**：
 
@@ -176,6 +187,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 浏览器打开 `http://<bridge-host>:2810/ui`（根路径 `/` 自动跳转），零前端依赖、离线可用：
 
 - **余额**：余额 / 可用额度 / 信用额度 / 计费模式
+- **Go 套餐限额**：5 小时滚动 / 每周 / 每月的已用百分比与重置倒计时（仅 Go 账号显示，数据来自 inference 主机的非公开接口）
 - **累计用量**：花费、请求数、输入/输出 tokens、缓存读取/写入、**缓存命中率**、Token 结构占比
 - **每日趋势**：按天的花费 / 请求数 / tokens 柱状图（7/14/30/90 天 / 全部）
 - **模型用量**：按模型分组的请求、输入/输出、缓存读取、命中率、花费及占比，表头点击排序
@@ -212,6 +224,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `OPENCODE_DB` | 见说明 | 凭据库路径（读余额用）。默认 `$XDG_DATA_HOME/opencode/opencode.db`，再退到 `~/.local/share/opencode/opencode.db` |
 | `XDG_DATA_HOME` | 空 | 影响 `OPENCODE_DB` 的默认定位 |
 | `OPENCODE_CONSOLE` | `https://opencode.ai/console/api` | console API 基址 |
+| `OPENCODE_GO_USAGE` | `https://opencode.ai/inference/go/v1/usage` | Go 套餐限额端点（非公开接口）；失败自动忽略 |
 
 ### 会话与 Agent
 

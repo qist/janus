@@ -57,6 +57,7 @@ type Config struct {
 	UsageTTL     time.Duration
 	OpencodeDB   string // OpenCode 的 SQLite 凭据库路径
 	ConsoleURL   string // OpenCode console API 基址
+	GoUsageURL   string // OpenCode Go 套餐用量端点（inference 主机，与 console 不同域）
 
 	// 限流
 	RateLimitPerMin    int  // 每 key/IP 每分钟请求数；0=不限
@@ -309,6 +310,7 @@ func LoadConfig() (Config, error) {
 		UsageTTL:     loader.dur("BRIDGE_USAGE_TTL", 30*time.Second),
 		OpencodeDB:   loader.str("OPENCODE_DB", defaultOpencodeDB()),
 		ConsoleURL:   strings.TrimRight(loader.str("OPENCODE_CONSOLE", "https://opencode.ai/console/api"), "/"),
+		GoUsageURL:   loader.str("OPENCODE_GO_USAGE", "https://opencode.ai/inference/go/v1/usage"),
 
 		MetricsPublic: loader.boolean("BRIDGE_METRICS_PUBLIC", false),
 

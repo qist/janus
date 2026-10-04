@@ -186,6 +186,14 @@ td .bar{margin-top:3px}
     <div class="grid cards" id="billingCards"></div>
   </section>
 
+  <section id="goSec" style="display:none">
+    <h2>Go 套餐限额 <span class="tag" id="goTag"></span></h2>
+    <div class="panel">
+      <div id="goMeters"></div>
+      <div class="dim" style="font-size:12px;margin-top:8px">5 小时滚动 / 每周 / 每月三档；任一到 100% 后请求会被限流，直到对应窗口重置。</div>
+    </div>
+  </section>
+
   <section>
     <h2>累计用量 <span class="tag" id="fetchedAt"></span></h2>
     <div class="grid cards" id="totalCards"></div>
@@ -278,7 +286,7 @@ td .bar{margin-top:3px}
   </section>
 
   <div class="foot">
-    <span>数据来源：<code class="dim">/v1/usage</code>（OpenCode console API）</span>
+    <span>数据来源：<code class="dim">/v1/usage</code>（OpenCode console API + Go inference）</span>
     <span>页面：<code class="dim">/ui</code></span>
     <span id="footTime"></span>
   </div>
@@ -362,6 +370,14 @@ function relTime(iso){
   if(s<86400) return Math.floor(s/3600)+' 小时前';
   return Math.floor(s/86400)+' 天前';
 }
+// 距未来某个时刻还有多久（用于限额重置倒计时）。
+function fmtDur(sec){
+  sec=Math.max(0,Math.floor(Number(sec)||0));
+  var d=Math.floor(sec/86400), h=Math.floor((sec%86400)/3600), m=Math.floor((sec%3600)/60);
+  if(d>0) return d+' 天 '+h+' 小时';
+  if(h>0) return h+' 小时 '+m+' 分钟';
+  return m+' 分钟';
+}
 
 /* ---------- 网络 ---------- */
 function headers(extra){
@@ -406,6 +422,28 @@ function renderBilling(b){
   ];
   el('billingCards').innerHTML=cards.map(cardHTML).join('');
   el('billingMode').textContent=b.mode?('· '+b.mode):'';
+}
+
+/* ---------- 渲染：Go 套餐限额（5h 滚动 / 周 / 月） ---------- */
+function renderGo(g){
+  var sec=el('goSec');
+  if(!g){ sec.style.display='none'; return; }
+  sec.style.display='';
+  var order=[['rolling','5 小时滚动'],['weekly','每周'],['monthly','每月']];
+  el('goMeters').innerHTML=order.map(function(o){
+    var w=g[o[0]]||{};
+    var pct=Math.max(0,Math.min(100,Number(w.percent)||0));
+    var color=pct>=75?'#ff6b6b':(pct>=50?'#f5b942':'#38d2b1');
+    var reset=Number(w.resets_in_sec)>0?('重置于 '+fmtDur(w.resets_in_sec)+'后'):'';
+    return '<div style="margin:12px 0">'+
+      '<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">'+
+        '<span>'+esc(o[1])+'</span>'+
+        '<span class="dim">'+esc(pct.toFixed(1))+'% 已用'+(reset?' · '+esc(reset):'')+'</span></div>'+
+      '<div style="height:10px;background:#1d2745;border-radius:6px;overflow:hidden">'+
+        '<i style="display:block;height:100%;width:'+pct+'%;background:'+color+'"></i></div>'+
+      '</div>';
+  }).join('');
+  el('goTag').textContent='· Go';
 }
 
 /* ---------- 渲染：合计 ---------- */
@@ -709,7 +747,7 @@ function load(){
   return api('/v1/usage').then(function(rep){
     state.report=rep; hideBanner(); renderKeyBadge(false);
     el('source').textContent=(rep.source||'')+(rep.fetched_at?(' · 数据时间 '+new Date(rep.fetched_at).toLocaleString()):'');
-    renderBilling(rep.billing); renderTotals(rep.totals); renderChart(); renderModels();
+    renderBilling(rep.billing); renderGo(rep.go); renderTotals(rep.totals); renderChart(); renderModels();
     el('footTime').textContent='页面刷新于 '+new Date().toLocaleTimeString();
     return fetchText('/metrics').then(function(t){
       renderLive(parseMetrics(t));

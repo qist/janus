@@ -72,8 +72,27 @@ type UsageReport struct {
 	Totals    UsageTotals   `json:"totals"`
 	Models    []ModelUsage  `json:"models"`
 	ByDay     []DayUsage    `json:"by_day"`
+	Go        *GoUsage      `json:"go,omitempty"`
 	FetchedAt time.Time     `json:"fetched_at"`
 	Source    string        `json:"source"`
+}
+
+// GoUsage 是 OpenCode Go / Go Plus 套餐的三窗口限额用量：
+// 5 小时滚动 / 每周 / 每月。它是独立于 Zen 余额的数据模型，
+// 只有 inference 主机（而非 console）暴露该端点，且为非公开接口。
+type GoUsage struct {
+	Rolling GoWindow `json:"rolling"`
+	Weekly  GoWindow `json:"weekly"`
+	Monthly GoWindow `json:"monthly"`
+}
+
+// GoWindow 单个限额窗口。Percent 是已用百分比（0–100），
+// ResetsInSec 是拉取时距重置的秒数（服务端只给绝对时间，这里换算好方便展示）。
+type GoWindow struct {
+	Status      string    `json:"status"`
+	Percent     float64   `json:"percent"`
+	ResetsAt    time.Time `json:"resets_at"`
+	ResetsInSec int64     `json:"resets_in_sec"`
 }
 
 type BillingStatus struct {
@@ -185,6 +204,7 @@ func readCredential(dbPath string) (*consoleCredential, error) {
 
 type UsageClient struct {
 	base   string
+	goURL  string
 	dbPath string
 	hc     *http.Client
 	log    *Logger
@@ -198,6 +218,7 @@ type UsageClient struct {
 func NewUsageClient(cfg Config, log *Logger) *UsageClient {
 	return &UsageClient{
 		base:   cfg.ConsoleURL,
+		goURL:  cfg.GoUsageURL,
 		dbPath: cfg.OpencodeDB,
 		log:    log,
 		ttl:    cfg.UsageTTL,
@@ -232,17 +253,20 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 		return nil, err
 	}
 
-	// 四个端点并发拉，任一失败整体失败（余额最关键）
+	// console 的四个端点并发拉，任一失败整体失败（余额最关键）。
+	// Go 套餐用量走另一个域，属可选数据：失败只降级为不展示。
 	var (
 		wg         sync.WaitGroup
 		billing    billingRaw
 		summary    summaryRaw
 		models     modelsRaw
 		byDay      []dayRaw
+		goRaw      goUsageRaw
 		errB, errS error
 		errM, errD error
+		errG       error
 	)
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		errB = c.get(ctx, cred, "/billing/status", &billing)
@@ -258,6 +282,14 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 	go func() {
 		defer wg.Done()
 		errD = c.get(ctx, cred, "/usage/cost-by-day", &byDay)
+	}()
+	go func() {
+		defer wg.Done()
+		if c.goURL == "" {
+			errG = fmt.Errorf("go usage endpoint not configured")
+			return
+		}
+		errG = c.getURL(ctx, cred, c.goURL, &goRaw)
 	}()
 	wg.Wait()
 
@@ -319,11 +351,21 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 			CostUSD:  d.TotalCostMicroCents.USD(),
 		})
 	}
+	if errG != nil {
+		c.log.Debugf("go plan usage unavailable: %v", errG)
+	} else {
+		rep.Go = goRaw.toUsage()
+	}
 	return rep, nil
 }
 
 func (c *UsageClient) get(ctx context.Context, cred *consoleCredential, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	return c.getURL(ctx, cred, c.base+path, out)
+}
+
+// getURL 与 get 相同，但接受完整 URL（Go 套餐用量在另一个域）。
+func (c *UsageClient) getURL(ctx context.Context, cred *consoleCredential, url string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -350,7 +392,7 @@ func (c *UsageClient) get(ctx context.Context, cred *consoleCredential, path str
 		return fmt.Errorf("HTTP %d: %.200s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("decode %s: %w", path, err)
+		return fmt.Errorf("decode %s: %w", url, err)
 	}
 	return nil
 }
@@ -394,4 +436,43 @@ type dayRaw struct {
 	TotalCostMicroCents microCents `json:"totalCostMicroCents"`
 	TotalTokens         flexInt    `json:"totalTokens"`
 	TotalRequests       flexInt    `json:"totalRequests"`
+}
+
+// goUsageRaw 是 inference 主机 /v1/usage 的响应。
+// 注意字段名是 resetsAt（驼峰），与 console 端点的 snake_case 不同。
+type goUsageRaw struct {
+	Usage struct {
+		Rolling goWindowRaw `json:"rolling"`
+		Weekly  goWindowRaw `json:"weekly"`
+		Monthly goWindowRaw `json:"monthly"`
+	} `json:"usage"`
+}
+
+type goWindowRaw struct {
+	Status   string  `json:"status"`
+	Percent  float64 `json:"percent"`
+	ResetsAt string  `json:"resetsAt"`
+}
+
+// toUsage 把原始响应换算成对外结构；三个窗口都没有状态时返回 nil（非 Go 账号）。
+func (r goUsageRaw) toUsage() *GoUsage {
+	if r.Usage.Rolling.Status == "" && r.Usage.Weekly.Status == "" && r.Usage.Monthly.Status == "" {
+		return nil
+	}
+	now := time.Now()
+	conv := func(w goWindowRaw) GoWindow {
+		out := GoWindow{Status: w.Status, Percent: w.Percent}
+		if t, err := time.Parse(time.RFC3339, w.ResetsAt); err == nil {
+			out.ResetsAt = t
+			if d := t.Sub(now); d > 0 {
+				out.ResetsInSec = int64(d.Seconds())
+			}
+		}
+		return out
+	}
+	return &GoUsage{
+		Rolling: conv(r.Usage.Rolling),
+		Weekly:  conv(r.Usage.Weekly),
+		Monthly: conv(r.Usage.Monthly),
+	}
 }

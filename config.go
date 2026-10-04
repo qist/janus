@@ -77,6 +77,11 @@ type Config struct {
 	// （由桥内部调用 OpenCode 的 /api/websearch 执行）。
 	WebSearchEnabled bool
 
+	// ModelEcho 决定响应里 model 字段回显什么：
+	//   real    （默认）解析后的真实模型，如 opencode-go/mimo-v2.5-pro
+	//   request 客户端请求里的原始模型名，如 claude-sonnet-4-5
+	ModelEcho string
+
 	// 工具调用（把客户端 tools 经内置 MCP server 暴露给 OpenCode agent）
 	ToolCalling    bool          // 是否启用
 	ToolSoftFail   bool          // true=注册失败时降级为无工具继续；false=直接报错
@@ -316,6 +321,7 @@ func LoadConfig() (Config, error) {
 		ResponseTTL:      loader.dur("BRIDGE_RESPONSE_TTL", 30*time.Minute),
 		AnthropicEnabled: loader.boolean("BRIDGE_ANTHROPIC_ENABLED", true),
 		WebSearchEnabled: loader.boolean("BRIDGE_WEBSEARCH_ENABLED", true),
+		ModelEcho:        normalizeModelEcho(loader.str("BRIDGE_MODEL_ECHO", "real")),
 
 		ToolCalling:    loader.boolean("BRIDGE_TOOL_CALLING", true),
 		ToolSoftFail:   loader.boolean("BRIDGE_TOOL_SOFT_FAIL", false),
@@ -384,5 +390,15 @@ func normalizePermissionReply(v string) string {
 		return s
 	default:
 		return "once"
+	}
+}
+
+// normalizeModelEcho 归一化 BRIDGE_MODEL_ECHO：只有 request 才回显请求名，其余一律 real。
+func normalizeModelEcho(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "request", "req", "client", "alias":
+		return "request"
+	default:
+		return "real"
 	}
 }

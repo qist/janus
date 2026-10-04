@@ -47,6 +47,12 @@ func mapUpstreamFailure(f *upstreamFailure) (status int, typ, code, msg string) 
 	m := strings.ToLower(f.Message)
 	t := strings.ToLower(f.Type)
 	switch {
+	case strings.Contains(m, "free tier") || strings.Contains(t, "freetier") ||
+		strings.Contains(m, "only be used from within opencode"):
+		// OpenCode 免费档被网关限定为"仅官方客户端可用"，第三方/API 一律 403。
+		// 这是上游策略，不是桥的问题；给出可操作的提示而不是笼统的鉴权失败。
+		return http.StatusForbidden, "api_error", "free_tier_restricted",
+			f.String() + "；该免费模型仅限 OpenCode 官方客户端使用，请改用 opencode-go/* 订阅模型，或在 OpenCode 里配置自己的 provider"
 	case strings.Contains(t, "quota"), f.Status == http.StatusPaymentRequired,
 		strings.Contains(m, "insufficient"):
 		return http.StatusTooManyRequests, "insufficient_quota", "insufficient_quota", f.String()
@@ -258,12 +264,15 @@ func (e *executor) toolSnapshot() []*pendingCall {
 	return out
 }
 
-// reconcile 用消息接口补齐事件流丢失的尾巴。
-func (e *executor) reconcile(ctx context.Context, promptAt int64) {
+// reconcile 用消息接口补齐事件流丢失的尾巴，返回是否看到了 assistant 消息。
+//
+// 单次对账：周期性 reconcile（tick）调用它；收尾时若还没看到消息，用
+// reconcileTerminal 做短退避重试（终态事件可能早于消息落库）。
+func (e *executor) reconcile(ctx context.Context, promptAt int64) bool {
 	msgs, err := e.srv.up.ListMessages(ctx, e.sid, "asc", 200)
 	if err != nil {
 		e.srv.log.Debugf("reconcile list messages failed: %v", err)
-		return
+		return false
 	}
 
 	var full strings.Builder
@@ -303,7 +312,7 @@ func (e *executor) reconcile(ctx context.Context, promptAt int64) {
 		}
 	}
 	if !sawAssistant {
-		return
+		return false
 	}
 
 	// 推理：整体补齐（推理通常在正文前，重复发送风险低）
@@ -346,6 +355,27 @@ func (e *executor) reconcile(ctx context.Context, promptAt int64) {
 	if finish != "" {
 		e.setFinish(finish)
 	}
+	return true
+}
+
+// reconcileTerminal 在收尾时对账：终态事件（succeeded / idle）有时早于
+// assistant 消息落库，若首次没看到消息就短退避重试，避免把"有输出"误判成空回复。
+func (e *executor) reconcileTerminal(ctx context.Context, promptAt int64) {
+	if e.reconcile(ctx, promptAt) {
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(250 * time.Millisecond):
+		}
+		if e.reconcile(ctx, promptAt) {
+			return
+		}
+	}
+	e.srv.log.Warnf("reconcile gave up for %s (no assistant message after 5s)", e.sid)
 }
 
 // ---------- 事件循环 ----------
@@ -408,7 +438,7 @@ func (e *executor) runEvents(ctx context.Context, sub *subscription, promptAt in
 			// wait() 返回说明 agent loop 已空闲。再确认一次 idle 时间戳，
 			// 避免"prompt 尚未开始执行"时的误判，并取回上游 outcome。
 			if idle, outcome := e.sessionState(ctx, promptAt); idle {
-				e.reconcile(ctx, promptAt)
+				e.reconcileTerminal(ctx, promptAt)
 				e.signal(e.terminalSignal(outcome))
 				return
 			}
@@ -441,6 +471,9 @@ func (e *executor) runEvents(ctx context.Context, sub *subscription, promptAt in
 			}
 			e.reconcile(ctx, promptAt)
 			if idle, outcome := e.sessionState(ctx, promptAt); idle {
+				// 事件流可能丢了 succeeded 事件，这里才判到空闲；同样要对账
+				// （消息可能还没落库，reconcileTerminal 会退避重试）。
+				e.reconcileTerminal(ctx, promptAt)
 				e.signal(e.terminalSignal(outcome))
 				return
 			}
@@ -532,10 +565,14 @@ func (e *executor) handleEvent(ctx context.Context, ev OCEvent, promptAt int64) 
 	case "session.tool.input.started":
 		var d evtToolInput
 		if json.Unmarshal(ev.Data, &d) == nil && d.Name != "" {
+			e.srv.log.Debugf("tool event started: name=%q text=%q data=%s", d.Name, d.Text, truncate(string(ev.Data), 400))
 			e.mu.Lock()
 			e.toolCalls++
 			e.mu.Unlock()
-			if e.toolAnn {
+			// MCP 工具（客户端声明的 tools + 桥自己执行的 web_search）在事件里
+			// 统一叫 "execute"，而真正的工具调用已通过 tool bridge 以
+			// tool_calls / tool_use 下发给客户端，这条注解对它们纯属噪声，跳过。
+			if e.toolAnn && !isMCPPlaceholderTool(d.Name) {
 				_ = e.addToolText(ToolAnnotation(d.Name, ""))
 			}
 		}
@@ -547,7 +584,10 @@ func (e *executor) handleEvent(ctx context.Context, ev OCEvent, promptAt int64) 
 		}
 		var d evtToolInput
 		if json.Unmarshal(ev.Data, &d) == nil && d.Name != "" && d.Text != "" {
-			_ = e.addToolText(ToolAnnotation(d.Name, d.Text))
+			e.srv.log.Debugf("tool event ended: name=%q text=%q", d.Name, truncate(d.Text, 200))
+			if !isMCPPlaceholderTool(d.Name) {
+				_ = e.addToolText(ToolAnnotation(d.Name, d.Text))
+			}
 		}
 
 	case "session.step.ended":
@@ -561,12 +601,12 @@ func (e *executor) handleEvent(ctx context.Context, ev OCEvent, promptAt int64) 
 		// usage 是累计值，step.ended 已经逐段累加，这里忽略避免重复计数
 
 	case "session.execution.succeeded":
-		e.reconcile(ctx, promptAt)
+		e.reconcileTerminal(ctx, promptAt)
 		e.signal("succeeded")
 		return true
 
 	case "session.execution.failed":
-		e.reconcile(ctx, promptAt)
+		e.reconcileTerminal(ctx, promptAt)
 		e.signal("failed")
 		return true
 
@@ -1026,7 +1066,7 @@ func (s *Server) replyCached(w http.ResponseWriter, r *http.Request,
 	// 没有可用缓存（例如重启过）：用历史最后一条 assistant 兜底
 	text := lastAssistant(req.Messages)
 	resp := buildResponse("chatcmpl-"+newID(), time.Now().Unix(),
-		modelName(ref, req.Model), runResult{text: text, finish: "stop"})
+		s.echoModel(ref, req.Model), runResult{text: text, finish: "stop"})
 	if req.Stream {
 		s.writeCachedStream(w, req, resp)
 		return
@@ -1055,6 +1095,15 @@ func modelName(ref OCModelRef, fallback string) string {
 		return ref.ProviderID + "/" + ref.ID
 	}
 	return fallback
+}
+
+// echoModel 按 BRIDGE_MODEL_ECHO 决定响应 model 字段：
+// request=回显客户端请求里的原始名（如 claude-sonnet-4-5），real（默认）=回显真实模型。
+func (s *Server) echoModel(ref OCModelRef, requested string) string {
+	if s.cfg.ModelEcho == "request" && strings.TrimSpace(requested) != "" {
+		return strings.TrimSpace(requested)
+	}
+	return modelName(ref, requested)
 }
 
 func firstNonEmpty(vals ...string) string {

@@ -1,5 +1,10 @@
 # 13 维审计报告
 
+> ⚠️ **历史存档**：本报告完成于早期阶段。其中 ④ Tool Calling、⑩ Responses API
+> 当时标注"未实现"，**现已实现**（Tool Calling 走内置 MCP 透传，Responses API
+> 已支持流式/非流式 + 事件状态机 + `web_search` 服务端工具），下方对应小节已就地更新。
+> 其余结论仍具参考价值。
+
 对照 13 个维度逐条审代码 + 跑运行时验证。✅ = 已实现并实测通过，
 ⚠️ = 实现但有限制，❌ = 未实现。**本轮修掉的问题单独标 🔧。**
 
@@ -97,16 +102,16 @@ Previous write at ... by goroutine 110:
 
 ---
 
-## ④ Tool Calling ❌
+## ④ Tool Calling ✅（已实现）
 
-**未实现**（Phase 3）。客户端声明的 `tools` 被解析但**不透传**，
-所以客户端拿不到 `tool_calls`，只能拿到纯文本。
+**已实现**（内置 MCP 透传）：客户端声明的 `tools` 经内置 MCP server（`/mcp/{token}`）
+暴露给 OpenCode agent；agent 调用时桥把 `tool_calls` 回给客户端，客户端在后续请求里
+回填 `tool_result` / `function_call_output` 唤醒挂起调用（见 `toolbridge.go` / `mcp.go` /
+`toolflow.go`）。要点：MCP 注册名带工具指纹 `ob-<key>-<fp>`、空闲即释放、防串会话守卫、
+`parallel_tool_calls=false` 串行返回。
 
-缓解：OpenCode agent 自己的工具活动以 `<opencode-tool>` 注释插进 `content`
-（可用 `BRIDGE_TOOL_ANNOTATIONS=false` 关闭），注释在重放历史时会被剥掉。
-
-**影响**：Trae/CodeBuddy 的 agent 模式会退化。需要在意的客户端应当：
-要么只用普通对话，要么等 Phase 3 的 MCP 透传（设计见 `DESIGN.md §5.7`）。
+> 历史记录（当时未实现）：tools 被解析但不透传，只有 `<opencode-tool>` 注释。
+> 该限制已随上述实现解除；`<opencode-tool>` 注释仍可通过 `BRIDGE_TOOL_ANNOTATIONS=false` 关闭。
 
 ---
 
@@ -185,17 +190,15 @@ OpenCode session ses_…   ← 上下文存这里，prompt 只发增量
 
 ---
 
-## ⑩ Responses API ❌
+## ⑩ Responses API ✅（已实现）
 
-**未实现**。`POST /v1/responses` 返回 404（提示已列出实际实现的端点）。
+**已实现**：`POST /v1/responses`（流式 + 非流式）、`GET`/`DELETE /v1/responses/{id}`。
+流式事件为显式状态机（`response.created → output_item.added → content_part.added →
+output_text.delta → … → response.completed`），item id 与最终 output 一致；
+支持 `previous_response_id` 续链、`instructions`、`store`、`parallel_tool_calls`，
+以及服务端 `web_search`（`{"type":"web_search"}`，由桥内部执行，见 `responses.go`）。
 
-**影响**：较新的客户端/SDK 默认走 `openai-responses` 协议
-（上游 OpenCode 自己调 `/inference/go/openai/v1/responses` 就是这条路）。
-只认 Responses API 的客户端目前无法使用本桥。
-
-**建议**：若目标客户端会用它，值得做一版最小实现
-（`input`/`instructions`/`stream` → `output[].content[].output_text`）。
-请求/响应形状与 chat 差异较大，不是简单别名。
+> 历史记录（当时未实现）：返回 404。已随 `responses.go` / `responses_stream.go` 落地。
 
 ---
 
@@ -296,3 +299,21 @@ auto 发现模式下该变量是空的，提示变成 "cannot reach opencode ser
 | 13 | `newID` 用自制 LCG（可预测） | `sse.go` | 中（安全） |
 
 单测从 88 增至 114，`-race` 全绿。
+
+---
+
+## 后续更新（第二轮）
+
+| 项 | 说明 |
+|---|---|
+| Responses `web_search` | Responses API 的 `{"type":"web_search"}` 以前被静默丢弃，现与 Anthropic 侧同一实现（桥内部调 `/api/websearch`，不甩回客户端） |
+| 免费档 403 | `FreeTierError` 现映射为 `403 free_tier_restricted` + 可操作提示（改用 `opencode-go/*` 或自配 provider），Anthropic 侧为 `permission_error` |
+| 模型回显 | 新增 `BRIDGE_MODEL_ECHO=real|request`，`request` 时响应 `model` 回显客户端请求名（如 `claude-sonnet-4-5`） |
+| MCP 注解噪声 | MCP 工具在事件里统一叫 `execute`，其调用已由 tool bridge 以 `tool_calls` 下发，故不再注入 `<opencode-tool>` 注解（内置工具不受影响） |
+| **高并发空回复（🔧 修复）** | `-race`/功能测试发现不了：100 并发压测下约 15% 返回空回复。根因是**终态事件早于 assistant 消息落库**：`session.execution.succeeded` / idle 判定后 `reconcile` 首次查不到消息就返回，误判空。改为 `reconcileTerminal` 在收尾时短退避重试（≤5s），并让 tick 空闲收尾路径也走它。100 并发由 85/100 → **100/100，零串会话**；RSS 稳定 ~45MB 无泄漏 |
+| 压测工具 | 新增 `tests/stress.py` + `make stress`（并发不串会话 + 延迟分位 + RSS） |
+| CI | 增加 `make test-race` |
+| 部署 | 新增 `Dockerfile`（distroless 非 root 静态）与 `deploy/janus.service` |
+| 文档 | 本文件 ④/⑩ 更正为已实现；`COMPAT.md` 补免费档 403 提醒 |
+
+**已知限制（未改）**：单会话 `lastMessages` 无独立长度上限（有全局 `BRIDGE_HISTORY_MAX_BYTES` 只管落库，内存里仍随轮数增长，由会话数上限兜底）。

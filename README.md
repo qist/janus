@@ -60,6 +60,7 @@ INFO  event stream connected (text/event-stream)
 make build          # 本机二进制（-trimpath + 注入 Version/Commit/Date）
 ./janus --version   # Janus v0.1.0 (commit abc1234, built ...)
 make test           # 单元测试
+make test-race      # 竞态检测（需本机 C 工具链）
 make vet            # go vet
 make dist-linux     # Linux 全架构发布包：amd64 / arm64 / arm / 386
 ```
@@ -67,7 +68,8 @@ make dist-linux     # Linux 全架构发布包：amd64 / arm64 / arm / 386
 - 版本号来源：`make VERSION=...` > `git describe --tags` > `VERSION` 文件 > `dev`
 - Linux 发布包为**纯静态**二进制（`CGO_ENABLED=0`），产物在 `dist/janus_<version>_linux_<arch>.tar.gz`
 - 推 `v*` tag 会触发 GitHub Actions（`.github/workflows/release.yml`）自动出 Release + 全架构附件；
-  普通 push / PR 走 `.github/workflows/ci.yml`（vet + test + build + `--version`）
+  普通 push / PR 走 `.github/workflows/ci.yml`（vet + test + **test-race** + build + `--version`）
+- **Docker / systemd 部署**：见 `deploy/`（`Dockerfile` 基于 distroless 非 root 静态镜像；`deploy/janus.service` 为加固后的 systemd 单元）
 
 ### 客户端配置
 
@@ -265,6 +267,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `BRIDGE_RESPONSES_ENABLED` | `true` | 是否开放 `/v1/responses` |
 | `BRIDGE_RESPONSE_TTL` | `30m` | 已保存响应的保留时长（`previous_response_id` 依赖） |
 | `BRIDGE_ANTHROPIC_ENABLED` | `true` | 是否开放 `/v1/messages`（Anthropic Messages API，供 Claude Code） |
+| `BRIDGE_MODEL_ECHO` | `real` | 响应 `model` 字段回显什么：`real`=解析后的真实模型（如 `opencode-go/mimo-v2.5-pro`）；`request`=客户端请求里的原始名（如 `claude-sonnet-4-5`） |
 | `BRIDGE_DB` | 默认 `$XDG_DATA_HOME/janus/janus.db` | 持久化库路径（SQLite）。不设=默认路径；`memory`/`off`=纯内存。开启后**响应、会话映射与 Chat 历史快照**都落盘，Chat / Responses 均可跨进程重启续接 |
 | `BRIDGE_HISTORY_MAX_BYTES` | `1048576` | 落库的 Chat 历史快照上限（字节）；超过只存会话映射。0=不限 |
 | `BRIDGE_CONV_TTL` | `168h` | 持久化的会话映射/历史保留时长（janitor 清理） |
@@ -359,7 +362,8 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-3-5-haiku
 - **模型列表（Anthropic 格式）**：`GET /anthropic/v1/models`（或带 `anthropic-version` 头访问 `/v1/models`）
   返回 Claude Code 模型选择器认的格式，`display_name` 里带上“实际映射到谁”，方便核对
 - **Web Search（服务端工具）**：CC 声明的 `web_search` 由 Janus **内部执行**（调用上游 OpenCode 的
-  `/api/websearch`），结果回喂给 agent，不会作为 `tool_use` 甩回 CC；`BRIDGE_WEBSEARCH_ENABLED=false` 可关闭
+  `/api/websearch`），结果回喂给 agent，不会作为 `tool_use` 甩回 CC；`BRIDGE_WEBSEARCH_ENABLED=false` 可关闭。
+  OpenAI **Responses API** 的 `{"type":"web_search"}` 同样支持（同一实现）
 - **会话锚点**：Claude Code 的 `x-claude-code-session-id` 头会自动作为会话键，不同 CC 会话天然隔离
 - **配完整模型名（DeepSeek 式）**：CC 也可以直接把 `ANTHROPIC_MODEL` 设成真实模型，如
   `opencode-go/deepseek-v4.1-flash`。CC 若用 `mimo-v2.5-pro[1m]` 这种**长上下文标记**，

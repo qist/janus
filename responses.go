@@ -263,6 +263,20 @@ func responsesToolsToSpecs(raw json.RawMessage) []ToolSpec {
 	}
 	out := make([]ToolSpec, 0, len(items))
 	for _, it := range items {
+		// OpenAI Responses 的服务端工具（web_search / web_search_preview）是扁平定义、
+		// 没有 name 字段。这里把它暴露成名为 web_search 的工具，由桥内部执行
+		// （与 Anthropic 的 web_search 服务端工具同一套，见 anthropic.go）。
+		if strings.HasPrefix(it.Type, "web_search") {
+			out = append(out, ToolSpec{
+				Type: "function",
+				Function: ToolFunction{
+					Name:        webSearchToolName,
+					Description: "搜索网页，返回标题/链接/摘要",
+					Parameters:  webSearchSchema,
+				},
+			})
+			continue
+		}
 		name, desc, params := it.Name, it.Description, it.Parameters
 		// 兼容把 chat 风格（嵌 function）也塞进来的客户端
 		if name == "" && it.Function != nil {
@@ -277,6 +291,25 @@ func responsesToolsToSpecs(raw json.RawMessage) []ToolSpec {
 		})
 	}
 	return out
+}
+
+// responsesHasWebSearch 判断 Responses 请求是否声明了 web_search 服务端工具。
+func responsesHasWebSearch(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var items []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &items) != nil {
+		return false
+	}
+	for _, it := range items {
+		if strings.HasPrefix(it.Type, "web_search") {
+			return true
+		}
+	}
+	return false
 }
 
 // responsesInputToMessages 把 input 转成内部消息。
@@ -610,6 +643,15 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Responses 的 web_search 是服务端工具：声明后由桥内部执行，不甩回客户端。
+	if s.cfg.WebSearchEnabled && responsesHasWebSearch(req.Tools) {
+		if sess := s.tools.ByKey(conv.Key); sess != nil {
+			sess.setServerTools(map[string]serverToolFunc{
+				webSearchToolName: s.webSearchServerTool(dir),
+			})
+		}
+	}
+
 	// ---- 续链：先回填上一轮的工具结果，再放行 ----
 	var sub *subscription
 	if prev != nil && len(conv.pendingToolCalls()) > 0 && len(toolResults) > 0 {
@@ -695,7 +737,7 @@ func (s *Server) finishResponses(ctx context.Context, w http.ResponseWriter, r *
 	req ResponsesRequest, ref OCModelRef, conv *Conversation,
 	sub *subscription, promptAt int64, dir string) {
 
-	model := modelName(ref, req.Model)
+	model := s.echoModel(ref, req.Model)
 
 	if req.Stream {
 		s.streamResponses(ctx, w, r, req, conv, sub, promptAt, model)

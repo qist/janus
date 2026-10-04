@@ -97,6 +97,14 @@ func stripToolAnnotations(s string) string {
 	return strings.TrimSpace(sb.String())
 }
 
+// mcpPlaceholderTool 是 OpenCode 事件里给 MCP 工具起的通用名。
+// MCP 工具的真实调用已由 tool bridge 以 tool_calls 下发给客户端，注解属噪声。
+const mcpPlaceholderTool = "execute"
+
+func isMCPPlaceholderTool(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), mcpPlaceholderTool)
+}
+
 // ToolAnnotation 生成注入 content 的工具活动注释。
 func ToolAnnotation(name, input string) string {
 	in := strings.TrimSpace(input)

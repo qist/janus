@@ -17,7 +17,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	// 避免空闲 server 被同 location 的其它会话看到（串会话）。
 	defer s.releaseToolsIfIdle(conv)
 
-	model := modelName(ref, req.Model)
+	model := s.echoModel(ref, req.Model)
 	sw, err := newSSE(w, model)
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error(), "")
@@ -221,7 +221,7 @@ func (s *Server) blockingCompletion(ctx context.Context, w http.ResponseWriter,
 	// 同 streamCompletion：本轮不需要回填工具结果时注销 MCP server。
 	defer s.releaseToolsIfIdle(conv)
 
-	model := modelName(ref, req.Model)
+	model := s.echoModel(ref, req.Model)
 	t, err := s.runBlocking(ctx, conv, model, sub, promptAt,
 		effectiveMaxTokens(req.MaxTokens, req.MaxCompletionTokens), parallelDefault(req.ParallelToolCalls))
 	if t != nil {

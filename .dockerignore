@@ -1,0 +1,12 @@
+# 不要把这些打进镜像
+.git
+.github
+dist
+janus
+janus.env
+.venv
+__pycache__
+*.log
+tests
+docs
+scripts

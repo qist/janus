@@ -1,10 +1,15 @@
 # 兼容性实测记录
 
-本文件记录 bridge 对 OpenAI 协议的实现程度，以及对接上游 OpenCode 时踩到的坑。
+本文件记录 Janus 对 OpenAI 协议的实现程度，以及对接上游 OpenCode 时踩到的坑。
 结论均来自真实请求，不是推测。
 
-环境：OpenCode server v2.0.22、`opencode/fledge-alpha-free`（默认模型）、
-OpenAI Python SDK **3.24.0**、bridge 版本见 git 历史。
+环境：OpenCode server v2.0.22、OpenAI Python SDK **3.24.0**、bridge 版本见 git 历史。
+
+> ⚠️ **时效提醒**：本文件早期用 `opencode/fledge-alpha-free` 等 `*-free` 模型做验证。
+> OpenCode 后来把免费档限定为"仅官方客户端可用"，经 API/桥调用会 **403
+> `free tier can only be used from within OpenCode`**（Janus 映射为
+> `403 free_tier_restricted`）。现在请用 `opencode-go/*` 订阅模型，或以带
+> `provider/` 前缀的自有 provider 模型复现。
 
 ## 1. 端到端兼容矩阵
 
@@ -180,13 +185,12 @@ SDK 对这个组合有成熟处理，会提示充值而不是无脑重试。
 
 | 模型 | 结果 |
 |---|---|
-| `opencode/fledge-alpha-free` 等 `*-free` | ✅ 正常 |
-| `opencode-go/*`（`gpt-6-luna`、`deepseek-v4.1-flash`…） | ✅ 正常（独立额度） |
+| `opencode/fledge-alpha-free` 等 `*-free` | ❌ 403 `free tier can only be used from within OpenCode`（**已过时**：免费档现仅限官方客户端，经 API 一律 403） |
+| `opencode-go/*`（`gpt-6-luna`、`deepseek-v4.1-flash`…） | ✅ 正常（订阅额度，当前推荐） |
 | `opencode/claude-sonnet-5-5`、`opencode/gpt-6.1-sol` 等付费档 | ❌ 429 `insufficient_quota` |
 
-所以"用哪个模型"要先看余额：免费档和 `opencode-go` 不受影响，
-`opencode/*` 的付费档会被拒。用 `GET /v1/usage` 看余额，
-用 `GET /v1/models?provider=opencode-go` 列可用的。
+所以"用哪个模型"要先看余额与档位：现在实际可用的基本是 `opencode-go/*`。
+用 `GET /v1/usage` 看余额，用 `GET /v1/models?provider=opencode-go` 列可用的。
 
 ### Responses API（实测）
 

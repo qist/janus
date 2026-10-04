@@ -281,6 +281,11 @@ func (srv *Server) mapUpstreamError(err error) (status int, typ, msg string) {
 	var ae *APIError
 	if errors.As(err, &ae) {
 		switch {
+		case ae.Status == http.StatusForbidden &&
+			strings.Contains(strings.ToLower(ae.Msg), "free tier"):
+			// 免费档仅限官方客户端：透传原因 + 可操作提示
+			return http.StatusForbidden, "api_error",
+				ae.Msg + "；该免费模型仅限 OpenCode 官方客户端使用，请改用 opencode-go/* 订阅模型，或在 OpenCode 里配置自己的 provider"
 		case ae.Status == http.StatusUnauthorized || ae.Status == http.StatusForbidden:
 			return http.StatusBadGateway, "api_error", "opencode server authentication failed"
 		case ae.Status == http.StatusNotFound:

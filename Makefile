@@ -11,7 +11,7 @@ LDFLAGS := -s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.Dat
 # Linux 发布架构（对应 GitHub Release 里的 janus_<version>_linux_<arch>.tar.gz）
 LINUX_ARCHES := amd64 arm64 arm 386
 
-.PHONY: all build test vet fmt run dist-linux compat smoke clean
+.PHONY: all build test test-race vet fmt run dist-linux compat smoke stress clean
 
 all: vet test build
 
@@ -20,6 +20,10 @@ build:
 
 test:
 	$(GO) test ./...
+
+# 竞态检测（需要 cgo/本机 C 工具链）
+test-race:
+	CGO_ENABLED=1 $(GO) test -race ./...
 
 vet:
 	$(GO) vet ./...
@@ -36,6 +40,11 @@ run: build
 #   make compat BRIDGE_MODEL=opencode-go/deepseek-v4.1-flash:max
 compat:
 	BRIDGE_MODEL="$(BRIDGE_MODEL)" python3 tests/compat_matrix.py
+
+# 并发压测（需先起服务 + 装 openai）。N 默认 100：
+#   make stress BRIDGE_MODEL=opencode-go/deepseek-v4.1-flash N=100
+stress:
+	BRIDGE_MODEL="$(BRIDGE_MODEL)" N="$(N)" JANUS_PID="$$(pgrep -x $(BINARY) | head -1)" python3 tests/stress.py
 
 # Claude Code 冒烟（Anthropic 官方 SDK）。需先起服务 + 装 anthropic：
 #   make smoke BRIDGE_MODEL=opencode-go/deepseek-v4.1-flash:max

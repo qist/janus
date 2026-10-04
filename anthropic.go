@@ -379,7 +379,10 @@ func (s *Server) anthropicErrorFromUpstream(err error) (int, string, string) {
 		typ = "invalid_request_error"
 	case http.StatusTooManyRequests:
 		typ = "rate_limit_error"
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusForbidden:
+		// 目前只有"免费档仅限官方客户端"走 403；用 permission_error 更贴切
+		typ = "permission_error"
+	case http.StatusUnauthorized:
 		typ = "authentication_error"
 	}
 	return status, typ, msg
@@ -568,7 +571,7 @@ func (s *Server) resumeAnthropic(ctx context.Context, w http.ResponseWriter, r *
 func (s *Server) finishAnthropic(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	req AnthropicRequest, ref OCModelRef, conv *Conversation, sub *subscription, promptAt int64) {
 
-	model := modelName(ref, req.Model)
+	model := s.echoModel(ref, req.Model)
 	if req.Stream {
 		s.streamAnthropic(ctx, w, r, req, ref, conv, sub, promptAt, model)
 		return

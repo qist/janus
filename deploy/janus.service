@@ -1,0 +1,36 @@
+[Unit]
+Description=Janus - unified AI/agent gateway (OpenAI + Anthropic)
+Documentation=https://github.com/qist/janus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 建议用独立用户运行。
+# 说明：若要使用「自动发现上游」与 /v1/usage（读取 OpenCode 的配置/凭据），
+# 该用户需要对应文件的读权限；不需要就设 OPENCODE_URL 固定上游、
+# 并设 BRIDGE_USAGE_ENABLED=false。
+User=janus
+Group=janus
+
+# 配置文件与 janus.env.example 同格式（KEY=VALUE）
+Environment=JANUS_CONFIG=/etc/janus/janus.env
+# SQLite 持久化库所在目录（BRIDGE_DB 为空时用 XDG_DATA_HOME/janus/janus.db）
+Environment=XDG_DATA_HOME=/var/lib/janus
+
+ExecStart=/usr/local/bin/janus
+Restart=on-failure
+RestartSec=3
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/janus
+# SSE 长连接较多时放宽文件描述符
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

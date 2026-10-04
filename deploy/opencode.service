@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenCode V2 shared server (for janus)
+Documentation=https://opencode.ai/v2/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 与桌面端相同的用户/家目录，才能读到同一份配置与凭据库
+User=root
+Environment=HOME=/root
+
+# 以 V2 共享服务模式前台运行：端口/密码持久化在
+#   ~/.config/opencode/service.json
+# 修改端口：opencode service set port <n>（会重启服务）
+#
+# --hostname 0.0.0.0 必须：桌面端（Windows）是从 WSL 网卡 IP 连进来的，
+# 只绑 127.0.0.1 它连不上，就会自己另开一个私有 server，导致双 server。
+ExecStart=/root/.opencode/bin/opencode serve --service --hostname 0.0.0.0
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -53,6 +53,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	sid := conv.snapshotSessionID()
 	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
+	ex.parallel = parallelDefault(req.ParallelToolCalls)
 	ex.budget = newTokenBudget(effectiveMaxTokens(req.MaxTokens, req.MaxCompletionTokens))
 	ex.writeText = func(t string) error { return sw.deltaText(t) }
 	ex.writeReasoning = func(t string) error { return sw.deltaReasoning(t) }
@@ -160,12 +161,13 @@ type turnOutcome struct {
 // runBlocking 跑完一轮（非流式），只做汇总不做 HTTP 收尾。
 // 超时/断连时返回 err；工具调用、空回复等都在返回值里体现。
 func (s *Server) runBlocking(ctx context.Context, conv *Conversation, model string,
-	sub *subscription, promptAt int64, maxTokens int) (*turnOutcome, error) {
+	sub *subscription, promptAt int64, maxTokens int, parallel bool) (*turnOutcome, error) {
 
 	sid := conv.snapshotSessionID()
 	started := time.Now()
 	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
+	ex.parallel = parallel
 	ex.budget = newTokenBudget(maxTokens)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -221,7 +223,7 @@ func (s *Server) blockingCompletion(ctx context.Context, w http.ResponseWriter,
 
 	model := modelName(ref, req.Model)
 	t, err := s.runBlocking(ctx, conv, model, sub, promptAt,
-		effectiveMaxTokens(req.MaxTokens, req.MaxCompletionTokens))
+		effectiveMaxTokens(req.MaxTokens, req.MaxCompletionTokens), parallelDefault(req.ParallelToolCalls))
 	if t != nil {
 		s.metrics.addTokens(t.res.usage.PromptTokens, t.res.usage.CompletionTokens)
 	}

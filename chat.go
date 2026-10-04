@@ -80,6 +80,7 @@ type executor struct {
 	writeText      func(string) error
 	writeReasoning func(string) error
 	toolAnn        bool
+	parallel       bool // 是否允许一轮并行返回多个 tool_calls（OpenAI 默认 true）
 
 	// 汇总
 	mu sync.Mutex
@@ -105,7 +106,7 @@ type executor struct {
 }
 
 func newExecutor(srv *Server, sid, model string, toolAnn bool) *executor {
-	return &executor{srv: srv, sid: sid, model: model, toolAnn: toolAnn, done: make(chan string, 4)}
+	return &executor{srv: srv, sid: sid, model: model, toolAnn: toolAnn, parallel: true, done: make(chan string, 4)}
 }
 
 func (e *executor) addText(s string) error {
@@ -388,7 +389,14 @@ func (e *executor) runEvents(ctx context.Context, sub *subscription, promptAt in
 
 		case <-toolWatch:
 			// agent 调用了客户端的工具：把这一批挂起调用收上来，结束本轮。
-			if pend := e.toolSess.takePending(); len(pend) > 0 {
+			// parallel=false 时只取最早的一个，其余留在会话里，等客户端回填后再逐个给。
+			var pend []*pendingCall
+			if e.parallel {
+				pend = e.toolSess.takePending()
+			} else if p := e.toolSess.takeOldest(); p != nil {
+				pend = []*pendingCall{p}
+			}
+			if len(pend) > 0 {
 				e.mu.Lock()
 				e.toolsOut = append(e.toolsOut, pend...)
 				e.mu.Unlock()

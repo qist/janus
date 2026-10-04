@@ -55,6 +55,7 @@ type pendingCall struct {
 	MCPName  string // 暴露给 agent 的名字（带命名空间）
 	Args     string // JSON 字符串
 
+	ord    int64 // 到达顺序（parallel=false 时按它逐个返回）
 	result chan ToolResult
 	once   sync.Once
 }
@@ -72,6 +73,7 @@ type toolSession struct {
 
 	mu      sync.Mutex
 	pending map[string]*pendingCall // MCPName -> pending
+	ordSeq  int64                   // 到达序号
 	waiters []chan struct{}         // 有新 pending 时通知执行器
 	closed  bool
 }
@@ -256,6 +258,8 @@ func (s *toolSession) park(callID, original, mcpName, args string) *pendingCall 
 		p.complete(ToolResult{Content: "bridge: session closed", IsError: true})
 		return p
 	}
+	s.ordSeq++
+	p.ord = s.ordSeq
 	s.pending[mcpName] = p
 	waiters := s.waiters
 	s.mu.Unlock()
@@ -305,8 +309,25 @@ func (s *toolSession) takePending() []*pendingCall {
 		out = append(out, p)
 	}
 	s.pending = map[string]*pendingCall{}
-	sort.Slice(out, func(i, j int) bool { return out[i].CallID < out[j].CallID })
+	sort.Slice(out, func(i, j int) bool { return out[i].ord < out[j].ord })
 	return out
+}
+
+// takeOldest 取出并移除最早挂起的那个调用（parallel=false 时逐个返回）。
+// 没有则返回 nil。
+func (s *toolSession) takeOldest() *pendingCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var oldest *pendingCall
+	for _, p := range s.pending {
+		if oldest == nil || p.ord < oldest.ord {
+			oldest = p
+		}
+	}
+	if oldest != nil {
+		delete(s.pending, oldest.MCPName)
+	}
+	return oldest
 }
 
 func (s *toolSession) hasPending() bool {

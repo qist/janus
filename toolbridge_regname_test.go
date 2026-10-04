@@ -58,3 +58,44 @@ func TestWaitForWaiter(t *testing.T) {
 		t.Fatal("unwatch 后不应返回 true")
 	}
 }
+
+// parallel_tool_calls=false 时按到达顺序逐个取出；takePending 也保持到达顺序。
+func TestToolSessionTakeOldestOrder(t *testing.T) {
+	b := NewToolBridge(NewLogger("error"), 0)
+
+	sess := b.Register("f:ord", nil)
+	c1 := sess.park("call_1", "a", "m_a", "{}")
+	c2 := sess.park("call_2", "b", "m_b", "{}")
+	c3 := sess.park("call_3", "c", "m_c", "{}")
+	for i, want := range []*pendingCall{c1, c2, c3} {
+		if got := sess.takeOldest(); got != want {
+			t.Fatalf("第 %d 次 takeOldest = %v, want %s", i, got, want.CallID)
+		}
+	}
+	if sess.takeOldest() != nil {
+		t.Fatal("取完后应为 nil")
+	}
+
+	// takePending 顺序
+	sess2 := b.Register("f:ord2", nil)
+	sess2.park("call_x", "x", "m_x", "{}")
+	sess2.park("call_y", "y", "m_y", "{}")
+	all := sess2.takePending()
+	if len(all) != 2 || all[0].CallID != "call_x" || all[1].CallID != "call_y" {
+		t.Fatalf("takePending 顺序不对: %+v", all)
+	}
+}
+
+func TestParallelDefault(t *testing.T) {
+	if !parallelDefault(nil) {
+		t.Error("未设置应默认并行(true)")
+	}
+	f := false
+	if parallelDefault(&f) {
+		t.Error("false 应返回 false")
+	}
+	tr := true
+	if !parallelDefault(&tr) {
+		t.Error("true 应返回 true")
+	}
+}

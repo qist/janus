@@ -536,6 +536,16 @@ turn3  同一 session                     delta=61B  →  BLUE-42
 的首条历史**完全相同**时，会被当作同一条会话线（这是"多轮自动续接"所依赖的匹配）。要强隔离，
 请让客户端带 `user` 或显式会话头。
 
+### 并行工具调用（`parallel_tool_calls`）
+
+OpenAI 默认允许一轮返回多个 `tool_calls`。Janus 默认（缺省 / `true`）把 agent 在同一轮里
+发起的多个工具调用**一次性**回给客户端（流式 `index` 0/1/2…，`tool_call_id` 原样保留）。
+
+请求里带 `"parallel_tool_calls": false` 时，桥改为**串行**：一轮只回一个 `tool_call`，
+客户端回填结果后再回下一个（agent 已并行发起的调用会按到达顺序逐个释放），全部回填完
+才让 agent 继续。适合只支持单个工具调用的客户端。Chat Completions 与 Responses 都支持；
+Responses 响应里会回显 `parallel_tool_calls`。
+
 ### 流式转换
 
 驱动一次执行需要同时消费 4 类信号，缺一不可：

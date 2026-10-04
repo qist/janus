@@ -753,6 +753,10 @@ OpenCode session
   即同一个 Janus Conversation / 同一个 OpenCode session，每轮只发新增 `input`。
 - 两种 API **共用同一个 Store + executor + ToolBridge**，只是键空间不同（`x:` / `f:` / `resp:`）。
 
+**并行 / 串行工具调用**：默认并行——agent 同一轮发起的多个调用一次性回给客户端。
+请求带 `parallel_tool_calls:false` 时，executor 每轮只 `takeOldest()` 一个（其余留在
+会话里），客户端回填后逐个释放，实现串行语义；两个 API 都支持。
+
 隔离保证（均有测试）：
 
 | 场景 | 期望行为 | 测试 |

@@ -20,6 +20,9 @@ type ChatRequest struct {
 	Tools           []ToolSpec      `json:"tools,omitempty"`
 	ToolChoice      json.RawMessage `json:"tool_choice,omitempty"`
 	User            string          `json:"user,omitempty"`
+	// ParallelToolCalls=false 时桥会把同一轮里的多个工具调用串行返回
+	// （每次只给客户端一个，等它回填结果再给下一个）。默认（缺省/true）并行返回。
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 	// temperature / top_p / n / stop / logprobs 等 OpenCode 不支持的字段
 	// 会被 encoding/json 静默忽略 —— 这正是我们要的宽容行为。
 }
@@ -27,6 +30,9 @@ type ChatRequest struct {
 type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
+
+// parallelDefault 返回是否允许一轮并行返回多个 tool_calls（OpenAI 默认 true）。
+func parallelDefault(p *bool) bool { return p == nil || *p }
 
 type ToolSpec struct {
 	Type     string       `json:"type"`

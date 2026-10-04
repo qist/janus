@@ -50,6 +50,10 @@ type ResponsesRequest struct {
 	Store       *bool           `json:"store,omitempty"`
 	Metadata    json.RawMessage `json:"metadata,omitempty"`
 	Temperature *float64        `json:"temperature,omitempty"`
+
+	// ParallelToolCalls=false 时：桥在同一轮里只回一个 function_call，
+	// 等客户端回填结果后再回下一个（串行语义）。默认并行。
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 }
 
 // ---------- 响应 ----------
@@ -628,7 +632,7 @@ func (s *Server) finishResponses(ctx context.Context, w http.ResponseWriter, r *
 		return
 	}
 
-	t, err := s.runBlocking(ctx, conv, model, sub, promptAt, responsesMaxTokens(req))
+	t, err := s.runBlocking(ctx, conv, model, sub, promptAt, responsesMaxTokens(req), parallelDefault(req.ParallelToolCalls))
 	if t != nil {
 		s.metrics.addTokens(t.res.usage.PromptTokens, t.res.usage.CompletionTokens)
 	}
@@ -689,7 +693,7 @@ func (s *Server) newResponsesResponse(req ResponsesRequest, model, convKey strin
 		CreatedAt:         now.Unix(),
 		Status:            "in_progress",
 		Model:             model,
-		ParallelToolCalls: true,
+		ParallelToolCalls: parallelDefault(req.ParallelToolCalls),
 	}
 	if req.Instructions != "" {
 		instr := req.Instructions

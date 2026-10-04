@@ -42,6 +42,9 @@ type Server struct {
 
 	// mcpAllow 非空时限制内置 MCP 端点 /mcp/{token} 的来源（IP/CIDR）。
 	mcpAllow []netip.Prefix
+
+	// db 为 nil 时纯内存；非 nil 时响应与会话映射落 SQLite。
+	db *dbStore
 }
 
 func NewServer(cfg Config, log *Logger) *Server {
@@ -70,6 +73,16 @@ func NewServer(cfg Config, log *Logger) *Server {
 		owned: map[string]time.Time{},
 	}
 	srv.mcpAllow = parseCIDRList(cfg.MCPAllow)
+	if !dbMemoryDSN(cfg.DBPath) {
+		if opened, err := openDB(cfg.DBPath); err != nil {
+			log.Warnf("sqlite open failed (%s): %v; falling back to in-memory", cfg.DBPath, err)
+		} else {
+			srv.db = opened
+			srv.store.attachDB(opened)
+			srv.responses.attachDB(opened)
+			log.Infof("persistence enabled: %s", cfg.DBPath)
+		}
+	}
 	srv.metrics = newMetrics(func() int { return srv.store.Count() })
 	srv.bus.setOwnedFunc(srv.isOwnedSession)
 	return srv
@@ -113,6 +126,27 @@ func (s *Server) isOwnedSession(sessionID string) bool {
 		return false
 	}
 	return true
+}
+
+// persistConv 把"会话键 → 上游 sessionID（+ model/agent/dir）"落库，
+// 供进程重启后用 previous_response_id / 同一锚点续上同一个上游 session。
+func (s *Server) persistConv(conv *Conversation) {
+	if s.db == nil || conv == nil {
+		return
+	}
+	sid := conv.snapshotSessionID()
+	if sid == "" {
+		return
+	}
+	s.db.saveConv(dbConversation{
+		Key:        conv.Key,
+		SessionID:  sid,
+		ProviderID: conv.model.ProviderID,
+		ModelID:    conv.model.ID,
+		Variant:    conv.model.Variant,
+		Agent:      conv.agent,
+		Directory:  conv.directory,
+	})
 }
 
 // sweepPermissions 定时扫描待审批权限，补齐事件流可能漏掉的请求。

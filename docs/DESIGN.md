@@ -724,6 +724,10 @@ output[]（reasoning / message / function_call）
 `response.completed`。空回复发 `response.failed`。
 
 **响应存储**：`responseStore`（内存 + TTL），供 `GET` / `DELETE` / `previous_response_id` 使用。
+配置 `BRIDGE_DB` 后用 `github.com/qist/sqlite`（+gorm）写穿到本地 SQLite，并额外持久化
+"会话键 → 上游 sessionID" 映射 —— **进程重启后 `previous_response_id` 仍能续上同一个
+OpenCode session**（见 `db.go`、`TestResponsesChainSurvivesRestart`）。留空/`memory`/`off`
+时为纯内存。
 
 **顺带修的两个健壮性问题**：
 - `wait` 在"会话本就空闲"时立刻返回，原实现会立刻重挂 → 变成每秒上千次打上游的忙等。

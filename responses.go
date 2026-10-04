@@ -143,6 +143,7 @@ type responseStore struct {
 	mu    sync.Mutex
 	items map[string]*storedResponse
 	ttl   time.Duration
+	db    *dbStore // 非空时写穿到 SQLite
 }
 
 func NewResponseStore(ttl time.Duration) *responseStore {
@@ -152,35 +153,86 @@ func NewResponseStore(ttl time.Duration) *responseStore {
 	return &responseStore{items: map[string]*storedResponse{}, ttl: ttl}
 }
 
-func (r *responseStore) put(resp *ResponsesResponse, convKey string) {
+// attachDB 注入持久化层：此后 put/get/delete/gc 都会同步落库/读库，
+// 使 previous_response_id 能跨进程重启续链。
+func (r *responseStore) attachDB(db *dbStore) {
 	r.mu.Lock()
-	r.items[resp.ID] = &storedResponse{resp: resp, convKey: convKey, at: time.Now()}
+	r.db = db
 	r.mu.Unlock()
+}
+
+func (r *responseStore) put(resp *ResponsesResponse, convKey string) {
+	if resp == nil {
+		return
+	}
+	at := time.Now()
+	r.mu.Lock()
+	r.items[resp.ID] = &storedResponse{resp: resp, convKey: convKey, at: at}
+	db := r.db
+	ttl := r.ttl
+	r.mu.Unlock()
+	if db != nil {
+		if b, err := json.Marshal(resp); err == nil {
+			db.putResponse(resp.ID, convKey, at.Add(ttl).Unix(), b)
+		}
+	}
 }
 
 func (r *responseStore) get(id string) *storedResponse {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.items[id]
+	sr := r.items[id]
+	db := r.db
+	ttl := r.ttl
+	r.mu.Unlock()
+	if sr != nil {
+		return sr
+	}
+	if db == nil {
+		return nil
+	}
+	payload, convKey, expiresAt, ok := db.getResponse(id)
+	if !ok {
+		return nil
+	}
+	if expiresAt > 0 && time.Now().Unix() > expiresAt {
+		db.deleteResponse(id)
+		return nil
+	}
+	var resp ResponsesResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return nil
+	}
+	sr = &storedResponse{resp: &resp, convKey: convKey, at: time.Unix(expiresAt, 0).Add(-ttl)}
+	r.mu.Lock()
+	r.items[id] = sr
+	r.mu.Unlock()
+	return sr
 }
 
 func (r *responseStore) delete(id string) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.items[id]; !ok {
-		return false
-	}
+	_, ok := r.items[id]
 	delete(r.items, id)
-	return true
+	db := r.db
+	r.mu.Unlock()
+	if db != nil && db.deleteResponse(id) {
+		ok = true
+	}
+	return ok
 }
 
 func (r *responseStore) gc() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	now := time.Now()
 	for k, v := range r.items {
-		if time.Since(v.at) > r.ttl {
+		if now.Sub(v.at) > r.ttl {
 			delete(r.items, k)
 		}
+	}
+	db := r.db
+	r.mu.Unlock()
+	if db != nil {
+		db.gcResponses(now.Unix())
 	}
 }
 

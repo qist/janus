@@ -120,6 +120,32 @@ type Store struct {
 	// orphans 收集被挤出索引的上游 sessionID，由 janitor 异步删除。
 	// 带缓冲 + 满则丢，保证 evict 路径永不阻塞（它持着 s.mu）。
 	orphans chan string
+
+	// db 非空时，新会话的 sessionID 会尝试从库中恢复（跨重启续链）。
+	db *dbStore
+}
+
+// attachDB 注入持久化层（可后续调用；测试里通常不注入）。
+func (s *Store) attachDB(db *dbStore) {
+	s.mu.Lock()
+	s.db = db
+	s.mu.Unlock()
+}
+
+// restoreLocked 为新会话恢复持久化的上游 sessionID / model / agent / dir。
+// 只在会话刚创建、尚未对外发布时调用（持 s.mu，且未持 c.mu）。
+func (s *Store) restoreLocked(c *Conversation) {
+	if s.db == nil || c == nil {
+		return
+	}
+	row, ok := s.db.loadConv(c.Key)
+	if !ok || row.SessionID == "" {
+		return
+	}
+	c.setSessionID(row.SessionID)
+	c.model = OCModelRef{ProviderID: row.ProviderID, ID: row.ModelID, Variant: row.Variant}
+	c.agent = row.Agent
+	c.directory = row.Directory
 }
 
 func NewStore(log *Logger, ttl time.Duration, max int) *Store {
@@ -172,6 +198,7 @@ func (s *Store) AcquireKey(key string) *Conversation {
 		}
 		found = &Conversation{Key: key, createdAt: time.Now()}
 		s.dir[key] = []*Conversation{found}
+		s.restoreLocked(found)
 	}
 	s.mu.Unlock()
 
@@ -232,6 +259,7 @@ func (s *Store) claim(key string, incoming []ChatMessage, forceNew bool) *Conver
 		found = &Conversation{Key: key, createdAt: time.Now()}
 		bucket = append([]*Conversation{found}, bucket...)
 		s.dir[key] = bucket
+		s.restoreLocked(found)
 	}
 	s.mu.Unlock()
 

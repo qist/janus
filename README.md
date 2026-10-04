@@ -262,6 +262,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 |---|---|---|
 | `BRIDGE_RESPONSES_ENABLED` | `true` | 是否开放 `/v1/responses` |
 | `BRIDGE_RESPONSE_TTL` | `30m` | 已保存响应的保留时长（`previous_response_id` 依赖） |
+| `BRIDGE_DB` | 默认 `$XDG_DATA_HOME/janus/janus.db` | 持久化库路径（SQLite）。不设=默认路径；`memory`/`off`=纯内存。开启后响应与会话映射跨重启续链 |
 | `BRIDGE_USAGE_ENABLED` | `true` | 是否开放 `/v1/usage` |
 | `BRIDGE_USAGE_TTL` | `30s` | 用量报告缓存时长（避免频繁打 console API） |
 
@@ -413,6 +414,9 @@ curl -s http://127.0.0.1:2810/v1/responses \
 `previous_response_id` 的实现方式：把响应链映射到一个**独立的会话键**（`resp:<id>`），
 每轮只把新增 `input` 作为 prompt 发出，复用同一个 OpenCode session 保存上下文。
 这条路径刻意不走 Chat 的历史前缀匹配（Responses 是无状态客户端 + 有状态服务端的语义）。
+
+配置 `BRIDGE_DB` 后，响应与"会话键 → sessionID"映射会落本地 SQLite
+（`github.com/qist/sqlite`），**进程重启后 `previous_response_id` 仍能续上同一个 session**。
 
 ### 思考强度（`reasoning_effort`）
 

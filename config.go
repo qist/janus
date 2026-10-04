@@ -83,6 +83,10 @@ type Config struct {
 	// 留空 = 不限制（OpenCode 与本桥同机时是回环，默认即可）。
 	MCPAllow string
 
+	// DBPath 持久化库路径（SQLite，github.com/qist/sqlite）。
+	// 空 / memory / off = 纯内存。默认见 defaultDBPath()。
+	DBPath string
+
 	ConfigFile string // 实际加载的配置文件路径（空 = 没加载）
 }
 
@@ -302,6 +306,7 @@ func LoadConfig() (Config, error) {
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),
+		DBPath:          loader.str("BRIDGE_DB", defaultDBPath()),
 
 		ConfigFile: cfgPath,
 	}

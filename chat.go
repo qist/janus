@@ -888,6 +888,7 @@ func (s *Server) ensureSession(ctx context.Context, conv *Conversation,
 		conv.model = ref
 		conv.agent = agent
 		conv.directory = dir
+		s.persistConv(conv)
 		s.log.Infof("session created %s dir=%s model=%s", sess.ID, dir, ref.String())
 		return true, nil
 	}
@@ -907,6 +908,7 @@ func (s *Server) ensureSession(ctx context.Context, conv *Conversation,
 		}
 		conv.agent = agent
 	}
+	s.persistConv(conv)
 	return false, nil
 }
 

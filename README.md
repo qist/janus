@@ -607,3 +607,7 @@ janus/
 > `scripts/`、`tests/` 已分层。若以后要拆成多个二进制/库，再引入 `cmd/` +
 > `internal/`（注意 `go:embed` 不能引用上级目录，嵌入式页面需随包同目录）。
 
+## 许可证
+
+MIT © 2026 qist，详见 [LICENSE](LICENSE)。
+

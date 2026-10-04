@@ -521,6 +521,16 @@ turn3  同一 session                     delta=61B  →  BLUE-42
 
 > 客户端不需要带 system 提示词。带了会更好（分桶更准），不带也不会串。
 
+**隔离保证**（均有测试）：并发首请求、同分桶不同内容 → 各自独立会话；同话题多轮 → 续接同一会话。
+
+**Responses 也走同一套内核**：`previous_response_id` 直接复用上一条响应所属的 Janus 会话
+（也就是同一个 OpenCode session），每轮只发新增 `input`；Chat 与 Responses 只是键空间不同
+（`x:` / `f:` / `resp:`），底层 Store / executor / ToolBridge 共用。
+
+**已知限制**：既没有 `X-Session-ID`/`X-OpenCode-Session` 头、也没有 `user` 字段，且两个 client
+的首条历史**完全相同**时，会被当作同一条会话线（这是"多轮自动续接"所依赖的匹配）。要强隔离，
+请让客户端带 `user` 或显式会话头。
+
 ### 流式转换
 
 驱动一次执行需要同时消费 4 类信号，缺一不可：

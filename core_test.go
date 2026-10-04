@@ -874,6 +874,32 @@ func TestStoreConcurrentFirstRequestsGetDistinctSessions(t *testing.T) {
 	}
 }
 
+// 同一分桶 key、内容不同的两个 client，即使不是并发，也必须落到不同会话。
+// （分桶只负责召回候选，最终由"历史前缀严格匹配"决定归属。）
+func TestStoreSameBucketDifferentContentIsolated(t *testing.T) {
+	s := newTestStore()
+	key := "f:same-bucket"
+
+	aIn := []ChatMessage{m("user", "client-A：帮我改 A 项目")}
+	a := s.Acquire(key, aIn)
+	a.setLast(aIn)
+	a.setSessionID("ses_A")
+	s.Release(a)
+
+	bIn := []ChatMessage{m("user", "client-B：另一个完全不同的请求")}
+	b := s.Acquire(key, bIn)
+	b.setLast(bIn)
+	b.setSessionID("ses_B")
+	s.Release(b)
+
+	if a == b {
+		t.Fatal("同一分桶里内容不同的请求不应共用会话")
+	}
+	if b.snapshotSessionID() != "ses_B" {
+		t.Fatalf("B 跑到了别的会话: %q", b.snapshotSessionID())
+	}
+}
+
 // 并发多轮：同一话题的请求应连续命中同一会话。
 func TestStoreConcurrentSameConversation(t *testing.T) {
 	s := newTestStore()

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -422,4 +424,167 @@ func TestResponsesEffort(t *testing.T) {
 		t.Fatalf("无 reasoning 时 effort 应为空，got %q", got)
 	}
 	_ = context.Background()
+}
+
+// ---------- previous_response_id 续链（正向）----------
+
+// stubChainUpstream 记录 OpenCode session 创建次数与每次 prompt 文本，
+// 用来验证"续链复用同一个 session、且只发新增 input"。
+func stubChainUpstream(t *testing.T) (*httptest.Server, *int32, *[]string) {
+	t.Helper()
+	var sessions int32
+	var prompts []string
+	var mu sync.Mutex
+	var created atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/api/model"):
+			_, _ = w.Write([]byte(`{"data":[{"id":"m1","modelID":"m1","providerID":"p","name":"M1","enabled":true,"limit":{"context":1000,"output":100}}]}`))
+		case strings.HasSuffix(path, "/api/model/default"):
+			_, _ = w.Write([]byte(`{"data":{"id":"m1","providerID":"p","enabled":true}}`))
+		case path == "/api/session" && r.Method == http.MethodPost:
+			n := atomic.AddInt32(&sessions, 1)
+			_, _ = w.Write(fmt.Appendf(nil, `{"data":{"id":"ses_%d","agent":"build"}}`, n))
+		case strings.HasSuffix(path, "/prompt"):
+			body, _ := io.ReadAll(r.Body)
+			var p struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(body, &p)
+			mu.Lock()
+			prompts = append(prompts, p.Text)
+			mu.Unlock()
+			created.Store(time.Now().UnixMilli())
+			_, _ = w.Write(fmt.Appendf(nil, `{"data":{"id":"msg_u","sessionID":"ses_x","time":{"created":%d}}}`, created.Load()))
+		case strings.HasSuffix(path, "/wait"):
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(path, "/message"):
+			_, _ = w.Write(fmt.Appendf(nil,
+				`{"data":[{"id":"msg_a","type":"assistant","time":{"created":%d},"finish":"stop","tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}},"content":[{"type":"text","text":"ok"}]}],"cursor":{"previous":"","next":""}}`,
+				time.Now().UnixMilli()))
+		case strings.Contains(path, "/api/session/"):
+			_, _ = w.Write(fmt.Appendf(nil,
+				`{"data":{"id":"ses_x","outcome":"succeeded","time":{"created":%d,"idle":%d}}}`,
+				created.Load(), time.Now().UnixMilli()))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"_tag":"NotFoundError","message":"nope"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &sessions, &prompts
+}
+
+func chainServer(t *testing.T, stub *httptest.Server) *Server {
+	t.Helper()
+	cfg := Config{
+		Upstream: stub.URL, Username: "o", Password: "p",
+		Directory: "/tmp", APIKey: "sk-test", ConsoleURL: stub.URL,
+		DefaultModel: "p/m1", ResponsesEnabled: true, ResponseTTL: time.Minute,
+		MaxBodyBytes: 1 << 20, ToolAnnotations: false,
+		IdlePollInterval:  200 * time.Millisecond,
+		ReconcileInterval: 300 * time.Millisecond,
+	}
+	return NewServer(cfg, NewLogger("error"))
+}
+
+func postResponse(t *testing.T, srv *Server, body string) (*httptest.ResponseRecorder, ResponsesResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var got ResponsesResponse
+	if rec.Code == http.StatusOK {
+		_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	}
+	return rec, got
+}
+
+// 工具结果续链：带 previous_response_id + function_call_output 时，
+// 必须把结果回填给挂起的 MCP 调用，而不是把 output 当普通 prompt 重发。
+func TestResponsesToolResultContinuation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("依赖空闲判定")
+	}
+	stub, sessions, _ := stubChainUpstream(t)
+	srv := chainServer(t, stub)
+
+	// 预置一条"上一轮已挂起 call_1"的会话与响应
+	conv := srv.store.AcquireKey("resp:tc")
+	conv.setSessionID("ses_x")
+	pc := &pendingCall{CallID: "call_1", ToolName: "get_weather", Args: `{"city":"北京"}`, result: make(chan ToolResult, 1)}
+	conv.setPendingToolCalls([]*pendingCall{pc})
+	srv.store.Release(conv)
+	srv.responses.put(&ResponsesResponse{ID: "resp_prev", Object: "response", Status: "completed"}, "resp:tc")
+
+	body := `{"model":"default","previous_response_id":"resp_prev","store":true,
+	  "input":[{"type":"function_call_output","call_id":"call_1","output":"晴，24°C"}]}`
+	rec, got := postResponse(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case res := <-pc.result:
+		if res.Content != "晴，24°C" || res.IsError {
+			t.Fatalf("回填结果不对: %+v", res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("挂起的工具调用没有被回填")
+	}
+
+	if n := atomic.LoadInt32(sessions); n != 0 {
+		t.Fatalf("续链不该新建 session，实际 %d", n)
+	}
+	if got.PreviousResponseID == nil || *got.PreviousResponseID != "resp_prev" {
+		t.Fatalf("previous_response_id = %v", got.PreviousResponseID)
+	}
+}
+
+// 续链：response_2.previous_response_id=response_1 必须复用同一个 OpenCode session，
+// 且第二轮只把新增 input 作为 prompt 发出去（不发全量历史）。
+func TestResponsesPreviousResponseReusesSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("依赖空闲判定")
+	}
+	stub, sessions, prompts := stubChainUpstream(t)
+	srv := chainServer(t, stub)
+
+	rec1, r1 := postResponse(t, srv, `{"model":"default","input":"第一句","store":true}`)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("r1 status=%d body=%s", rec1.Code, rec1.Body.String())
+	}
+	if r1.ID == "" {
+		t.Fatal("r1 缺少 id")
+	}
+
+	rec2, r2 := postResponse(t, srv, fmt.Sprintf(`{"model":"default","input":"第二句","store":true,"previous_response_id":%q}`, r1.ID))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("r2 status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	if n := atomic.LoadInt32(sessions); n != 1 {
+		t.Fatalf("续链应复用同一 session，实际创建了 %d 个", n)
+	}
+	if r2.PreviousResponseID == nil || *r2.PreviousResponseID != r1.ID {
+		t.Fatalf("r2.previous_response_id = %v, want %q", r2.PreviousResponseID, r1.ID)
+	}
+	if r2.ID == r1.ID {
+		t.Fatal("每次响应应有独立的 id")
+	}
+
+	if len(*prompts) != 2 {
+		t.Fatalf("prompt 次数 = %d, want 2", len(*prompts))
+	}
+	if !strings.Contains((*prompts)[0], "第一句") {
+		t.Fatalf("第一轮 prompt 不含首句: %#v", *prompts)
+	}
+	if !strings.Contains((*prompts)[1], "第二句") || strings.Contains((*prompts)[1], "第一句") {
+		t.Fatalf("第二轮应只带新增 input（不应重发历史）: %#v", *prompts)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -197,6 +198,24 @@ func TestToolResultsFromMessages(t *testing.T) {
 	}
 	if hasToolResults([]ChatMessage{{Role: "user"}}) {
 		t.Error("没有 tool 消息时应为 false")
+	}
+}
+
+// 一轮里并行返回多个工具结果时，必须按 tool_call_id 精确匹配。
+func TestToolResultsFromMessagesParallel(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "tool", ToolCallID: "call_a", Content: MessageContent{Text: "A"}},
+		{Role: "tool", ToolCallID: "call_b", Content: MessageContent{Text: "B"}},
+		{Role: "tool", ToolCallID: "call_c", Content: MessageContent{Text: "C"}},
+	}
+	got := toolResultsFromMessages(msgs)
+	for id, want := range map[string]string{"call_a": "A", "call_b": "B", "call_c": "C"} {
+		if got[id].Content != want {
+			t.Errorf("%s = %q, want %q", id, got[id].Content, want)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("应恰好 3 条结果，got %d", len(got))
 	}
 }
 
@@ -429,6 +448,33 @@ func TestSSEToolCallsFormat(t *testing.T) {
 	}
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Errorf("缺少 [DONE]:\n%s", body)
+	}
+}
+
+// 一轮返回 3 个并行工具调用时，流式 delta 的 index 必须严格 0/1/2，
+// 且 id/name 一一对应（对应 "一次 response 里 text + tool_call A/B/C"）。
+func TestSSEToolCallsThreeIndexes(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw, err := newSSE(rec, "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sw.begin()
+	_ = sw.toolCalls([]*pendingCall{
+		{CallID: "call_a", ToolName: "tool_a", Args: `{}`},
+		{CallID: "call_b", ToolName: "tool_b", Args: `{}`},
+		{CallID: "call_c", ToolName: "tool_c", Args: `{}`},
+	})
+	_ = sw.finish("tool_calls", &Usage{}, false)
+
+	body := rec.Body.String()
+	for i, tc := range [][2]string{{"call_a", "tool_a"}, {"call_b", "tool_b"}, {"call_c", "tool_c"}} {
+		if !strings.Contains(body, `"index":`+strconv.Itoa(i)) {
+			t.Errorf("缺少 index %d:\n%s", i, body)
+		}
+		if !strings.Contains(body, `"id":"`+tc[0]+`"`) || !strings.Contains(body, `"name":"`+tc[1]+`"`) {
+			t.Errorf("缺少 %s/%s:\n%s", tc[0], tc[1], body)
+		}
 	}
 }
 

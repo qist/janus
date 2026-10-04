@@ -731,6 +731,41 @@ output[]（reasoning / message / function_call）
 - `Config` 零值危险：`MaxBodyBytes=0` 让所有 POST 读到 EOF；`RequestTimeout=0`
   让 `context.WithTimeout(ctx, 0)` 立刻超时。`NewServer` 现在统一 `applyDefaults()`。
 
+#### Session 映射与隔离（Chat / Responses 共用内核）
+
+统一的三层映射：
+
+```
+OpenAI 会话 / response chain
+        ↓ ConversationKey（Chat）/ previous_response_id（Responses）
+Janus Conversation（Store：历史快照 + 上游 sessionID + 工具上下文）
+        ↓ ensureSession
+OpenCode session
+```
+
+- **Chat**：`key = 显式头(X-Session-ID / X-OpenCode-Session) > hash(system + user + directory)`，
+  桶内再按"历史前缀严格匹配"挑会话（见 5.3）。
+- **Responses**：`key = resp:<id>`；`previous_response_id` 直接复用上一条响应的 `convKey`，
+  即同一个 Janus Conversation / 同一个 OpenCode session，每轮只发新增 `input`。
+- 两种 API **共用同一个 Store + executor + ToolBridge**，只是键空间不同（`x:` / `f:` / `resp:`）。
+
+隔离保证（均有测试）：
+
+| 场景 | 期望行为 | 测试 |
+|---|---|---|
+| 并发首请求、内容不同 | 各自独立会话 | `TestStoreConcurrentFirstRequestsGetDistinctSessions` |
+| 同分桶、内容不同 | 独立会话 | `TestStoreSameBucketDifferentContentIsolated` |
+| 同话题多轮 | 命中同一会话（续接） | `TestStoreConcurrentSameConversation` |
+| Responses 续链 | 复用同一 OpenCode session、只发增量 | `TestResponsesPreviousResponseReusesSession` |
+| 工具结果续链 | 回填挂起的 MCP 调用、不把 output 当 prompt 重发 | `TestResponsesToolResultContinuation` |
+
+工具调用的 OpenAI 语义：一轮可返回多个并行 `tool_calls`（流式 `index` 0/1/2…，`tool_call_id`
+原样保留），客户端按 `tool_call_id` 回填 `role:"tool"` 结果（`toolResultsFromMessages`）。
+
+**残留风险（已知限制）**：既没有显式会话头、也没有 `user` 字段，且两个 client 的首条历史
+**完全相同**时，会被视为同一条会话线 —— 这正是"多轮自动续接"所依赖的匹配，无法同时满足
+"内容相同也要隔离"。规避：客户端带上 `user` 字段，或 `X-Session-ID` / `X-OpenCode-Session` 头。
+
 ## 6. 配置
 
 配置来源优先级：**真实环境变量 > 配置文件 > 内置默认值**。

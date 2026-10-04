@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +39,9 @@ type Server struct {
 	// 当前有没有在飞请求，因为 agent 会在两次请求之间异步发起工具权限请求。
 	ownedMu sync.Mutex
 	owned   map[string]time.Time
+
+	// mcpAllow 非空时限制内置 MCP 端点 /mcp/{token} 的来源（IP/CIDR）。
+	mcpAllow []netip.Prefix
 }
 
 func NewServer(cfg Config, log *Logger) *Server {
@@ -64,6 +69,7 @@ func NewServer(cfg Config, log *Logger) *Server {
 		known: map[string]struct{}{},
 		owned: map[string]time.Time{},
 	}
+	srv.mcpAllow = parseCIDRList(cfg.MCPAllow)
 	srv.metrics = newMetrics(func() int { return srv.store.Count() })
 	srv.bus.setOwnedFunc(srv.isOwnedSession)
 	return srv
@@ -537,7 +543,7 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers",
 				"Authorization, Content-Type, X-Session-ID, X-OpenCode-Session, X-OpenCode-Agent, X-OpenCode-Directory, X-Api-Key")
-			w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, Retry-After, X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, Retry-After, X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests, X-Janus-Session, X-Janus-Conversation")
 		}
 
 		if r.Method == http.MethodOptions {
@@ -569,6 +575,53 @@ func isPublicPath(p string) bool {
 func originAllowed(origin, allowed string) bool {
 	for _, a := range strings.Split(allowed, ",") {
 		if strings.TrimSpace(a) == origin {
+			return true
+		}
+	}
+	return false
+}
+
+// parseCIDRList 解析逗号分隔的 IP / CIDR 列表，忽略空项与非法项。
+// 裸 IP 会按 /32（IPv4）或 /128（IPv6）处理。
+func parseCIDRList(s string) []netip.Prefix {
+	var out []netip.Prefix
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(part); err == nil {
+			out = append(out, p)
+			continue
+		}
+		if a, err := netip.ParseAddr(part); err == nil {
+			bits := 128
+			if a.Is4() {
+				bits = 32
+			}
+			out = append(out, netip.PrefixFrom(a, bits))
+		}
+	}
+	return out
+}
+
+// mcpSourceAllowed 判断 /mcp/{token} 的来源是否在白名单内。
+// 白名单为空 = 不限制（默认，OpenCode 与本桥同机走回环）。
+func (s *Server) mcpSourceAllowed(r *http.Request) bool {
+	if len(s.mcpAllow) == 0 {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	a = a.Unmap()
+	for _, p := range s.mcpAllow {
+		if p.Contains(a) {
 			return true
 		}
 	}

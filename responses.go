@@ -460,8 +460,12 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), s.cfg.Directory)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
+	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
 
-	// ---- 会话：previous_response_id 决定是否复用上次的链 ----
+	// ---- 会话：previous_response_id > X-Session-ID > 独立链 ----
+	//
+	// X-Session-ID 与 Chat 共用命名空间（x:<id>），使同一客户端锚点下
+	// Chat Completions 与 Responses 落在同一个 Janus 会话 / OpenCode session。
 	convKey := ""
 	var prev *storedResponse
 	if req.PreviousResponseID != "" {
@@ -472,6 +476,8 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		convKey = prev.convKey
+	} else if explicit != "" {
+		convKey = "x:" + explicit
 	} else {
 		convKey = "resp:" + responseIDPrefix + newID()
 	}
@@ -511,6 +517,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		defer sub.cancel()
 		promptAt := time.Now().UnixMilli()
 		s.deliverToolResults(conv, pending, toolResults)
+		setSessionHeaders(w, conv)
 		s.finishResponses(ctx, w, r, req, ref, conv, sub, promptAt, dir)
 		return
 	}
@@ -541,7 +548,20 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Debugf("responses prompt sid=%s key=%s model=%s", conv.snapshotSessionID(), convKey, ref.String())
 
+	setSessionHeaders(w, conv)
 	s.finishResponses(ctx, w, r, req, ref, conv, sub, promptAt, dir)
+}
+
+// setSessionHeaders 把本轮的 Janus 会话键与上游 sessionID 回吐给客户端。
+// 客户端可用它作为 X-Session-ID 在 Chat / Responses 间锚定同一底层会话。
+func setSessionHeaders(w http.ResponseWriter, conv *Conversation) {
+	if conv == nil {
+		return
+	}
+	w.Header().Set("X-Janus-Conversation", conv.Key)
+	if sid := conv.snapshotSessionID(); sid != "" {
+		w.Header().Set("X-Janus-Session", sid)
+	}
 }
 
 // finishResponses 跑完一轮并按 Responses 格式输出。

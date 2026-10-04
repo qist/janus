@@ -253,6 +253,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `BRIDGE_TOOL_REREGISTER` | `10m` | 多久主动续注册一次 MCP（上游重启会丢注册） |
 | `BRIDGE_TOOL_CALL_WAIT` | `5m` | 工具调用挂起、等客户端回填结果的最长时间 |
 | `BRIDGE_MCP_URL` | 空 | 注册给 OpenCode 的 MCP 基址（空=本机回环） |
+| `BRIDGE_MCP_ALLOW` | 空 | 限制内置 MCP 端点 `/mcp/{token}` 的来源（逗号分隔 IP/CIDR）。空=不限制；对外暴露或上游在别机时建议设为上游网段 |
 | `BRIDGE_PERMISSION_REPLY` | `once` | 自动应答权限请求：`once`（仅本次）/ `always`（记住）/ `reject`（拒绝）/ `off`（不干预） |
 
 ### Responses API / 用量
@@ -607,6 +608,17 @@ BRIDGE_API_KEY=sk-bridge-dev .venv/bin/python tests/compat_test.py
 
 `compat_test.py` 覆盖 22 项断言：模型列表、流式/非流式、`include_usage`、
 多轮上下文、`reasoning_content`、错误语义（404/400/401）、图片、并发隔离。
+
+## 安全边界（重要）
+
+Janus 背后是一个**能执行 shell、读写文件**的 agent（默认以启动用户身份运行，常见是 root）。把它暴露出去 ≈ 把 shell 交出去。要点：
+
+- **默认只监听回环**（`BRIDGE_ADDR=127.0.0.1:2810`）。要远程访问，优先走 SSH 隧道 / VPN / Tailscale，而不是直接 `0.0.0.0`。
+- **必须设 `BRIDGE_API_KEY`**；绑定非回环且 key 为空时任何人都能消耗你的额度。
+- 桥自身**不做 TLS**，公网/不可信网络务必套反向代理（Caddy/nginx）加 HTTPS。
+- **内置 MCP 端点** `/mcp/{token}` 用 128 位随机 token 鉴权，且随会话（一轮结束即注销）短命；仍可用 `BRIDGE_MCP_ALLOW` 按来源 IP/CIDR 再收一层。防串会话：空闲会话的工具调用会被立即拒绝。
+- **权限自动应答** `BRIDGE_PERMISSION_REPLY`：`once`（默认）只放行单次，`always` 会写入 OpenCode 的持久权限，`reject` 更保守。
+- 想要"agent 不碰本机、工具在客户端执行"，用 `orchestrator` agent（见 `docs/DESIGN.md` §5.7.2）。
 
 ## 已知限制
 

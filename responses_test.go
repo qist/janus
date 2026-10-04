@@ -546,6 +546,64 @@ func TestResponsesToolResultContinuation(t *testing.T) {
 	}
 }
 
+// Chat 与 Responses 用同一个 X-Session-ID 锚点时，必须复用同一个 OpenCode session
+// （统一命名空间 x:<id>），并回吐 X-Janus-Session 头给客户端。
+func TestChatAndResponsesShareSessionAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("依赖空闲判定")
+	}
+	stub, sessions, _ := stubChainUpstream(t)
+	srv := chainServer(t, stub)
+
+	// 1) Chat 建立会话（X-Session-ID=S）
+	chatBody := `{"model":"default","stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatBody))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-ID", "S")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Janus-Session"); got != "ses_1" {
+		t.Fatalf("chat X-Janus-Session=%q, want ses_1", got)
+	}
+	if got := rec.Header().Get("X-Janus-Conversation"); got != "x:S" {
+		t.Fatalf("chat X-Janus-Conversation=%q, want x:S", got)
+	}
+
+	// 2) Responses 用同一个锚点 → 复用同一个 session，不新建
+	rec2, got := postResponseWithHeader(t, srv, `{"model":"default","input":"next"}`, "X-Session-ID", "S")
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("responses status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if h := rec2.Header().Get("X-Janus-Session"); h != "ses_1" {
+		t.Fatalf("responses X-Janus-Session=%q, want ses_1", h)
+	}
+	if got.ID == "" {
+		t.Fatal("responses 缺少 id")
+	}
+	if n := atomic.LoadInt32(sessions); n != 1 {
+		t.Fatalf("共享锚点应只创建 1 个 session，实际 %d", n)
+	}
+}
+
+func postResponseWithHeader(t *testing.T, srv *Server, body, hk, hv string) (*httptest.ResponseRecorder, ResponsesResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(hk, hv)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var got ResponsesResponse
+	if rec.Code == http.StatusOK {
+		_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	}
+	return rec, got
+}
+
 // 续链：response_2.previous_response_id=response_1 必须复用同一个 OpenCode session，
 // 且第二轮只把新增 input 作为 prompt 发出去（不发全量历史）。
 func TestResponsesPreviousResponseReusesSession(t *testing.T) {

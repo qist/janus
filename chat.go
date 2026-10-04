@@ -749,6 +749,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sid := conv.snapshotSessionID()
+	setSessionHeaders(w, conv)
 	sub := s.bus.Subscribe(sid, 512)
 	defer sub.cancel()
 

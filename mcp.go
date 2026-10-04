@@ -31,6 +31,13 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tool bridge disabled", http.StatusServiceUnavailable)
 		return
 	}
+	// 来源白名单（BRIDGE_MCP_ALLOW）。默认空=不限制；外网暴露时建议设为
+	// 上游 OpenCode 的来源网段。
+	if !s.mcpSourceAllowed(r) {
+		s.log.Warnf("mcp request from disallowed source: %s", r.RemoteAddr)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	token := r.PathValue("token")
 	sess := s.tools.Get(token)
 	if sess == nil {

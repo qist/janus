@@ -79,6 +79,10 @@ type Config struct {
 	// once=仅本次放行，always=放行并记住，reject=拒绝，off=不自动应答。
 	PermissionReply string
 
+	// MCPAllow 可选：限制内置 MCP 端点 /mcp/{token} 的来源（逗号分隔的 IP/CIDR）。
+	// 留空 = 不限制（OpenCode 与本桥同机时是回环，默认即可）。
+	MCPAllow string
+
 	ConfigFile string // 实际加载的配置文件路径（空 = 没加载）
 }
 
@@ -297,6 +301,7 @@ func LoadConfig() (Config, error) {
 		MCPPublicURL:   strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
+		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),
 
 		ConfigFile: cfgPath,
 	}

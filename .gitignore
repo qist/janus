@@ -1,0 +1,15 @@
+# 本地配置（含 API Key），不要提交
+janus.env
+
+# 编译产物
+/janus
+
+# 兼容测试用的 Python 虚拟环境
+.venv/
+__pycache__/
+
+# 日志与临时文件
+*.log
+
+# 发布产物
+/dist/

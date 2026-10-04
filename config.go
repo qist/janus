@@ -1,0 +1,327 @@
+package main
+
+import (
+	"bufio"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Config 全部来自「环境变量 > 配置文件 > 内置默认值」。
+//
+// 配置文件是简单的 KEY=VALUE 文本（见 janus.env.example）：
+//   - 以 # 开头的行为注释
+//   - 值两端的引号会被去掉
+//   - 不展开 ${VAR}
+//   - 已存在的真实环境变量优先，便于临时覆盖
+type Config struct {
+	Addr     string // bridge 监听地址
+	Upstream string // OpenCode server 地址
+
+	// UpstreamAuto 为 true 时启动时/断连时自动发现 OpenCode 端点，
+	// 覆盖 Upstream/Username/Password。OpenCode 桌面端每次重启都会换
+	// 随机端口和随机密码，靠它才能免配置续上。
+	UpstreamAuto bool
+
+	Username string // Basic 用户名，OpenCode 固定为 "opencode"
+	Password string // 即 OPENCODE_SERVER_PASSWORD
+
+	APIKey string // 对客户端的鉴权；空 = 接受任意 Bearer（会打 WARN）
+
+	Directory    string // 会话默认工作目录
+	Agent        string // 默认 agent
+	DefaultModel string // default/auto/空别名实际使用的模型；空=跟随上游默认
+
+	SessionTTL        time.Duration // 会话空闲回收
+	RequestTimeout    time.Duration // 单次补全超时
+	ReconcileInterval time.Duration // 事件流对账间隔
+	IdlePollInterval  time.Duration // 空闲轮询间隔（终端信号兜底）
+	PromptGracePeriod time.Duration // prompt 后多久才开始信任 idle 信号
+	StreamHeartbeat   time.Duration // SSE 心跳间隔
+
+	CORSOrigin string
+	LogLevel   string
+
+	ToolAnnotations  bool // 是否把 agent 工具活动以注释形式写进 content
+	MaxConversations int  // 内存里最多保留多少个会话
+	MaxBodyBytes     int64
+
+	// 用量/余额查询（走 OpenCode console API，需要读本地凭据库）
+	UsageEnabled bool
+	UsageTTL     time.Duration
+	OpencodeDB   string // OpenCode 的 SQLite 凭据库路径
+	ConsoleURL   string // OpenCode console API 基址
+
+	// 限流
+	RateLimitPerMin    int  // 每 key/IP 每分钟请求数；0=不限
+	RateLimitBurst     int  // 突发容量；0=同 RateLimitPerMin
+	RateLimitGlobalRPM int  // 全局每分钟上限；0=不限
+	TrustProxy         bool // 是否信任 X-Forwarded-For（影响限流分桶）
+
+	// 指标
+	MetricsPublic bool // /metrics 是否免鉴权（默认需要 API key）
+
+	// Responses API
+	ResponsesEnabled bool
+	ResponseTTL      time.Duration
+
+	// 工具调用（把客户端 tools 经内置 MCP server 暴露给 OpenCode agent）
+	ToolCalling    bool          // 是否启用
+	ToolSoftFail   bool          // true=注册失败时降级为无工具继续；false=直接报错
+	ToolReregister time.Duration // 注册多久后主动续注册（上游重启会丢注册）
+	ToolCallWait   time.Duration // 挂起等客户端回填结果的最长时间
+	MCPPublicURL   string        // 注册给 OpenCode 的 MCP 基址；空=自动用本机回环
+
+	// PermissionReply 自动应答 OpenCode 的权限请求（agent 访问会话目录之外时
+	// OpenCode 会先 ask；headless 桥无人应答就会一直挂住，直到客户端超时）。
+	// once=仅本次放行，always=放行并记住，reject=拒绝，off=不自动应答。
+	PermissionReply string
+
+	ConfigFile string // 实际加载的配置文件路径（空 = 没加载）
+}
+
+// ---------- 配置来源 ----------
+
+type cfgLoader struct {
+	file map[string]string
+}
+
+func (l *cfgLoader) get(key string) (string, bool) {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v, true
+	}
+	if l.file != nil {
+		if v, ok := l.file[key]; ok && v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+func (l *cfgLoader) str(key, def string) string {
+	if v, ok := l.get(key); ok {
+		return v
+	}
+	return def
+}
+
+func (l *cfgLoader) boolean(key string, def bool) bool {
+	v, ok := l.get(key)
+	if !ok {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
+}
+
+func (l *cfgLoader) integer(key string, def int) int {
+	v, ok := l.get(key)
+	if !ok {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+// dur 支持 "30m" / "600s"，也支持纯秒数 "600"。
+func (l *cfgLoader) dur(key string, def time.Duration) time.Duration {
+	v, ok := l.get(key)
+	if !ok {
+		return def
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return def
+}
+
+// loadConfigFile 解析 KEY=VALUE 文本。找不到文件返回 (nil, "")；
+// 文件存在但语法有误则报错，避免静默用错配置。
+func loadConfigFile(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	out := map[string]string{}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+
+	for line := 1; sc.Scan(); line++ {
+		raw := strings.TrimSpace(sc.Text())
+		if raw == "" || strings.HasPrefix(raw, "#") {
+			continue
+		}
+		// 允许 `export KEY=VALUE`
+		raw = strings.TrimPrefix(raw, "export ")
+		eq := strings.Index(raw, "=")
+		if eq <= 0 {
+			return nil, &configError{Path: path, Line: line, Msg: "expected KEY=VALUE"}
+		}
+		key := strings.TrimSpace(raw[:eq])
+		val := strings.TrimSpace(raw[eq+1:])
+		// 去掉成对引号
+		if len(val) >= 2 {
+			if (val[0] == '"' && val[len(val)-1] == '"') ||
+				(val[0] == '\'' && val[len(val)-1] == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		// 行尾注释（仅在无引号包裹时处理）：`KEY=value  # comment`
+		if i := strings.Index(val, " #"); i >= 0 {
+			val = strings.TrimSpace(val[:i])
+		}
+		out[key] = val
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type configError struct {
+	Path string
+	Line int
+	Msg  string
+}
+
+func (e *configError) Error() string {
+	return e.Path + ":" + strconv.Itoa(e.Line) + ": " + e.Msg
+}
+
+// resolveConfigPath 决定用哪个配置文件：
+// JANUS_CONFIG / BRIDGE_CONFIG 显式指定 > 可执行文件同目录 janus.env > 当前目录 janus.env
+func resolveConfigPath() string {
+	for _, key := range []string{"JANUS_CONFIG", "BRIDGE_CONFIG"} {
+		if p := os.Getenv(key); p != "" {
+			return p
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		p := filepath.Join(filepath.Dir(exe), "janus.env")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if _, err := os.Stat("janus.env"); err == nil {
+		return "janus.env"
+	}
+	return ""
+}
+
+// ---------- 加载 ----------
+
+func LoadConfig() (Config, error) {
+	loader := &cfgLoader{}
+	cfgPath := resolveConfigPath()
+	if cfgPath != "" {
+		fileCfg, err := loadConfigFile(cfgPath)
+		if err != nil {
+			return Config{}, err
+		}
+		loader.file = fileCfg
+	}
+
+	// 密码优先取 OPENCODE_PASSWORD，退化到 OPENCODE_SERVER_PASSWORD
+	// （OpenCode server 进程本身用的就是后者）。
+	pw := loader.str("OPENCODE_PASSWORD", "")
+	if pw == "" {
+		pw = loader.str("OPENCODE_SERVER_PASSWORD", "")
+	}
+
+	upstream := loader.str("OPENCODE_URL", "auto")
+	auto := upstream == "" || strings.EqualFold(upstream, "auto")
+
+	cfg := Config{
+		Addr:         loader.str("BRIDGE_ADDR", "0.0.0.0:2810"),
+		Upstream:     strings.TrimRight(upstream, "/"),
+		UpstreamAuto: auto,
+
+		Username: loader.str("OPENCODE_USERNAME", "opencode"),
+		Password: pw,
+
+		APIKey: loader.str("BRIDGE_API_KEY", ""),
+
+		Directory:    loader.str("BRIDGE_DIRECTORY", "/opt/iptv"),
+		Agent:        loader.str("BRIDGE_AGENT", "build"),
+		DefaultModel: loader.str("BRIDGE_DEFAULT_MODEL", ""),
+
+		SessionTTL:        loader.dur("BRIDGE_SESSION_TTL", 30*time.Minute),
+		RequestTimeout:    loader.dur("BRIDGE_REQUEST_TIMEOUT", 600*time.Second),
+		ReconcileInterval: loader.dur("BRIDGE_RECONCILE_INTERVAL", 3*time.Second),
+		IdlePollInterval:  loader.dur("BRIDGE_IDLE_POLL_INTERVAL", 1*time.Second),
+		PromptGracePeriod: loader.dur("BRIDGE_PROMPT_GRACE", 2*time.Second),
+		StreamHeartbeat:   loader.dur("BRIDGE_STREAM_HEARTBEAT", 15*time.Second),
+
+		CORSOrigin: loader.str("BRIDGE_CORS_ORIGIN", ""),
+		LogLevel:   loader.str("BRIDGE_LOG_LEVEL", "info"),
+
+		ToolAnnotations:  loader.boolean("BRIDGE_TOOL_ANNOTATIONS", true),
+		MaxConversations: loader.integer("BRIDGE_MAX_CONVERSATIONS", 256),
+		MaxBodyBytes:     8 << 20,
+
+		UsageEnabled: loader.boolean("BRIDGE_USAGE_ENABLED", true),
+		UsageTTL:     loader.dur("BRIDGE_USAGE_TTL", 30*time.Second),
+		OpencodeDB:   loader.str("OPENCODE_DB", defaultOpencodeDB()),
+		ConsoleURL:   strings.TrimRight(loader.str("OPENCODE_CONSOLE", "https://opencode.ai/console/api"), "/"),
+
+		MetricsPublic: loader.boolean("BRIDGE_METRICS_PUBLIC", false),
+
+		RateLimitPerMin:    loader.integer("BRIDGE_RATE_LIMIT", 0),
+		RateLimitBurst:     loader.integer("BRIDGE_RATE_BURST", 0),
+		RateLimitGlobalRPM: loader.integer("BRIDGE_RATE_LIMIT_GLOBAL", 0),
+		TrustProxy:         loader.boolean("BRIDGE_TRUST_PROXY", false),
+
+		ResponsesEnabled: loader.boolean("BRIDGE_RESPONSES_ENABLED", true),
+		ResponseTTL:      loader.dur("BRIDGE_RESPONSE_TTL", 30*time.Minute),
+
+		ToolCalling:    loader.boolean("BRIDGE_TOOL_CALLING", true),
+		ToolSoftFail:   loader.boolean("BRIDGE_TOOL_SOFT_FAIL", false),
+		ToolReregister: loader.dur("BRIDGE_TOOL_REREGISTER", 10*time.Minute),
+		ToolCallWait:   loader.dur("BRIDGE_TOOL_CALL_WAIT", 5*time.Minute),
+		MCPPublicURL:   strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
+
+		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
+
+		ConfigFile: cfgPath,
+	}
+	return cfg, nil
+}
+
+// defaultOpencodeDB 按 XDG 规则定位 OpenCode 的 SQLite 库。
+func defaultOpencodeDB() string {
+	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		return filepath.Join(v, "opencode", "opencode.db")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+}
+
+// normalizePermissionReply 校验权限自动应答策略。
+// 非法值一律回退到 once：宁可多答一次，也不能让工具挂死。
+func normalizePermissionReply(v string) string {
+	switch s := strings.ToLower(strings.TrimSpace(v)); s {
+	case "once", "always", "reject", "off":
+		return s
+	default:
+		return "once"
+	}
+}

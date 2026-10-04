@@ -1,0 +1,196 @@
+package main
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// toolflow.go —— 工具调用的编排：注册 / 回填 / 恢复 / 清理。
+
+// ensureTools 确保当前会话在 OpenCode 里注册了 MCP server，且工具集是最新的。
+//
+// 需要（重新）注册的三种情况：
+//  1. 首次：会话还没注册过
+//  2. 工具集变化：客户端换了 tools
+//  3. 注册过期：上游（OpenCode）重启会丢掉所有 MCP 注册，而桥不知道；
+//     所以超过 ToolReregister 就主动续注册一次，代价只是一次 PUT。
+func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string, tools []ToolSpec) error {
+	sess := s.tools.Register(conv.Key, tools)
+	fp := toolsFingerprint(tools)
+
+	// 注册名带工具集指纹：OpenCode 对"已存在的 MCP server 重新 PUT"不会重拉
+	// tools/list，模型会一直看到旧工具。换个名字 = 新 server，必然重新连接、重列。
+	name := mcpRegName(sess.mcpName, fp)
+
+	fresh := conv.mcpName == name && conv.toolsFP == fp && conv.toolSess != nil
+	if fresh && s.cfg.ToolReregister > 0 && time.Since(conv.toolsRegAt) < s.cfg.ToolReregister {
+		return nil
+	}
+
+	url := s.mcpEndpoint(sess.token)
+	if err := s.up.AddMCP(ctx, dir, name, url, nil, s.cfg.ToolCallWait); err != nil {
+		return err
+	}
+	// 工具集变化时清掉上一个名字（删不掉也没关系，janitor 会扫残留）。
+	if conv.mcpName != "" && conv.mcpName != name {
+		if err := s.up.RemoveMCP(ctx, dir, conv.mcpName); err != nil {
+			s.log.Debugf("remove superseded mcp %s: %v", conv.mcpName, err)
+		}
+	}
+	s.tools.Alias(sess, name)
+	conv.mcpName = name
+	conv.toolsFP = fp
+	conv.toolSess = sess
+	conv.toolsRegAt = time.Now()
+	verb := "registered"
+	if fresh {
+		verb = "re-registered"
+	}
+	s.metrics.incToolReg()
+	s.log.Infof("tool bridge %s: server=%s tools=%d dir=%s", verb, name, len(sess.snapshotTools()), dir)
+	return nil
+}
+
+// releaseToolsIfIdle 在本轮不再需要等客户端回填工具结果时，主动注销本会话的
+// MCP server。
+//
+// 原因：OpenCode 会把同一 location 下注册的所有 MCP server 暴露给每个 session。
+// 空闲会话的 server 若长期挂着（默认到 SessionTTL 30m），它的工具会被别的会话的
+// 模型看到甚至调用（串会话）。所以一轮结束且没有 pending 调用时立即注销，下一轮
+// 用到时再注册（指纹名不变时是同一名字，不会让模型看到过期工具）。
+func (s *Server) releaseToolsIfIdle(conv *Conversation) {
+	if conv == nil || !s.cfg.ToolCalling {
+		return
+	}
+	if len(conv.pendingToolCalls()) > 0 || conv.mcpName == "" {
+		return
+	}
+	dir := conv.directory
+	if dir == "" {
+		dir = s.cfg.Directory
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.removeTools(ctx, conv, dir)
+}
+
+// removeTools 注销当前会话的 MCP server（客户端不再声明 tools 时调用）。
+func (s *Server) removeTools(ctx context.Context, conv *Conversation, dir string) {
+	name := conv.mcpName
+	conv.mcpName = ""
+	conv.toolsFP = ""
+	conv.toolSess = nil
+	conv.pendingTools = nil
+	conv.toolsRegAt = time.Time{}
+	s.tools.Unregister(conv.Key)
+	if name == "" {
+		return
+	}
+	if err := s.up.RemoveMCP(ctx, dir, name); err != nil {
+		s.log.Debugf("remove mcp %s: %v", name, err)
+		return
+	}
+	s.log.Infof("tool bridge unregistered: server=%s", name)
+}
+
+// sweepTools 清理"会话已经不在 store 里"的 MCP 注册，避免上游越积越多。
+func (s *Server) sweepTools(ctx context.Context) {
+	names, err := s.up.ListMCP(ctx, s.cfg.Directory)
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		if !strings.HasPrefix(n, mcpNamePrefix) {
+			continue
+		}
+		if s.tools.sessionByName(n) != nil {
+			continue // 还活着
+		}
+		if err := s.up.RemoveMCP(ctx, s.cfg.Directory, n); err == nil {
+			s.log.Infof("janitor removed stale mcp server %s", n)
+		}
+	}
+}
+
+// sessionByName 供 sweep 判断某个 MCP server 是否属于活跃会话。
+func (b *ToolBridge) sessionByName(name string) *toolSession {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.byName[name]
+}
+
+// ---------- 客户端回填工具结果 ----------
+
+// toolResultsFromMessages 从请求的 messages[] 里提取 role:"tool" 的结果，按 tool_call_id 索引。
+func toolResultsFromMessages(msgs []ChatMessage) map[string]ToolResult {
+	out := map[string]ToolResult{}
+	for _, m := range msgs {
+		if m.Role != "tool" {
+			continue
+		}
+		id := m.ToolCallID
+		if id == "" {
+			continue
+		}
+		out[id] = ToolResult{Content: m.Content.Text}
+	}
+	return out
+}
+
+// hasToolResults 判断请求里是否带了工具执行结果。
+func hasToolResults(msgs []ChatMessage) bool {
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			return true
+		}
+	}
+	return false
+}
+
+// resumeToolCalls 处理「客户端回填工具结果」的后续请求。
+//
+// 关键点：
+//   - 不发送新 prompt。上游 agent 还停在 MCP tools/call 上，等我们把结果喂回去。
+//   - 必须先订阅事件再回填，否则会漏掉 agent 继续执行时产生的开头增量。
+//   - 回填后 agent 可能给出最终答案，也可能再次调用工具（循环），
+//     所以后续流程与普通一轮完全一致。
+func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *http.Request,
+	req ChatRequest, ref OCModelRef, conv *Conversation,
+	pending []*pendingCall, results map[string]ToolResult,
+	dir string, sub *subscription, promptAt int64) {
+
+	// 先订阅，再唤醒 agent
+	answered := 0
+	for _, p := range pending {
+		res, ok := results[p.CallID]
+		if !ok {
+			// 客户端没给这一条的结果：以错误收尾，避免 agent 永久挂住
+			res = ToolResult{
+				Content: "bridge: client did not supply a result for tool call " + p.CallID,
+				IsError: true,
+			}
+		} else {
+			answered++
+		}
+		p.complete(res)
+	}
+	s.log.Infof("tool results delivered: conv=%s answered=%d/%d", conv.Key, answered, len(pending))
+
+	// 让 agent 跑起来，复用流式/非流式收尾
+	if req.Stream {
+		s.streamCompletion(w, r, req, ref, conv, sub, promptAt, "")
+		return
+	}
+	s.blockingCompletion(ctx, w, req, ref, conv, sub, promptAt)
+}
+
+// pendingToolCalls 取出本会话等待回填的调用。
+func (c *Conversation) pendingToolCalls() []*pendingCall {
+	return c.pendingTools
+}
+
+func (c *Conversation) setPendingToolCalls(p []*pendingCall) {
+	c.pendingTools = p
+}

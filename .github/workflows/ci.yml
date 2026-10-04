@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: make vet
+      - name: test
+        run: make test
+      - name: build
+        run: make build
+      - name: version
+        run: ./janus --version

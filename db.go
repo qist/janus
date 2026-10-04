@@ -35,7 +35,10 @@ type dbConversation struct {
 	Variant    string `gorm:"size:40"`
 	Agent      string `gorm:"size:80"`
 	Directory  string `gorm:"size:512"`
-	UpdatedAt  int64  `gorm:"index"`
+	// History 是 Chat 的规范化历史快照（[]ChatMessage 的 JSON），
+	// 用于跨进程重启后仍能做历史前缀匹配、只发增量。
+	History   []byte
+	UpdatedAt int64 `gorm:"index"`
 }
 
 // dbMemoryDSN 表示"不用文件、纯内存"。

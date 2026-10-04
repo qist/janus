@@ -262,7 +262,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 |---|---|---|
 | `BRIDGE_RESPONSES_ENABLED` | `true` | 是否开放 `/v1/responses` |
 | `BRIDGE_RESPONSE_TTL` | `30m` | 已保存响应的保留时长（`previous_response_id` 依赖） |
-| `BRIDGE_DB` | 默认 `$XDG_DATA_HOME/janus/janus.db` | 持久化库路径（SQLite）。不设=默认路径；`memory`/`off`=纯内存。开启后响应与会话映射跨重启续链 |
+| `BRIDGE_DB` | 默认 `$XDG_DATA_HOME/janus/janus.db` | 持久化库路径（SQLite）。不设=默认路径；`memory`/`off`=纯内存。开启后**响应、会话映射与 Chat 历史快照**都落盘，Chat / Responses 均可跨进程重启续接 |
 | `BRIDGE_USAGE_ENABLED` | `true` | 是否开放 `/v1/usage` |
 | `BRIDGE_USAGE_TTL` | `30s` | 用量报告缓存时长（避免频繁打 console API） |
 
@@ -527,6 +527,7 @@ turn3  同一 session                     delta=61B  →  BLUE-42
 > 客户端不需要带 system 提示词。带了会更好（分桶更准），不带也不会串。
 
 **隔离保证**（均有测试）：并发首请求、同分桶不同内容 → 各自独立会话；同话题多轮 → 续接同一会话。
+配置 `BRIDGE_DB` 后，会话映射与 Chat 历史快照落本地 SQLite，**重启后 Chat 也按前缀命中续接同一会话**。
 
 **Responses 也走同一套内核**：`previous_response_id` 直接复用上一条响应所属的 Janus 会话
 （也就是同一个 OpenCode session），每轮只发新增 `input`；Chat 与 Responses 只是键空间不同

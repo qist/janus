@@ -669,6 +669,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		pending := conv.pendingToolCalls()
 		conv.setPendingToolCalls(nil)
 		conv.setLast(cloneMessages(req.Messages))
+		s.persistConv(conv)
 
 		sid := conv.snapshotSessionID()
 		sub := s.bus.Subscribe(sid, 512)
@@ -788,6 +789,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 无论成败都快照历史，避免客户端下次差分失败导致重复发送
 	conv.setLast(cloneMessages(req.Messages))
+	s.persistConv(conv)
 
 	// ---- 流式 / 非流式 ----
 	if req.Stream {

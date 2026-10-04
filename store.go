@@ -146,6 +146,12 @@ func (s *Store) restoreLocked(c *Conversation) {
 	c.model = OCModelRef{ProviderID: row.ProviderID, ID: row.ModelID, Variant: row.Variant}
 	c.agent = row.Agent
 	c.directory = row.Directory
+	if len(row.History) > 0 {
+		var msgs []ChatMessage
+		if json.Unmarshal(row.History, &msgs) == nil && len(msgs) > 0 {
+			c.setLast(msgs)
+		}
+	}
 }
 
 func NewStore(log *Logger, ttl time.Duration, max int) *Store {

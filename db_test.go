@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,6 +61,48 @@ func chainServerDB(t *testing.T, stub *httptest.Server, dbPath string) *Server {
 		t.Fatal("DBPath 已配置，db 不应为 nil")
 	}
 	return srv
+}
+
+// Chat 也让跨重启续接闭环：持久化"会话键 → sessionID + 历史快照"，
+// 重启后带完整历史的下一轮仍前缀命中、复用同一个 OpenCode session。
+func TestChatHistorySurvivesRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("依赖空闲判定")
+	}
+	path := filepath.Join(t.TempDir(), "janus.db")
+	stub, sessions, _ := stubChainUpstream(t)
+
+	srv1 := chainServerDB(t, stub, path)
+	rec1 := postChatWithHeader(t, srv1, `{"model":"default","stream":false,"messages":[{"role":"user","content":"hi"}]}`, "X-Session-ID", "S")
+	if rec1.Code != 200 {
+		t.Fatalf("r1 status=%d body=%s", rec1.Code, rec1.Body.String())
+	}
+	if n := atomic.LoadInt32(sessions); n != 1 {
+		t.Fatalf("第一轮应建 1 个 session，实际 %d", n)
+	}
+
+	// 重启进程
+	srv2 := chainServerDB(t, stub, path)
+	// 第二轮带完整历史（含上一轮 assistant），应命中恢复出的会话
+	body2 := `{"model":"default","stream":false,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"ok"},{"role":"user","content":"next"}]}`
+	rec2 := postChatWithHeader(t, srv2, body2, "X-Session-ID", "S")
+	if rec2.Code != 200 {
+		t.Fatalf("r2 status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if n := atomic.LoadInt32(sessions); n != 1 {
+		t.Fatalf("重启后应复用同一 session，实际创建了 %d 个", n)
+	}
+}
+
+func postChatWithHeader(t *testing.T, srv *Server, body, hk, hv string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(hk, hv)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
 }
 
 // 关键：#3 的目标——进程重启后，用上一轮的 previous_response_id 仍能续上同一个

@@ -138,6 +138,12 @@ func (s *Server) persistConv(conv *Conversation) {
 	if sid == "" {
 		return
 	}
+	var hist []byte
+	if msgs := conv.snapshotLast(); len(msgs) > 0 {
+		if b, err := json.Marshal(msgs); err == nil {
+			hist = b
+		}
+	}
 	s.db.saveConv(dbConversation{
 		Key:        conv.Key,
 		SessionID:  sid,
@@ -146,6 +152,7 @@ func (s *Server) persistConv(conv *Conversation) {
 		Variant:    conv.model.Variant,
 		Agent:      conv.agent,
 		Directory:  conv.directory,
+		History:    hist,
 	})
 }
 

@@ -619,10 +619,24 @@ CGO_ENABLED=1 go test -race ./...
 # 端到端：用 OpenAI 官方 SDK 打真实 bridge
 python3 -m venv .venv && .venv/bin/pip install openai
 BRIDGE_API_KEY=sk-bridge-dev .venv/bin/python tests/compat_test.py
+
+# 兼容性矩阵（重点：Tool Calling + Responses 事件）
+# 需指定一个可用模型（免费额度模型经 API 会 403）
+make compat BRIDGE_MODEL=opencode-go/deepseek-v4.1-flash:max
+# 或分组：python3 tests/compat_matrix.py tools|responses
 ```
 
 `compat_test.py` 覆盖 22 项断言：模型列表、流式/非流式、`include_usage`、
 多轮上下文、`reasoning_content`、错误语义（404/400/401）、图片、并发隔离。
+
+`compat_matrix.py` 是**兼容性矩阵**，覆盖最容易出兼容问题的工具与事件：
+- 工具调用：单个 / 多个并行 / 工具报错 / 超大结果 / 流式协议字段 / 带 reasoning
+- Responses：SSE 事件序列（`response.created` → `output_text.delta` → `completed`）、
+  `function_call_arguments.delta/done`、`output_item.added/done`、`previous_response_id` 续链
+- 并发：8 客户端不串会话
+
+结果（本机实测）：**25 项断言全过**。每个 Chat 用例都带唯一 `user`，本身也是"会话隔离"的验证。
+
 
 ## 安全边界（重要）
 

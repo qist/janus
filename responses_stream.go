@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -187,16 +188,25 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 	}
 	if len(t.tools) > 0 {
 		s.metrics.incToolCalls(len(t.tools))
-		for _, p := range t.tools {
+		// function_call 在最终 output[] 里的起始下标：reasoning 项占据 0。
+		base := 0
+		if strings.TrimSpace(t.res.reasoning) != "" {
+			base = 1
+		}
+		for i, p := range t.tools {
+			idx := base + i
 			item := ResponseItem{
 				Type: "function_call", ID: fcPrefix + newID()[:24],
 				CallID: p.CallID, Name: p.ToolName, Arguments: p.Args, Status: "completed",
 			}
-			_ = ss.event("response.output_item.added", map[string]any{"output_index": 0, "item": item})
+			_ = ss.event("response.output_item.added", map[string]any{"output_index": idx, "item": item})
 			_ = ss.event("response.function_call_arguments.delta", map[string]any{
-				"output_index": 0, "item_id": item.ID, "delta": p.Args,
+				"output_index": idx, "item_id": item.ID, "delta": p.Args,
 			})
-			_ = ss.event("response.output_item.done", map[string]any{"output_index": 0, "item": item})
+			_ = ss.event("response.function_call_arguments.done", map[string]any{
+				"output_index": idx, "item_id": item.ID, "arguments": p.Args,
+			})
+			_ = ss.event("response.output_item.done", map[string]any{"output_index": idx, "item": item})
 		}
 	} else if !responseHasContent(&ChatResponse{Choices: []Choice{{Message: AssistantMsg{
 		Content: t.res.text, ReasoningContent: t.res.reasoning,

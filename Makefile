@@ -11,7 +11,7 @@ LDFLAGS := -s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.Dat
 # Linux 发布架构（对应 GitHub Release 里的 janus_<version>_linux_<arch>.tar.gz）
 LINUX_ARCHES := amd64 arm64 arm 386
 
-.PHONY: all build test vet fmt run dist-linux clean
+.PHONY: all build test vet fmt run dist-linux compat clean
 
 all: vet test build
 
@@ -30,6 +30,12 @@ fmt:
 # 前台运行（读取仓库根的 janus.env）
 run: build
 	./$(BINARY)
+
+# 兼容性矩阵（需先起服务；python 环境需装 openai）。
+# 指定一个可用的模型（免费额度模型经 API 会 403）：
+#   make compat BRIDGE_MODEL=opencode-go/deepseek-v4.1-flash:max
+compat:
+	BRIDGE_MODEL="$(BRIDGE_MODEL)" python3 tests/compat_matrix.py
 
 # Linux 全架构静态二进制 + tar.gz（CGO 关闭，纯静态）
 dist-linux:

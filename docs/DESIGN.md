@@ -719,9 +719,10 @@ output[]（reasoning / message / function_call）
 `input` 只含增量，套 Chat 的 Diff 前缀匹配会误判成新会话。
 
 **流式**：事件带 `event:` 名与 `sequence_number`：
-`response.created` → `response.reasoning_summary_text.delta` /
-`response.output_text.delta` → `response.output_item.added`（function_call）→
-`response.completed`。空回复发 `response.failed`。
+`response.created` → `response.reasoning_summary_text.delta` / `response.output_text.delta` →
+工具调用时：`response.output_item.added` → `response.function_call_arguments.delta` →
+`response.function_call_arguments.done` → `response.output_item.done`（并行时 `output_index` 递增）
+→ `response.completed`。空回复发 `response.failed`。兼容性矩阵见 `tests/compat_matrix.py`。
 
 **响应存储**：`responseStore`（内存 + TTL），供 `GET` / `DELETE` / `previous_response_id` 使用。
 配置 `BRIDGE_DB` 后用 `github.com/qist/sqlite`（+gorm）写穿到本地 SQLite，并额外持久化

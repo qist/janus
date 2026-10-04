@@ -18,6 +18,10 @@ func main() {
 		case "-v", "--version", "version":
 			fmt.Println(versionString())
 			return
+		case "models":
+			// 列出上游可用模型，帮用户挑 BRIDGE_DEFAULT_MODEL
+			runModels(os.Args[2:])
+			return
 		}
 	}
 

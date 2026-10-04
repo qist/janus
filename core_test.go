@@ -1365,18 +1365,7 @@ func richModel() OCModel {
 	m.Limit.Output = 128000
 	m.Time.Released = 1790553600000
 	m.Variants = modelWithVariants("low", "high", "max").Variants
-	m.Cost = append(m.Cost, struct {
-		Tier *struct {
-			Type string `json:"type"`
-			Size int    `json:"size"`
-		} `json:"tier,omitempty"`
-		Input  float64 `json:"input"`
-		Output float64 `json:"output"`
-		Cache  struct {
-			Read  float64 `json:"read"`
-			Write float64 `json:"write"`
-		} `json:"cache"`
-	}{Input: 2, Output: 10})
+	m.Cost = append(m.Cost, OCCost{Input: 2, Output: 10})
 	m.Cost[0].Cache.Read = 0.2
 	m.Cost[0].Cache.Write = 2.5
 	return m

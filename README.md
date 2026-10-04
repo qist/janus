@@ -217,7 +217,8 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 |---|---|---|
 | `BRIDGE_DIRECTORY` | 桥启动时的工作目录 | 会话默认工作目录（OpenCode 项目路径） |
 | `BRIDGE_DEFAULT_MODEL` | 空 | `default`/`auto`/空别名使用的模型（如 `opencode-go/gpt-6-luna`）；**留空=跟随上游默认**。客户端显式传的 `model` 始终透传，不受此影响。注意：上游默认若是 `opencode/*` 免费模型，经 API 调用会 403（免费额度只能在 OpenCode 内用），需要支持"不带 model"的请求就显式填一个可用的 |
-| `BRIDGE_MODEL_MAP` | 空 | 模型别名映射（逗号分隔 `from=to`，键不区分大小写）。主要给 Claude Code：把 `claude-*` 映射到 OpenCode 真实模型，如 `claude-3-5-sonnet=opencode-go/gpt-6-luna,claude-3-5-haiku=opencode-go/glm-5.3-flash` |
+| `BRIDGE_MODEL_MAP` | 空 | 模型别名映射（逗号分隔 `from=to`，键不区分大小写，键以 `*` 结尾为前缀通配）。主要给 Claude Code：**只需映射 opus/sonnet/haiku 三个档位**，如 `claude-opus*=opencode-go/deepseek-v4-pro,claude-haiku*=opencode-go/glm-5.3-flash`。想省事就用 `BRIDGE_DEFAULT_MODEL` 一个开关；用 `janus models` 查当前映射 |
+| `BRIDGE_WEBSEARCH_ENABLED` | `true` | 是否支持 Claude Code 的 `web_search` 服务端工具（由 Janus 内部调用上游 `/api/websearch` 执行） |
 | `BRIDGE_AGENT` | `build` | 默认 agent，取值见下 |
 | `BRIDGE_SESSION_TTL` | `30m` | 会话空闲回收时间（同时删上游 session） |
 | `BRIDGE_REQUEST_TIMEOUT` | `600s` | 单次补全总超时 |
@@ -298,6 +299,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | DELETE | `/v1/responses/{id}` | 删除响应 |
 | POST | `/v1/messages` | **Anthropic Messages API**（供 Claude Code / Anthropic SDK，流式 + 工具） |
 | POST | `/v1/messages/count_tokens` | Anthropic token 估算 |
+| GET | `/anthropic/v1/models` | **Anthropic 格式**模型列表（Claude Code 模型选择器；`/v1/models` + `anthropic-version` 头同样返回） |
 | POST | `/v1/completions` | 旧版补全，内部降级为单轮 chat |
 | * | `/v1/*` | 其余一律返回 OpenAI 格式 404（客户端不会因解析失败而崩） |
 
@@ -325,15 +327,39 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-3-5-haiku
 - 流式：`message_start → content_block_start/delta/stop → message_delta → message_stop`（工具块用 `input_json_delta`）
 - 工具：Anthropic `tool_use`（`id/name/input`）↔ 客户端声明的 tools；`tool_result` 回填给 agent
 - 鉴权：`x-api-key`（也接受 `Authorization: Bearer`）；`anthropic-version` / `anthropic-beta` 忽略
-- **服务端模型映射（推荐）**：`BRIDGE_MODEL_MAP` 把 CC 发来的 `claude-*` 映射到 OpenCode 真实模型，
-  支持前缀通配（`*` 结尾），例如：
+- **模型路由（重要）**：CC 只会用少数几个**档位名**（`claude-opus*` / `claude-sonnet*` / `claude-haiku*`），
+  所以**你不需要逐个映射模型**。请求按下面的优先级解析：
+
+  1. `BRIDGE_MODEL_MAP` 显式映射（支持前缀通配 `*` 结尾）
+  2. 请求的 `model` 本身能解析（例如客户端直接填 `opencode-go/xxx`）
+  3. `BRIDGE_DEFAULT_MODEL` —— **多数用户只需配这一个**，所有档位都走它
+  4. 都没有时，按档位启发式自动挑：opus 挑强的、haiku 挑便宜快的
+- **怎么从一堆订阅模型里挑那一个**：`janus models` 列出上游全部可用模型
+  （价格 / 上下文 / 能力，并标注哪些经 API 会 403），末尾直接给出三个档位的当前映射结果，
+  复制一行填进 `BRIDGE_DEFAULT_MODEL` 即可：
 
   ```bash
-  BRIDGE_MODEL_MAP=claude-opus*=opencode-go/gpt-6-luna,claude-sonnet*=opencode-go/deepseek-v4.1-flash,claude-haiku*=opencode-go/glm-5.3-flash
+  janus models            # 表格
+  janus models --json     # 给脚本/二次处理
+  ```
+
+- **只用一个模型（最常见）**：
+
+  ```bash
+  BRIDGE_DEFAULT_MODEL=opencode-go/gpt-6-luna
+  ```
+
+- **想分档位**（例如 opus 用强模型、haiku 用便宜快的）—— 只需映射 3 个档位：
+
+  ```bash
+  BRIDGE_MODEL_MAP=claude-opus*=opencode-go/deepseek-v4-pro,claude-sonnet*=opencode-go/deepseek-v4.1-flash,claude-haiku*=opencode-go/glm-5.3-flash
   ```
 
   （正是 DeepSeek 的 `claude-opus* → 强模型`、`claude-sonnet*/haiku* → 快模型` 那套；用户只改 base_url + key 即可）
-- **模型回退**：没配映射且请求的 `model` 解析不到时，自动用 `BRIDGE_DEFAULT_MODEL` / 上游默认
+- **模型列表（Anthropic 格式）**：`GET /anthropic/v1/models`（或带 `anthropic-version` 头访问 `/v1/models`）
+  返回 Claude Code 模型选择器认的格式，`display_name` 里带上“实际映射到谁”，方便核对
+- **Web Search（服务端工具）**：CC 声明的 `web_search` 由 Janus **内部执行**（调用上游 OpenCode 的
+  `/api/websearch`），结果回喂给 agent，不会作为 `tool_use` 甩回 CC；`BRIDGE_WEBSEARCH_ENABLED=false` 可关闭
 - **会话锚点**：Claude Code 的 `x-claude-code-session-id` 头会自动作为会话键，不同 CC 会话天然隔离
 
 ### 查看模型

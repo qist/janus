@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -42,9 +43,11 @@ type AnthropicMessage struct {
 }
 
 type AnthropicTool struct {
+	Type        string          `json:"type,omitempty"`
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	MaxUses     int             `json:"max_uses,omitempty"`
 }
 
 type anthropicBlock struct {
@@ -243,9 +246,19 @@ func anthropicToolResultText(raw json.RawMessage) string {
 	return b.String()
 }
 
+// web_search 是 Claude Code 的服务端工具，由桥内部执行。
+const webSearchToolName = "web_search"
+
+var webSearchSchema = json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词"}},"required":["query"]}`)
+
 func anthropicToolsToSpecs(tools []AnthropicTool) []ToolSpec {
 	out := make([]ToolSpec, 0, len(tools))
 	for _, t := range tools {
+		if strings.HasPrefix(t.Type, "web_search") || t.Name == webSearchToolName {
+			out = append(out, ToolSpec{Type: "function", Function: ToolFunction{
+				Name: webSearchToolName, Description: "搜索网页，返回标题/链接/摘要", Parameters: webSearchSchema}})
+			continue
+		}
 		if t.Name == "" {
 			continue
 		}
@@ -259,6 +272,16 @@ func anthropicToolsToSpecs(tools []AnthropicTool) []ToolSpec {
 		})
 	}
 	return out
+}
+
+// anthropicHasWebSearch 判断请求里是否声明了 web_search 服务端工具。
+func anthropicHasWebSearch(tools []AnthropicTool) bool {
+	for _, t := range tools {
+		if strings.HasPrefix(t.Type, "web_search") || t.Name == webSearchToolName {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 输出映射 ----------
@@ -398,17 +421,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, st, typ, msg)
 		return
 	}
-	ref, err := s.resolveModel(r.Context(), req.Model, ocModels)
+	ref, err := s.resolveAnthropicModel(r.Context(), req.Model, ocModels)
 	if err != nil {
-		// Anthropic 的模型名（claude-*）若既没配 BRIDGE_MODEL_MAP 也不在 OpenCode 里：
-		// 回退默认模型，别 404
-		d, derr := s.resolveDefaultModel(r.Context(), ocModels)
-		if derr != nil {
-			writeAnthropicError(w, http.StatusNotFound, "not_found_error", err.Error())
-			return
-		}
-		s.log.Debugf("anthropic model %q not found, falling back to %s", req.Model, d.String())
-		ref = d
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", err.Error())
+		return
 	}
 
 	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), s.cfg.Directory)
@@ -432,6 +448,16 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.log.Warnf("tool bridge registration failed (soft-fail): %v", err)
+		}
+	}
+
+	// Claude Code 的 web_search 是"服务端工具"：声明它后由桥内部执行，
+	// 不把它作为 tool_use 甩回给 CC。这里把它登记到会话上。
+	if s.cfg.WebSearchEnabled && anthropicHasWebSearch(req.Tools) {
+		if sess := s.tools.ByKey(conv.Key); sess != nil {
+			sess.setServerTools(map[string]serverToolFunc{
+				webSearchToolName: s.webSearchServerTool(dir),
+			})
 		}
 	}
 
@@ -618,4 +644,205 @@ func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	// 粗略估算：~4 字符 / token。Claude Code 用它做上下文控制，不要求精确。
 	approx := len(body)/4 + 1
 	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": approx})
+}
+
+// ---------- 档位模型映射（Claude Code）----------
+
+// anthropicTierAliases 是 Claude Code 常用的档位别名（供 /anthropic/v1/models 展示与默认映射）。
+var anthropicTierAliases = []struct{ Alias, Tier string }{
+	{"claude-opus-4-1", "opus"},
+	{"claude-sonnet-4-5", "sonnet"},
+	{"claude-3-5-haiku", "haiku"},
+}
+
+// anthropicTier 判断模型名属于哪个 Anthropic 档位（opus/sonnet/haiku），否则 ""。
+func anthropicTier(raw string) string {
+	l := strings.ToLower(raw)
+	switch {
+	case strings.Contains(l, "opus"):
+		return "opus"
+	case strings.Contains(l, "sonnet"):
+		return "sonnet"
+	case strings.Contains(l, "haiku"):
+		return "haiku"
+	}
+	return ""
+}
+
+// pickTierModel 按档位自动挑一个可用模型：
+//   - 排除经 API 会 403 的 opencode 免费额度
+//   - 名字命中档位关键词（flash/mini、pro/max）的优先；
+//     在此前提下 haiku 取最便宜、opus 取最贵、sonnet 取中间
+func pickTierModel(list []OCModel, tier string) (OCModelRef, bool) {
+	type cand struct {
+		m    OCModel
+		cost float64
+		rank int
+	}
+	rankName := func(name string) int {
+		l := strings.ToLower(name)
+		switch tier {
+		case "haiku":
+			if strings.Contains(l, "flash") || strings.Contains(l, "mini") || strings.Contains(l, "lite") {
+				return 0
+			}
+		case "opus":
+			if strings.Contains(l, "pro") || strings.Contains(l, "luna") || strings.Contains(l, "max") || strings.Contains(l, "opus") {
+				return 0
+			}
+		}
+		return 1
+	}
+	var cs []cand
+	for _, m := range list {
+		if !m.Enabled || !m.Capabilities.Tools {
+			continue
+		}
+		if m.ProviderID == "opencode" && isFreeModel(m) {
+			continue // 免费额度经 API 会 403
+		}
+		c := 0.0
+		if len(m.Cost) > 0 {
+			c = m.Cost[0].Input + m.Cost[0].Output
+		}
+		cs = append(cs, cand{m: m, cost: c, rank: rankName(m.ID)})
+	}
+	if len(cs) == 0 {
+		return OCModelRef{}, false
+	}
+	sort.Slice(cs, func(i, j int) bool {
+		if cs[i].rank != cs[j].rank {
+			return cs[i].rank < cs[j].rank
+		}
+		if cs[i].cost != cs[j].cost {
+			return cs[i].cost < cs[j].cost
+		}
+		return cs[i].m.ID < cs[j].m.ID
+	})
+	// 只在最优 rank 的一组里，按档位挑（组内已按价格升序）
+	bestRank := cs[0].rank
+	group := cs[:0:0]
+	for _, c := range cs {
+		if c.rank == bestRank {
+			group = append(group, c)
+		}
+	}
+	var pick OCModel
+	switch tier {
+	case "haiku":
+		pick = group[0].m
+	case "opus":
+		pick = group[len(group)-1].m
+	default:
+		pick = group[len(group)/2].m
+	}
+	return OCModelRef{ProviderID: pick.ProviderID, ID: pick.ID}, true
+}
+
+// resolveAnthropicModel 解析 Anthropic 请求的 model：
+//  1. 显式 BRIDGE_MODEL_MAP（精确/前缀）
+//  2. 直接可解析（客户端填了 opencode-go/xxx 这类）
+//  3. claude-* 档位名 → BRIDGE_DEFAULT_MODEL（配了就用它，一个开关搞定）
+//  4. 否则按档位自动挑；再不行才用上游默认
+func (s *Server) resolveAnthropicModel(ctx context.Context, raw string, list []OCModel) (OCModelRef, error) {
+	if ref, err := s.resolveModel(ctx, raw, list); err == nil {
+		return ref, nil
+	}
+	if tier := anthropicTier(raw); tier != "" {
+		if s.cfg.DefaultModel != "" {
+			if ref, err := ResolveModel(s.cfg.DefaultModel, list); err == nil {
+				return ref, nil
+			}
+		}
+		if ref, ok := pickTierModel(list, tier); ok {
+			return ref, nil
+		}
+	}
+	if ref, err := s.resolveDefaultModel(ctx, list); err == nil {
+		return ref, nil
+	}
+	return OCModelRef{}, fmt.Errorf("model %q not found and no usable default", raw)
+}
+
+// webSearchServerTool 返回一个"桥自己执行"的 web_search（调用 OpenCode 的 /api/websearch）。
+func (s *Server) webSearchServerTool(dir string) serverToolFunc {
+	return func(ctx context.Context, args string) (string, bool) {
+		var a struct {
+			Query string `json:"query"`
+		}
+		_ = json.Unmarshal([]byte(args), &a)
+		q := strings.TrimSpace(a.Query)
+		if q == "" {
+			return "web_search: missing query", true
+		}
+		results, provider, err := s.up.WebSearch(ctx, dir, q)
+		if err != nil {
+			return "web_search failed: " + err.Error(), true
+		}
+		if len(results) == 0 {
+			return "web_search: no results for " + q, false
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "web_search(%q) provider=%s results=%d\n", q, provider, len(results))
+		for i, r := range results {
+			fmt.Fprintf(&b, "\n%d. %s\n   %s\n   %s\n", i+1,
+				strings.TrimSpace(r.Title), r.URL, truncate(strings.TrimSpace(r.Content), 1200))
+		}
+		return b.String(), false
+	}
+}
+
+// handleAnthropicModels 返回 Anthropic 格式的模型列表（Claude Code 的模型选择器用），
+// id 用 claude 别名，display_name 里带上"实际会映射到哪个模型"，方便用户确认。
+func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
+	if err := s.checkAuth(r); err != nil {
+		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
+		return
+	}
+	list, _ := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
+
+	type item struct{ id, display string }
+	var items []item
+	seen := map[string]bool{}
+	add := func(alias string, ref OCModelRef, ok bool) {
+		if alias == "" || seen[alias] {
+			return
+		}
+		seen[alias] = true
+		display := alias
+		if ok {
+			display = alias + " → " + ref.String()
+		}
+		items = append(items, item{alias, display})
+	}
+	// 显式映射里的 claude/anthropic 别名
+	for k, v := range s.cfg.ModelMap {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "claude") || strings.HasPrefix(lk, "anthropic") {
+			ref, err := ResolveModel(v, list)
+			add(strings.TrimSuffix(k, "*"), ref, err == nil)
+		}
+	}
+	// 内置档位别名（不管有没有显式映射都列，display 显示实际映射到谁）
+	for _, t := range anthropicTierAliases {
+		ref, err := s.resolveAnthropicModel(r.Context(), t.Alias, list)
+		add(t.Alias, ref, err == nil)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].id < items[j].id })
+
+	data := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		data = append(data, map[string]any{
+			"type": "model", "id": it.id, "display_name": it.display,
+			"created_at": "2025-01-01T00:00:00Z",
+		})
+	}
+	first, last := "", ""
+	if len(data) > 0 {
+		first = data[0]["id"].(string)
+		last = data[len(data)-1]["id"].(string)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": data, "has_more": false, "first_id": first, "last_id": last,
+	})
 }

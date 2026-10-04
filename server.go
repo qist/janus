@@ -266,6 +266,8 @@ func (s *Server) Handler() http.Handler {
 	// （ANTHROPIC_BASE_URL=http://host:2810/anthropic）
 	mux.HandleFunc("POST /anthropic/v1/messages", s.handleMessages)
 	mux.HandleFunc("POST /anthropic/v1/messages/count_tokens", s.handleCountTokens)
+	// Anthropic 格式的模型列表（Claude Code 模型选择器 / models.list()）。
+	mux.HandleFunc("GET /anthropic/v1/models", s.handleAnthropicModels)
 
 	// 内置 MCP server：OpenCode 以 remote MCP 方式注册它，用来调用客户端声明的工具。
 	// 既是路由，也当鉴权（URL 里的 token 是 128 位随机串）。
@@ -296,6 +298,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	// Anthropic 客户端（Claude Code / anthropic SDK）会带 anthropic-version 头，
+	// 且只认 Anthropic 格式的模型列表（type/display_name/created_at + has_more…）。
+	if r.Header.Get("anthropic-version") != "" {
+		s.handleAnthropicModels(w, r)
+		return
+	}
 	if err := s.checkAuth(r); err != nil {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
 		return

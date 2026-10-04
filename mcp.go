@@ -136,6 +136,19 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		if args == "" || args == "null" {
 			args = "{}"
 		}
+
+		// 桥自己执行的工具（如 Claude Code 的 web_search 服务端工具）：
+		// 直接执行并把结果回给 agent，不甩给客户端。
+		if fn := sess.serverTool(original); fn != nil {
+			content, isErr := fn(r.Context(), args)
+			s.log.Debugf("mcp server-tool executed: %s", original)
+			mcpReply(w, req.ID, map[string]any{
+				"content": []map[string]any{{"type": "text", "text": content}},
+				"isError": isErr,
+			})
+			return
+		}
+
 		callID := "call_" + randomToken()[:24]
 
 		// 防串会话：OpenCode 会把同 location 下所有 MCP server 暴露给每个

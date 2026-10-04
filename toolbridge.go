@@ -48,6 +48,10 @@ type ToolResult struct {
 	IsError bool
 }
 
+// serverToolFunc 是"由桥自己执行"的工具（如 Claude Code 的 web_search 服务端工具）。
+// 返回 (文本结果, isError)。
+type serverToolFunc func(ctx context.Context, args string) (string, bool)
+
 // pendingCall 是 agent 发起、等待客户端执行的一个工具调用。
 type pendingCall struct {
 	CallID   string // OpenAI tool_call id，回给客户端
@@ -76,6 +80,9 @@ type toolSession struct {
 	ordSeq  int64                   // 到达序号
 	waiters []chan struct{}         // 有新 pending 时通知执行器
 	closed  bool
+
+	// serverTools 由桥自己执行的工具（如 Claude Code 的 web_search），不甩给客户端。
+	serverTools map[string]serverToolFunc
 }
 
 // ToolBridge 管理所有会话的 MCP 工具上下文。
@@ -334,6 +341,25 @@ func (s *toolSession) hasPending() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.pending) > 0
+}
+
+// setServerTools 登记由桥自己执行的工具（不甩给客户端）。
+func (s *toolSession) setServerTools(m map[string]serverToolFunc) {
+	s.mu.Lock()
+	if s.serverTools == nil {
+		s.serverTools = map[string]serverToolFunc{}
+	}
+	for k, v := range m {
+		s.serverTools[k] = v
+	}
+	s.mu.Unlock()
+}
+
+// serverTool 返回某个"桥自己执行"的工具；不存在返回 nil。
+func (s *toolSession) serverTool(name string) serverToolFunc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.serverTools[name]
 }
 
 // hasWaiter 报告是否有执行器正在等待新的挂起调用（= 该会话当前有在飞请求）。

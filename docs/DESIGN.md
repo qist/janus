@@ -798,10 +798,17 @@ Store + executor + ToolBridge**，`anthropic.go` / `anthropic_stream.go` 只做�
   `input_json_delta`）`→ content_block_stop → message_delta → message_stop`
 - 鉴权 `x-api-key`（也接受 Bearer）；`anthropic-version`/`anthropic-beta` 忽略
 - 接口同时挂在 `/v1/messages` 与 `/anthropic/v1/messages`（对齐 DeepSeek 的 `/anthropic` 约定）
-- **模型映射**：`BRIDGE_MODEL_MAP` 支持精确与前缀（`*` 结尾）匹配，如
-  `claude-opus*=…,claude-sonnet*=…,claude-haiku*=…`（DeepSeek 式：opus→强模型、sonnet/haiku→快模型）
-- **模型回退**：请求的 `model`（如 `claude-*`）解析不到时，自动用
-  `BRIDGE_DEFAULT_MODEL` / 上游默认，避免 404
+- **模型路由（档位）**：CC 只用 `claude-opus*`/`claude-sonnet*`/`claude-haiku*` 等少数档位名，
+  因此**无需逐模型映射**。解析优先级：`BRIDGE_MODEL_MAP`（精确/前缀 `*`）→ 请求本身可解析 →
+  `BRIDGE_DEFAULT_MODEL`（多数用户只配这一个，所有档位走它）→ 按档位启发式自动挑选
+  （排除经 API 会 403 的 `opencode/*` 免费额度；opus 挑强、haiku 挑便宜快）。见 `cmd_models.go`
+- **映射可见性 / 选型**：`janus models` 列出全部可用模型（价格/上下文/能力/可用性）并打印三档
+  当前映射；`GET /anthropic/v1/models`（或带 `anthropic-version` 头的 `/v1/models`）返回 Claude Code
+  模型选择器认的 Anthropic 格式，`display_name` 里带上实际映射目标
+- **服务端工具 `web_search`**：CC 声明 `{"type":"web_search_20250305"}` 时，Janus 把它作为
+  “桥内部执行”的工具（`toolSession.serverTools`）暴露给 agent：agent 调用它 → `handleMCP`
+  直接执行（调用上游 `/api/websearch`）并把结果回喂 agent，**不**作为 `tool_use` 甩回 CC。
+  这部分在 MCP `tools/call` 里先于“防串会话”守卫拦截。开关 `BRIDGE_WEBSEARCH_ENABLED`
 - **会话锚点**：`x-claude-code-session-id` 头自动作为会话键（不同 CC 会话隔离）
 - `POST /v1/messages/count_tokens` 提供粗略 token 估算（Claude Code 会调用）
 - 开关 `BRIDGE_ANTHROPIC_ENABLED`（默认 true）

@@ -185,27 +185,16 @@ func (u *Upstream) doRaw(ctx context.Context, method, path string, query url.Val
 // ---------- 模型 ----------
 
 type OCModel struct {
-	ID         string `json:"id"`
-	ModelID    string `json:"modelID"`
-	ProviderID string `json:"providerID"`
-	Name       string `json:"name"`
-	Enabled    bool   `json:"enabled"`
-	Status     string `json:"status"`
-	Family     string `json:"family"`
-	Package    string `json:"package"`
-	Cost       []struct {
-		Tier *struct {
-			Type string `json:"type"`
-			Size int    `json:"size"`
-		} `json:"tier,omitempty"`
-		Input  float64 `json:"input"`
-		Output float64 `json:"output"`
-		Cache  struct {
-			Read  float64 `json:"read"`
-			Write float64 `json:"write"`
-		} `json:"cache"`
-	} `json:"cost"`
-	Limit struct {
+	ID         string   `json:"id"`
+	ModelID    string   `json:"modelID"`
+	ProviderID string   `json:"providerID"`
+	Name       string   `json:"name"`
+	Enabled    bool     `json:"enabled"`
+	Status     string   `json:"status"`
+	Family     string   `json:"family"`
+	Package    string   `json:"package"`
+	Cost       []OCCost `json:"cost"`
+	Limit      struct {
 		Context int `json:"context"`
 		Input   int `json:"input"`
 		Output  int `json:"output"`
@@ -235,6 +224,20 @@ type OCModelRef struct {
 	ID         string `json:"id"`
 	ProviderID string `json:"providerID"`
 	Variant    string `json:"variant,omitempty"`
+}
+
+// OCCost 是模型的一个价格档位（上游可按上下文长度分档）。
+type OCCost struct {
+	Tier *struct {
+		Type string `json:"type"`
+		Size int    `json:"size"`
+	} `json:"tier,omitempty"`
+	Input  float64 `json:"input"`
+	Output float64 `json:"output"`
+	Cache  struct {
+		Read  float64 `json:"read"`
+		Write float64 `json:"write"`
+	} `json:"cache"`
 }
 
 func (r OCModelRef) String() string {
@@ -360,6 +363,31 @@ func (u *Upstream) ReplyPermission(ctx context.Context, sessionID, requestID, de
 	path := "/api/session/" + url.PathEscape(sessionID) + "/permission/" + url.PathEscape(requestID) + "/reply"
 	body := map[string]string{"decision": decision}
 	return u.do(ctx, http.MethodPost, path, nil, body, nil)
+}
+
+// OCWebResult 是 OpenCode websearch 的一条结果。
+type OCWebResult struct {
+	URL     string `json:"url"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+
+// WebSearch 调用 OpenCode 的 websearch（供 Claude Code 的 web_search 服务端工具使用）。
+func (u *Upstream) WebSearch(ctx context.Context, directory, query string) ([]OCWebResult, string, error) {
+	q := url.Values{}
+	if directory != "" {
+		q.Set("location[directory]", directory)
+	}
+	var wrap struct {
+		Data struct {
+			ProviderID string        `json:"providerID"`
+			Results    []OCWebResult `json:"results"`
+		} `json:"data"`
+	}
+	if err := u.do(ctx, http.MethodPost, "/api/websearch", q, map[string]string{"query": query}, &wrap); err != nil {
+		return nil, "", err
+	}
+	return wrap.Data.Results, wrap.Data.ProviderID, nil
 }
 
 // OCPermission 是 OpenCode 待审批权限请求的一条。

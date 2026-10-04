@@ -73,6 +73,9 @@ type Config struct {
 
 	// Anthropic Messages API（/v1/messages，供 Claude Code / Anthropic SDK）
 	AnthropicEnabled bool
+	// WebSearchEnabled 是否支持 Claude Code 的 web_search 服务端工具
+	// （由桥内部调用 OpenCode 的 /api/websearch 执行）。
+	WebSearchEnabled bool
 
 	// 工具调用（把客户端 tools 经内置 MCP server 暴露给 OpenCode agent）
 	ToolCalling    bool          // 是否启用
@@ -312,6 +315,7 @@ func LoadConfig() (Config, error) {
 		ResponsesEnabled: loader.boolean("BRIDGE_RESPONSES_ENABLED", true),
 		ResponseTTL:      loader.dur("BRIDGE_RESPONSE_TTL", 30*time.Minute),
 		AnthropicEnabled: loader.boolean("BRIDGE_ANTHROPIC_ENABLED", true),
+		WebSearchEnabled: loader.boolean("BRIDGE_WEBSEARCH_ENABLED", true),
 
 		ToolCalling:    loader.boolean("BRIDGE_TOOL_CALLING", true),
 		ToolSoftFail:   loader.boolean("BRIDGE_TOOL_SOFT_FAIL", false),

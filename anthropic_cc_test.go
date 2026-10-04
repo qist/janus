@@ -142,6 +142,44 @@ func TestResolveAnthropicFullNameWithContextSuffix(t *testing.T) {
 	}
 }
 
+func TestTierFallbackUsesLastUsedModel(t *testing.T) {
+	list := []OCModel{
+		mkModel("opencode", "grok-build-0.1", 1, 2, true, true),
+		mkModel("opencode-go", "mimo-v2.5-pro", 1, 2, true, true),
+	}
+	s := &Server{cfg: Config{}}
+	// 客户端先显式用了 mimo（CC 的主模型）
+	if _, err := s.resolveModel(context.Background(), "mimo-v2.5-pro", list); err != nil {
+		t.Fatalf("resolve explicit: %v", err)
+	}
+	// 之后 claude-* 别名应跟着上次用过的模型，而不是启发式乱挑
+	ref, err := s.resolveAnthropicModel(context.Background(), "claude-sonnet-4-5", list)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if ref.String() != "opencode-go/mimo-v2.5-pro" {
+		t.Errorf("got %s want opencode-go/mimo-v2.5-pro", ref)
+	}
+
+	// 显式 BRIDGE_DEFAULT_MODEL 仍然优先
+	s2 := &Server{cfg: Config{DefaultModel: "opencode/grok-build-0.1"}}
+	s2.rememberModel(OCModelRef{ProviderID: "opencode-go", ID: "mimo-v2.5-pro"})
+	ref2, err := s2.resolveAnthropicModel(context.Background(), "claude-sonnet-4-5", list)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if ref2.String() != "opencode/grok-build-0.1" {
+		t.Errorf("default 应优先，got %s", ref2)
+	}
+
+	// 记忆的模型已不在列表 → 退回启发式
+	s3 := &Server{cfg: Config{}}
+	s3.rememberModel(OCModelRef{ProviderID: "opencode-go", ID: "gone"})
+	if _, ok := s3.rememberedModel(list); ok {
+		t.Error("已下线的模型不该被记住")
+	}
+}
+
 func TestAnthropicModelsEndpoint(t *testing.T) {
 	srv := newTestServerForRoutes(t)
 	h := srv.Handler()

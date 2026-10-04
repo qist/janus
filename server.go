@@ -40,6 +40,12 @@ type Server struct {
 	ownedMu sync.Mutex
 	owned   map[string]time.Time
 
+	// lastModel 记住最近一次"客户端显式指定且解析成功"的真实模型，
+	// 作为 claude-* 等别名解析不到时的兜底。这样无需任何配置，
+	// 也不会像纯启发式那样挑到本账号没额度的模型（如按量计费的 opencode/*）。
+	lastModelMu sync.Mutex
+	lastModel   *OCModelRef
+
 	// mcpAllow 非空时限制内置 MCP 端点 /mcp/{token} 的来源（IP/CIDR）。
 	mcpAllow []netip.Prefix
 
@@ -126,6 +132,36 @@ func (s *Server) isOwnedSession(sessionID string) bool {
 		return false
 	}
 	return true
+}
+
+// rememberModel 记录最近一次显式指定的真实模型，供别名兜底。
+func (s *Server) rememberModel(ref OCModelRef) {
+	if ref.ProviderID == "" || ref.ID == "" {
+		return
+	}
+	r := ref
+	s.lastModelMu.Lock()
+	s.lastModel = &r
+	s.lastModelMu.Unlock()
+}
+
+// rememberedModel 返回最近记录的真实模型；若它已不在/不可用则返回 false。
+func (s *Server) rememberedModel(list []OCModel) (OCModelRef, bool) {
+	s.lastModelMu.Lock()
+	ref := s.lastModel
+	s.lastModelMu.Unlock()
+	if ref == nil {
+		return OCModelRef{}, false
+	}
+	for _, m := range list {
+		if m.ProviderID == ref.ProviderID && m.ID == ref.ID {
+			if m.Enabled && m.Capabilities.Tools {
+				return *ref, true
+			}
+			return OCModelRef{}, false
+		}
+	}
+	return OCModelRef{}, false
 }
 
 // persistConv 把"会话键 → 上游 sessionID（+ model/agent/dir）"落库，

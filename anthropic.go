@@ -745,7 +745,8 @@ func pickTierModel(list []OCModel, tier string) (OCModelRef, bool) {
 //  1. 显式 BRIDGE_MODEL_MAP（精确/前缀）
 //  2. 直接可解析（客户端填了 opencode-go/xxx 这类）
 //  3. claude-* 档位名 → BRIDGE_DEFAULT_MODEL（配了就用它，一个开关搞定）
-//  4. 否则按档位自动挑；再不行才用上游默认
+//  4. 否则用"最近一次客户端显式用过的真实模型"兜底（无需配置）
+//  5. 再不行才按档位启发式自动挑；最后才用上游默认
 func (s *Server) resolveAnthropicModel(ctx context.Context, raw string, list []OCModel) (OCModelRef, error) {
 	if ref, err := s.resolveModel(ctx, raw, list); err == nil {
 		return ref, nil
@@ -755,6 +756,10 @@ func (s *Server) resolveAnthropicModel(ctx context.Context, raw string, list []O
 			if ref, err := ResolveModel(s.cfg.DefaultModel, list); err == nil {
 				return ref, nil
 			}
+		}
+		// 跟着客户端上次实际用的模型走：零配置，且不会挑到没额度的模型。
+		if ref, ok := s.rememberedModel(list); ok {
+			return ref, nil
 		}
 		if ref, ok := pickTierModel(list, tier); ok {
 			return ref, nil

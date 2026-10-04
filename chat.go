@@ -818,9 +818,18 @@ func (c *Conversation) key() string { return c.Key }
 // 其余交给 ResolveModel 按 provider/model 或裸名解析。
 func (s *Server) resolveModel(ctx context.Context, raw string, list []OCModel) (OCModelRef, error) {
 	if isDefaultAlias(raw) {
-		return s.resolveDefaultModel(ctx, list)
+		ref, err := s.resolveDefaultModel(ctx, list)
+		if err == nil {
+			s.rememberModel(ref)
+		}
+		return ref, err
 	}
-	return ResolveModel(s.mapModelName(raw), list)
+	ref, err := ResolveModel(s.mapModelName(raw), list)
+	if err == nil {
+		// 客户端显式给了真实模型：记下来，供 claude-* 别名兜底（无需配置）。
+		s.rememberModel(ref)
+	}
+	return ref, err
 }
 
 // mapModelName 应用 BRIDGE_MODEL_MAP（键不区分大小写）；无映射则原样返回。

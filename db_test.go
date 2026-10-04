@@ -46,6 +46,43 @@ func TestDBStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// 持久化治理：历史超过上限时只落会话映射，不落历史，避免库无界增长。
+func TestPersistConvCapsHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "janus.db")
+	stub, _, _ := stubChainUpstream(t)
+	cfg := Config{
+		Upstream: stub.URL, Username: "o", Password: "p",
+		Directory: "/tmp", APIKey: "sk-test", ConsoleURL: stub.URL,
+		DefaultModel: "p/m1", ResponsesEnabled: true, ResponseTTL: time.Minute,
+		MaxBodyBytes: 1 << 20, DBPath: path, HistoryMaxBytes: 64,
+	}
+	srv := NewServer(cfg, NewLogger("error"))
+
+	big := srv.store.AcquireKey("x:big")
+	big.setSessionID("ses_big")
+	big.setLast([]ChatMessage{{Role: "user", Content: MessageContent{Text: strings.Repeat("x", 500)}}})
+	srv.persistConv(big)
+	srv.store.Release(big)
+
+	row, ok := srv.db.loadConv("x:big")
+	if !ok || row.SessionID != "ses_big" {
+		t.Fatalf("会话映射应保留: %+v ok=%v", row, ok)
+	}
+	if len(row.History) != 0 {
+		t.Fatalf("超大历史不该落库，实际 %dB", len(row.History))
+	}
+
+	small := srv.store.AcquireKey("x:small")
+	small.setSessionID("ses_small")
+	small.setLast([]ChatMessage{{Role: "user", Content: MessageContent{Text: "hi"}}})
+	srv.persistConv(small)
+	srv.store.Release(small)
+	row2, _ := srv.db.loadConv("x:small")
+	if len(row2.History) == 0 {
+		t.Fatal("小历史应落库")
+	}
+}
+
 func chainServerDB(t *testing.T, stub *httptest.Server, dbPath string) *Server {
 	t.Helper()
 	cfg := Config{

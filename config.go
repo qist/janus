@@ -87,6 +87,12 @@ type Config struct {
 	// 空 / memory / off = 纯内存。默认见 defaultDBPath()。
 	DBPath string
 
+	// HistoryMaxBytes 落库的 Chat 历史快照上限；超过则只存会话映射（不存历史）。
+	HistoryMaxBytes int
+
+	// ConvTTL 持久化的"会话键 → sessionID/历史"保留时长（janitor 清理）。
+	ConvTTL time.Duration
+
 	ConfigFile string // 实际加载的配置文件路径（空 = 没加载）
 }
 
@@ -307,6 +313,8 @@ func LoadConfig() (Config, error) {
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),
 		DBPath:          loader.str("BRIDGE_DB", defaultDBPath()),
+		HistoryMaxBytes: loader.integer("BRIDGE_HISTORY_MAX_BYTES", 1<<20),
+		ConvTTL:         loader.dur("BRIDGE_CONV_TTL", 7*24*time.Hour),
 
 		ConfigFile: cfgPath,
 	}

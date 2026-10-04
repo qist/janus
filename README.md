@@ -263,6 +263,8 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `BRIDGE_RESPONSES_ENABLED` | `true` | 是否开放 `/v1/responses` |
 | `BRIDGE_RESPONSE_TTL` | `30m` | 已保存响应的保留时长（`previous_response_id` 依赖） |
 | `BRIDGE_DB` | 默认 `$XDG_DATA_HOME/janus/janus.db` | 持久化库路径（SQLite）。不设=默认路径；`memory`/`off`=纯内存。开启后**响应、会话映射与 Chat 历史快照**都落盘，Chat / Responses 均可跨进程重启续接 |
+| `BRIDGE_HISTORY_MAX_BYTES` | `1048576` | 落库的 Chat 历史快照上限（字节）；超过只存会话映射。0=不限 |
+| `BRIDGE_CONV_TTL` | `168h` | 持久化的会话映射/历史保留时长（janitor 清理） |
 | `BRIDGE_USAGE_ENABLED` | `true` | 是否开放 `/v1/usage` |
 | `BRIDGE_USAGE_TTL` | `30s` | 用量报告缓存时长（避免频繁打 console API） |
 

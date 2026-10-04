@@ -141,7 +141,13 @@ func (s *Server) persistConv(conv *Conversation) {
 	var hist []byte
 	if msgs := conv.snapshotLast(); len(msgs) > 0 {
 		if b, err := json.Marshal(msgs); err == nil {
-			hist = b
+			switch limit := s.cfg.HistoryMaxBytes; {
+			case limit <= 0 || len(b) <= limit:
+				hist = b
+			default:
+				// 太大就不落历史（仍落会话映射），避免库无界增长
+				s.log.Debugf("history too large to persist for %s: %dB > %dB", conv.Key, len(b), limit)
+			}
 		}
 	}
 	s.db.saveConv(dbConversation{

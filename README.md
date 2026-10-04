@@ -361,6 +361,12 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-3-5-haiku
 - **Web Search（服务端工具）**：CC 声明的 `web_search` 由 Janus **内部执行**（调用上游 OpenCode 的
   `/api/websearch`），结果回喂给 agent，不会作为 `tool_use` 甩回 CC；`BRIDGE_WEBSEARCH_ENABLED=false` 可关闭
 - **会话锚点**：Claude Code 的 `x-claude-code-session-id` 头会自动作为会话键，不同 CC 会话天然隔离
+- **配完整模型名（DeepSeek 式）**：CC 也可以直接把 `ANTHROPIC_MODEL` 设成真实模型，如
+  `opencode-go/deepseek-v4.1-flash`。CC 若用 `mimo-v2.5-pro[1m]` 这种**长上下文标记**，
+  官方会在发送前自动去掉 `[1m]`（只影响客户端选型/beta 头）；Janus 也兼容"未去掉"的情况，
+  收到的 `mimo-v2.5-pro[1m]` 会兜底 strip 成 `mimo-v2.5-pro` 再解析。裸模型名要求在上游唯一，
+  有歧义时带上 `provider/` 前缀。排查时用 `BRIDGE_LOG_LEVEL=debug`，日志会打
+  `anthropic request: client model="…" → resolved=…`
 
 ### 查看模型
 

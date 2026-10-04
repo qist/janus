@@ -826,10 +826,10 @@ func (s *Server) resolveModel(ctx context.Context, raw string, list []OCModel) (
 // mapModelName 应用 BRIDGE_MODEL_MAP（键不区分大小写）；无映射则原样返回。
 // 键以 '*' 结尾表示前缀匹配（如 claude-opus*=... 匹配 claude-opus-4-1）。
 func (s *Server) mapModelName(raw string) string {
+	raw = stripContextSuffix(strings.TrimSpace(raw))
 	if len(s.cfg.ModelMap) == 0 {
 		return raw
 	}
-	raw = strings.TrimSpace(raw)
 	lower := strings.ToLower(raw)
 	if to, ok := s.cfg.ModelMap[lower]; ok {
 		return to
@@ -849,6 +849,28 @@ func (s *Server) mapModelName(raw string) string {
 		return bestTo
 	}
 	return raw
+}
+
+// stripContextSuffix 去掉 Claude Code 的长上下文标记后缀。
+//
+// CC 里 `ANTHROPIC_MODEL=mimo-v2.5-pro[1m]` 表示"启用 1M 上下文"，
+// 官方文档明确会在发送前自行 strip（[1m] 只作用于客户端选型与 beta 头），
+// 所以正常情况下上游收到的是 `mimo-v2.5-pro`。但第三方客户端/代理可能原样透传，
+// 这里做兜底，避免 `mimo-v2.5-pro[1m]` 在模型列表里匹配不到。
+func stripContextSuffix(raw string) string {
+	if !strings.HasSuffix(raw, "]") {
+		return raw
+	}
+	i := strings.LastIndex(raw, "[")
+	if i <= 0 {
+		return raw
+	}
+	switch strings.ToLower(strings.TrimSpace(raw[i+1 : len(raw)-1])) {
+	case "1m", "200k", "1000k":
+		return strings.TrimSpace(raw[:i])
+	default:
+		return raw
+	}
 }
 
 // resolveDefaultModel 使用桥配置的默认模型覆盖；未配置时才跟随上游默认。

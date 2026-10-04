@@ -100,6 +100,48 @@ func TestResolveAnthropicModelDefaultKnob(t *testing.T) {
 	}
 }
 
+func TestStripContextSuffix(t *testing.T) {
+	cases := map[string]string{
+		"mimo-v2.5-pro[1m]":                   "mimo-v2.5-pro",
+		"mimo-v2.5-pro[1M]":                   "mimo-v2.5-pro",
+		"opencode-go/deepseek-v4.1-flash[1m]": "opencode-go/deepseek-v4.1-flash",
+		"claude-sonnet-4-5":                   "claude-sonnet-4-5",
+		"weird[abc]":                          "weird[abc]",
+		"[1m]":                                "[1m]",
+	}
+	for in, want := range cases {
+		if got := stripContextSuffix(in); got != want {
+			t.Errorf("stripContextSuffix(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+func TestMapModelNameStripsContextSuffix(t *testing.T) {
+	// 无映射：[1m] 兜底去掉
+	s := &Server{cfg: Config{}}
+	if got := s.mapModelName("mimo-v2.5-pro[1m]"); got != "mimo-v2.5-pro" {
+		t.Errorf("无映射 got %q", got)
+	}
+	// 有映射：先去掉后缀，再用前缀通配命中
+	s2 := &Server{cfg: Config{ModelMap: map[string]string{"claude-*": "opencode-go/x"}}}
+	if got := s2.mapModelName("claude-sonnet-4-5[1m]"); got != "opencode-go/x" {
+		t.Errorf("有映射 got %q", got)
+	}
+}
+
+func TestResolveAnthropicFullNameWithContextSuffix(t *testing.T) {
+	list := []OCModel{mkModel("opencode-go", "mimo-v2.5-pro", 1, 2, true, true)}
+	s := &Server{cfg: Config{}}
+	// DS 式：CC 配完整模型名（含 [1m]），透传过来也要能解析
+	ref, err := s.resolveAnthropicModel(context.Background(), "mimo-v2.5-pro[1m]", list)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if ref.String() != "opencode-go/mimo-v2.5-pro" {
+		t.Errorf("got %s", ref)
+	}
+}
+
 func TestAnthropicModelsEndpoint(t *testing.T) {
 	srv := newTestServerForRoutes(t)
 	h := srv.Handler()

@@ -426,6 +426,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusNotFound, "not_found_error", err.Error())
 		return
 	}
+	s.log.Debugf("anthropic request: client model=%q → resolved=%s (anthropic-version=%q)",
+		req.Model, ref.String(), r.Header.Get("anthropic-version"))
 
 	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), s.cfg.Directory)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)

@@ -172,3 +172,30 @@ func TestAnthropicStreamEvents(t *testing.T) {
 		t.Fatalf("应有 content_block_delta: %v", names)
 	}
 }
+
+// DeepSeek 式约定：Anthropic 接口也挂在 /anthropic 前缀下
+// （ANTHROPIC_BASE_URL=http://host:2810/anthropic）。
+func TestAnthropicPathPrefix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("依赖空闲判定")
+	}
+	stub, _, _ := stubChainUpstream(t)
+	srv := chainServer(t, stub)
+
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages",
+		strings.NewReader(`{"model":"claude-3-5-sonnet","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-test")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got AnthropicResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "message" || len(got.Content) == 0 {
+		t.Fatalf("%+v", got)
+	}
+}

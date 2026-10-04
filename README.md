@@ -217,6 +217,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 |---|---|---|
 | `BRIDGE_DIRECTORY` | 桥启动时的工作目录 | 会话默认工作目录（OpenCode 项目路径） |
 | `BRIDGE_DEFAULT_MODEL` | 空 | `default`/`auto`/空别名使用的模型（如 `opencode-go/gpt-6-luna`）；**留空=跟随上游默认**。客户端显式传的 `model` 始终透传，不受此影响。注意：上游默认若是 `opencode/*` 免费模型，经 API 调用会 403（免费额度只能在 OpenCode 内用），需要支持"不带 model"的请求就显式填一个可用的 |
+| `BRIDGE_MODEL_MAP` | 空 | 模型别名映射（逗号分隔 `from=to`，键不区分大小写）。主要给 Claude Code：把 `claude-*` 映射到 OpenCode 真实模型，如 `claude-3-5-sonnet=opencode-go/gpt-6-luna,claude-3-5-haiku=opencode-go/glm-5.3-flash` |
 | `BRIDGE_AGENT` | `build` | 默认 agent，取值见下 |
 | `BRIDGE_SESSION_TTL` | `30m` | 会话空闲回收时间（同时删上游 session） |
 | `BRIDGE_REQUEST_TIMEOUT` | `600s` | 单次补全总超时 |
@@ -302,20 +303,38 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 
 ### 使用 Anthropic / Claude Code
 
-Janus 同时兼容 **Anthropic Messages API**，Claude Code / Anthropic SDK 可直接指向它：
+Janus 同时兼容 **Anthropic Messages API**，Claude Code / Anthropic SDK 可直接指向它。
+接口同时挂在两个前缀下，任选（对齐 DeepSeek 等厂商的 `/anthropic` 约定）：
 
 ```bash
+# 方式一：根路径
 export ANTHROPIC_BASE_URL=http://127.0.0.1:2810
-export ANTHROPIC_API_KEY=sk-bridge-dev        # = BRIDGE_API_KEY
-# Claude Code 发的是 claude-* 模型名，这些在 OpenCode 里不存在；
-# 建议设 BRIDGE_DEFAULT_MODEL 指定真正要用的模型，Janus 会自动回退，不会 404。
+# 方式二：/anthropic 前缀（与 DeepSeek 一致）
+export ANTHROPIC_BASE_URL=http://127.0.0.1:2810/anthropic
+
+export ANTHROPIC_AUTH_TOKEN=sk-bridge-dev     # 也支持 ANTHROPIC_API_KEY（x-api-key）
+
+# 把 CC 的各类模型都指向 Janus（发出去的 model 名保持 claude-*，由服务端映射）
+export ANTHROPIC_MODEL=claude-sonnet-4-5
+export ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-1
+export ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-3-5-haiku
 ```
 
-- `POST /v1/messages`：`system` + `messages`（text / image / tool_use / tool_result）、`tools[].input_schema`
+- `POST /v1/messages`（或 `/anthropic/v1/messages`）：`system` + `messages`（text / image / tool_use / tool_result）、`tools[].input_schema`
 - 流式：`message_start → content_block_start/delta/stop → message_delta → message_stop`（工具块用 `input_json_delta`）
 - 工具：Anthropic `tool_use`（`id/name/input`）↔ 客户端声明的 tools；`tool_result` 回填给 agent
 - 鉴权：`x-api-key`（也接受 `Authorization: Bearer`）；`anthropic-version` / `anthropic-beta` 忽略
-- **模型回退**：请求里的 `model` 解析不到时，自动用 `BRIDGE_DEFAULT_MODEL` / 上游默认
+- **服务端模型映射（推荐）**：`BRIDGE_MODEL_MAP` 把 CC 发来的 `claude-*` 映射到 OpenCode 真实模型，
+  支持前缀通配（`*` 结尾），例如：
+
+  ```bash
+  BRIDGE_MODEL_MAP=claude-opus*=opencode-go/gpt-6-luna,claude-sonnet*=opencode-go/deepseek-v4.1-flash,claude-haiku*=opencode-go/glm-5.3-flash
+  ```
+
+  （正是 DeepSeek 的 `claude-opus* → 强模型`、`claude-sonnet*/haiku* → 快模型` 那套；用户只改 base_url + key 即可）
+- **模型回退**：没配映射且请求的 `model` 解析不到时，自动用 `BRIDGE_DEFAULT_MODEL` / 上游默认
+- **会话锚点**：Claude Code 的 `x-claude-code-session-id` 头会自动作为会话键，不同 CC 会话天然隔离
 
 ### 查看模型
 

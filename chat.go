@@ -814,12 +814,41 @@ func (c *Conversation) key() string { return c.Key }
 //
 //	"" / "default" / "auto"
 //
+// 先过一遍别名映射（BRIDGE_MODEL_MAP，如 claude-3-5-sonnet=...），
 // 其余交给 ResolveModel 按 provider/model 或裸名解析。
 func (s *Server) resolveModel(ctx context.Context, raw string, list []OCModel) (OCModelRef, error) {
 	if isDefaultAlias(raw) {
 		return s.resolveDefaultModel(ctx, list)
 	}
-	return ResolveModel(raw, list)
+	return ResolveModel(s.mapModelName(raw), list)
+}
+
+// mapModelName 应用 BRIDGE_MODEL_MAP（键不区分大小写）；无映射则原样返回。
+// 键以 '*' 结尾表示前缀匹配（如 claude-opus*=... 匹配 claude-opus-4-1）。
+func (s *Server) mapModelName(raw string) string {
+	if len(s.cfg.ModelMap) == 0 {
+		return raw
+	}
+	raw = strings.TrimSpace(raw)
+	lower := strings.ToLower(raw)
+	if to, ok := s.cfg.ModelMap[lower]; ok {
+		return to
+	}
+	// 前缀匹配取最长者
+	bestLen, bestTo := -1, ""
+	for k, to := range s.cfg.ModelMap {
+		if !strings.HasSuffix(k, "*") {
+			continue
+		}
+		p := strings.TrimSuffix(k, "*")
+		if p != "" && strings.HasPrefix(lower, p) && len(p) > bestLen {
+			bestLen, bestTo = len(p), to
+		}
+	}
+	if bestLen >= 0 {
+		return bestTo
+	}
+	return raw
 }
 
 // resolveDefaultModel 使用桥配置的默认模型覆盖；未配置时才跟随上游默认。

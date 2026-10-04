@@ -34,6 +34,10 @@ type Config struct {
 	Agent        string // 默认 agent
 	DefaultModel string // default/auto/空别名实际使用的模型；空=跟随上游默认
 
+	// ModelMap 模型别名映射（如 Claude Code 发的 claude-* → 真实后端模型）。
+	// 形如 "claude-3-5-sonnet=opencode-go/gpt-6-luna,claude-3-5-haiku=opencode-go/glm-5.3-flash"。
+	ModelMap map[string]string
+
 	SessionTTL        time.Duration // 会话空闲回收
 	RequestTimeout    time.Duration // 单次补全超时
 	ReconcileInterval time.Duration // 事件流对账间隔
@@ -277,6 +281,7 @@ func LoadConfig() (Config, error) {
 		Directory:    loader.str("BRIDGE_DIRECTORY", defaultProjectDir()),
 		Agent:        loader.str("BRIDGE_AGENT", "build"),
 		DefaultModel: loader.str("BRIDGE_DEFAULT_MODEL", ""),
+		ModelMap:     parseModelMap(loader.str("BRIDGE_MODEL_MAP", "")),
 
 		SessionTTL:        loader.dur("BRIDGE_SESSION_TTL", 30*time.Minute),
 		RequestTimeout:    loader.dur("BRIDGE_REQUEST_TIMEOUT", 600*time.Second),
@@ -348,6 +353,27 @@ func defaultProjectDir() string {
 
 // normalizePermissionReply 校验权限自动应答策略。
 // 非法值一律回退到 once：宁可多答一次，也不能让工具挂死。
+// parseModelMap 解析 "from=to,from2=to2"。键不区分大小写，忽略非法项。
+func parseModelMap(s string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		i := strings.Index(part, "=")
+		if i <= 0 {
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(part[:i]))
+		v := strings.TrimSpace(part[i+1:])
+		if k != "" && v != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func normalizePermissionReply(v string) string {
 	switch s := strings.ToLower(strings.TrimSpace(v)); s {
 	case "once", "always", "reject", "off":

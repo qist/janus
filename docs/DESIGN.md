@@ -797,8 +797,12 @@ Store + executor + ToolBridge**，`anthropic.go` / `anthropic_stream.go` 只做�
 - 流式：`message_start → content_block_start → content_block_delta`（`text_delta` /
   `input_json_delta`）`→ content_block_stop → message_delta → message_stop`
 - 鉴权 `x-api-key`（也接受 Bearer）；`anthropic-version`/`anthropic-beta` 忽略
-- **模型回退**：请求的 `model`（如 `claude-*`）在 OpenCode 里不存在时，自动用
+- 接口同时挂在 `/v1/messages` 与 `/anthropic/v1/messages`（对齐 DeepSeek 的 `/anthropic` 约定）
+- **模型映射**：`BRIDGE_MODEL_MAP` 支持精确与前缀（`*` 结尾）匹配，如
+  `claude-opus*=…,claude-sonnet*=…,claude-haiku*=…`（DeepSeek 式：opus→强模型、sonnet/haiku→快模型）
+- **模型回退**：请求的 `model`（如 `claude-*`）解析不到时，自动用
   `BRIDGE_DEFAULT_MODEL` / 上游默认，避免 404
+- **会话锚点**：`x-claude-code-session-id` 头自动作为会话键（不同 CC 会话隔离）
 - `POST /v1/messages/count_tokens` 提供粗略 token 估算（Claude Code 会调用）
 - 开关 `BRIDGE_ANTHROPIC_ENABLED`（默认 true）
 

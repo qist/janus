@@ -262,6 +262,10 @@ func (s *Server) Handler() http.Handler {
 	// Anthropic Messages API（供 Claude Code / Anthropic SDK）
 	mux.HandleFunc("POST /v1/messages", s.handleMessages)
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
+	// 兼容 DeepSeek 式约定：Anthropic 接口也挂在 /anthropic 前缀下
+	// （ANTHROPIC_BASE_URL=http://host:2810/anthropic）
+	mux.HandleFunc("POST /anthropic/v1/messages", s.handleMessages)
+	mux.HandleFunc("POST /anthropic/v1/messages/count_tokens", s.handleCountTokens)
 
 	// 内置 MCP server：OpenCode 以 remote MCP 方式注册它，用来调用客户端声明的工具。
 	// 既是路由，也当鉴权（URL 里的 token 是 128 位随机串）。

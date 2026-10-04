@@ -11,7 +11,7 @@ LDFLAGS := -s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.Dat
 # Linux 发布架构（对应 GitHub Release 里的 janus_<version>_linux_<arch>.tar.gz）
 LINUX_ARCHES := amd64 arm64 arm 386
 
-.PHONY: all build test vet fmt run dist-linux compat clean
+.PHONY: all build test vet fmt run dist-linux compat smoke clean
 
 all: vet test build
 
@@ -36,6 +36,12 @@ run: build
 #   make compat BRIDGE_MODEL=opencode-go/deepseek-v4.1-flash:max
 compat:
 	BRIDGE_MODEL="$(BRIDGE_MODEL)" python3 tests/compat_matrix.py
+
+# Claude Code 冒烟（Anthropic 官方 SDK）。需先起服务 + 装 anthropic：
+#   make smoke BRIDGE_MODEL=opencode-go/deepseek-v4.1-flash:max
+smoke:
+	ANTHROPIC_BASE_URL="http://127.0.0.1:2810" ANTHROPIC_API_KEY="$(BRIDGE_API_KEY)" \
+		BRIDGE_MODEL="$(BRIDGE_MODEL)" python3 tests/claude_smoke.py
 
 # Linux 全架构静态二进制 + tar.gz（CGO 关闭，纯静态）
 dist-linux:

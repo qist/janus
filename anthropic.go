@@ -398,9 +398,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, st, typ, msg)
 		return
 	}
-	ref, err := ResolveModel(req.Model, ocModels)
+	ref, err := s.resolveModel(r.Context(), req.Model, ocModels)
 	if err != nil {
-		// Anthropic 的模型名（claude-*）通常不在 OpenCode 里：回退默认模型，别 404
+		// Anthropic 的模型名（claude-*）若既没配 BRIDGE_MODEL_MAP 也不在 OpenCode 里：
+		// 回退默认模型，别 404
 		d, derr := s.resolveDefaultModel(r.Context(), ocModels)
 		if derr != nil {
 			writeAnthropicError(w, http.StatusNotFound, "not_found_error", err.Error())
@@ -412,7 +413,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), s.cfg.Directory)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
-	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
+	// Claude Code 会带 x-claude-code-session-id：直接当会话锚点，天然隔离不同 CC 会话
+	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"),
+		r.Header.Get("x-claude-code-session-id"), r.Header.Get("X-Claude-Code-Session-Id"))
 
 	key := ConversationKey(explicit, systemText, "", dir)
 	conv := s.store.Acquire(key, inputMsgs)

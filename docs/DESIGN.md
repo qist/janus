@@ -56,7 +56,7 @@ curl -s "http://127.0.0.1:$PORT/api/info" -H "Authorization: Basic $B64"
 | GET | `/api/model?directory=<dir>` | **模型列表** | 参数名是 `directory`，**不是** `location`；不传或传 `location` 会返回空数组或 400 |
 | GET | `/api/model/default` | 默认模型 | 当前为 `opencode/fledge-alpha-free` |
 | GET | `/api/agent` | agent 列表 | `build`（默认，权限全开）、`plan` 等 |
-| GET | `/api/project` | 项目列表 | 已有 `/opt/iptv`、`/opt/tvfusion`、`/root` 等 |
+| GET | `/api/project` | 项目列表 | 已有 `/path/to/project`、`/path/to/other`、`/root` 等 |
 | POST | `/api/session` | **创建会话** | 必须用 `{"location":{"directory":"..."}}` 指定工作目录；可带 `model`、`agent`、`title` |
 | POST | `/api/session/{sid}/prompt` | **发送消息** | body `{text, files?, delivery?: steer\|queue, resume?}`；返回 user 消息对象；busy 时也是 200 |
 | POST | `/api/experimental/session/{sid}/wait` | 等待会话空闲 | 返回极快，需配合事件判断 |
@@ -473,7 +473,7 @@ OpenAI `tools` 是两套东西。
 插入输出流：
 
 ```
-<opencode-tool> bash: ls -la /opt/iptv</opencode-tool>
+<opencode-tool> bash: ls -la /path/to/project</opencode-tool>
 ```
 
 这样 Trae/CodeBuddy 能看到"模型确实做了事"，但**无法由客户端执行函数**。
@@ -529,7 +529,7 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 ### 5.7.1 权限请求自动应答（`BRIDGE_PERMISSION_REPLY`）
 
 agent 调自己的工具（shell/read…）访问**会话目录之外**时，OpenCode 会先发
-`permission.asked`（如 `action=external_directory, resources=["/opt/sqlite/*"]`），
+`permission.asked`（如 `action=external_directory, resources=["/srv/data/*"]`），
 等审批。headless 桥没有 UI 去点，不应答的话工具会一直挂到客户端超时——
 表现为"模型超过 N 秒没有返回数据"。
 
@@ -734,7 +734,7 @@ output[]（reasoning / message / function_call）
 ## 6. 配置
 
 配置来源优先级：**真实环境变量 > 配置文件 > 内置默认值**。
-这样既能用文件固化常用配置，又能用环境变量临时覆盖（如 `BRIDGE_LOG_LEVEL=debug ./bridge`）。
+这样既能用文件固化常用配置，又能用环境变量临时覆盖（如 `BRIDGE_LOG_LEVEL=debug ./janus`）。
 
 配置文件是简单的 `KEY=VALUE` 文本，模板见 `janus.env.example`：
 
@@ -758,7 +758,7 @@ $EDITOR janus.env
 | `OPENCODE_USERNAME` | `opencode` | Basic 用户名（固定） |
 | `OPENCODE_PASSWORD` | —（auto 模式下自动获取） | 即 `OPENCODE_SERVER_PASSWORD` |
 | `BRIDGE_API_KEY` | 空 | 对客户端的鉴权；空=接受任意 Bearer（WARN） |
-| `BRIDGE_DIRECTORY` | `/opt/iptv` | 会话默认工作目录 |
+| `BRIDGE_DIRECTORY` | `/path/to/project` | 会话默认工作目录 |
 | `BRIDGE_AGENT` | `build` | 默认 agent |
 | `BRIDGE_SESSION_TTL` | `30m` | 会话空闲回收时间 |
 | `BRIDGE_REQUEST_TIMEOUT` | `600s` | 单次补全超时 |
@@ -838,7 +838,7 @@ $EDITOR janus.env
 
 ```bash
 # 0. 启动（自动发现上游，无需端口/密码）
-BRIDGE_API_KEY=sk-bridge BRIDGE_DIRECTORY=/opt/iptv ./scripts/run.sh
+BRIDGE_API_KEY=sk-bridge BRIDGE_DIRECTORY=/path/to/project ./scripts/run.sh
 
 # 1. 模型列表
 curl -s http://127.0.0.1:2810/v1/models -H "Authorization: Bearer sk-bridge" | head -c 300

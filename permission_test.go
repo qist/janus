@@ -11,7 +11,7 @@ import (
 )
 
 // 权限自动应答：headless 桥必须替 agent 把 external_directory 等 ask 请求答掉，
-// 否则工具会一直挂到客户端超时（见 /opt/sqlite 复现）。
+// 否则工具会一直挂到客户端超时（见 /srv/data 复现）。
 
 func permissionBus(t *testing.T, mode string, hits *permissionHits) *EventBus {
 	t.Helper()
@@ -52,7 +52,7 @@ func (h *permissionHits) snapshot() ([]string, []string) {
 func permissionEvent() OCEvent {
 	return OCEvent{
 		Type: "permission.asked",
-		Data: json.RawMessage(`{"id":"per_1","sessionID":"ses_1","action":"external_directory","resources":["/opt/sqlite/*"]}`),
+		Data: json.RawMessage(`{"id":"per_1","sessionID":"ses_1","action":"external_directory","resources":["/srv/data/*"]}`),
 	}
 }
 

@@ -47,7 +47,7 @@ $EDITOR janus.env        # 设 BRIDGE_API_KEY 和 BRIDGE_DIRECTORY
 ```
 INFO  Janus v0.1.0 (commit none, built 2026-10-04T06:04:03Z)
 INFO  auto-discovered OpenCode at http://127.0.0.1:61573 (pid 697)
-INFO  janus listening on 0.0.0.0:2810 (upstream=..., dir=/opt/iptv, agent=build)
+INFO  janus listening on 0.0.0.0:2810 (upstream=..., dir=/path/to/project, agent=build)
 INFO  event stream connected (text/event-stream)
 ```
 
@@ -186,41 +186,94 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 
 ## 环境变量
 
+> 优先级：**真实环境变量 > 配置文件（`janus.env`）> 内置默认值**。
+> 配置文件定位：`JANUS_CONFIG`（兼容旧名 `BRIDGE_CONFIG`）> 可执行文件同目录 `janus.env` > 当前目录 `janus.env`。
+
+### 服务与鉴权
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `BRIDGE_CONFIG` | 空 | 配置文件路径（见上） |
-| `BRIDGE_ADDR` | `0.0.0.0:2810` | 监听地址 |
-| `BRIDGE_API_KEY` | 空 | 客户端鉴权。**绑定 0.0.0.0 时务必设置**，否则任何人都能消耗你的额度 |
-| `BRIDGE_DIRECTORY` | `/opt/iptv` | 会话默认工作目录（OpenCode 的项目路径） |
-| `BRIDGE_AGENT` | `build` | 默认 agent |
-| `OPENCODE_URL` | `auto` | 上游地址；`auto` = 自动发现 |
-| `OPENCODE_PASSWORD` | 空 | 上游密码；auto 模式下会被发现结果覆盖 |
-| `OPENCODE_USERNAME` | `opencode` | Basic 用户名，固定值 |
-| `BRIDGE_SESSION_TTL` | `30m` | 会话空闲回收时间 |
-| `BRIDGE_REQUEST_TIMEOUT` | `600s` | 单次补全超时 |
+| `JANUS_CONFIG` / `BRIDGE_CONFIG` | 空 | 显式指定配置文件路径 |
+| `BRIDGE_ADDR` | `0.0.0.0:2810` | 监听地址。`127.0.0.1:2810` 仅本机 |
+| `BRIDGE_API_KEY` | 空 | 客户端鉴权 Key。留空=接受任意 Key 并打 WARN；**绑非回环必须设置** |
+| `BRIDGE_CORS_ORIGIN` | 空 | 允许的浏览器来源。空=不发 CORS 头（拒绝跨源）；`*`=任意源；`a,b`=白名单。`/`、`/ui`、`/healthz` 属公开静态路径，不受限 |
+| `BRIDGE_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+
+### 上游 OpenCode
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `OPENCODE_URL` | `auto` | `auto`=自动发现（推荐）；或固定 `http://host:port`（此时必须配密码） |
+| `OPENCODE_USERNAME` | `opencode` | 上游 Basic 用户名 |
+| `OPENCODE_PASSWORD` | 空 | 上游密码（优先） |
+| `OPENCODE_SERVER_PASSWORD` | 空 | 上游密码别名（与 `OPENCODE_PASSWORD` 二选一） |
+| `OPENCODE_DB` | 见说明 | 凭据库路径（读余额用）。默认 `$XDG_DATA_HOME/opencode/opencode.db`，再退到 `~/.local/share/opencode/opencode.db` |
+| `XDG_DATA_HOME` | 空 | 影响 `OPENCODE_DB` 的默认定位 |
+| `OPENCODE_CONSOLE` | `https://opencode.ai/console/api` | console API 基址 |
+
+### 会话与 Agent
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BRIDGE_DIRECTORY` | 桥启动时的工作目录 | 会话默认工作目录（OpenCode 项目路径） |
+| `BRIDGE_DEFAULT_MODEL` | 空 | `default`/`auto`/空别名使用的模型（如 `opencode-go/gpt-6-luna`）；空=跟随上游默认 |
+| `BRIDGE_AGENT` | `build` | 默认 agent，取值见下 |
+| `BRIDGE_SESSION_TTL` | `30m` | 会话空闲回收时间（同时删上游 session） |
+| `BRIDGE_REQUEST_TIMEOUT` | `600s` | 单次补全总超时 |
+| `BRIDGE_MAX_CONVERSATIONS` | `256` | 内存中最大会话数（LRU） |
+
+**`BRIDGE_AGENT` 取值**（填 OpenCode 里真实存在的 agent id）：
+
+| 值 | 说明 |
+|---|---|
+| `build`（默认） | 完整读写代码的 agent，权限较宽 |
+| `plan` | 只读/规划，先规划再动手 |
+| `general` | 通用 agent（OpenCode 内置，偏子任务） |
+| `explore` | 搜索/阅读代码，不改文件 |
+| 自定义 id | 在 OpenCode 配置（`~/.config/opencode/opencode.jsonc` 的 `agents`）里自定义的 agent。例如 `orchestrator`：禁用内置工具、只用客户端声明的 tools，实现"桥只部署一处、工具在客户端执行"（见 `docs/DESIGN.md` §5.7.2） |
+
+> 填一个不存在的 id，上游通常不报错，但行为不保证；请用实际存在的 agent。
+
+### 输出与事件
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BRIDGE_TOOL_ANNOTATIONS` | `true` | 是否把 agent 工具活动以 `<opencode-tool>` 注释写进 content |
 | `BRIDGE_RECONCILE_INTERVAL` | `3s` | 事件流对账间隔 |
 | `BRIDGE_IDLE_POLL_INTERVAL` | `1s` | 空闲轮询间隔（终态兜底） |
+| `BRIDGE_PROMPT_GRACE` | `2s` | prompt 后多久才信任 idle 信号 |
 | `BRIDGE_STREAM_HEARTBEAT` | `15s` | SSE 心跳间隔（长工具任务时保活） |
-| `BRIDGE_TOOL_ANNOTATIONS` | `true` | 是否把 agent 工具活动以注释写进 content |
-| `BRIDGE_MAX_CONVERSATIONS` | `256` | 内存中最大会话数 |
-| `BRIDGE_METRICS_PUBLIC` | `false` | `/metrics` 是否免鉴权 |
-| `BRIDGE_RATE_LIMIT` | `0`（不限） | 每 key/IP 每分钟请求数 |
-| `BRIDGE_RATE_BURST` | 同 rate | 突发容量 |
-| `BRIDGE_RATE_LIMIT_GLOBAL` | `0`（不限） | 全局每分钟上限 |
-| `BRIDGE_TRUST_PROXY` | `false` | 是否信任 `X-Forwarded-For` |
-| `BRIDGE_USAGE_ENABLED` | `true` | 是否开放 `/v1/usage` |
-| `BRIDGE_RESPONSES_ENABLED` | `true` | 是否开放 `/v1/responses` |
-| `BRIDGE_RESPONSE_TTL` | `30m` | 已保存响应的保留时长 |
-| `BRIDGE_TOOL_CALLING` | `true` | 是否把客户端 `tools` 暴露给 agent |
-| `BRIDGE_TOOL_SOFT_FAIL` | `false` | 工具注册失败时是否降级为无工具继续（默认直接报错） |
-| `BRIDGE_TOOL_REREGISTER` | `10m` | 多久主动续注册一次（上游重启会丢注册） |
-| `BRIDGE_TOOL_CALL_WAIT` | `5m` | 工具调用挂起等客户端回填结果的最长时间 |
+
+### 工具调用（把客户端 `tools` 暴露给 agent）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BRIDGE_TOOL_CALLING` | `true` | 是否启用内置 MCP server 透传客户端 `tools` |
+| `BRIDGE_TOOL_SOFT_FAIL` | `false` | 工具注册失败时：`true`=降级为无工具继续；`false`=直接报错 |
+| `BRIDGE_TOOL_REREGISTER` | `10m` | 多久主动续注册一次 MCP（上游重启会丢注册） |
+| `BRIDGE_TOOL_CALL_WAIT` | `5m` | 工具调用挂起、等客户端回填结果的最长时间 |
 | `BRIDGE_MCP_URL` | 空 | 注册给 OpenCode 的 MCP 基址（空=本机回环） |
-| `BRIDGE_USAGE_TTL` | `30s` | 用量报告缓存时长 |
-| `OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | 凭据库路径（读余额用） |
-| `OPENCODE_CONSOLE` | `https://opencode.ai/console/api` | console API 基址 |
-| `BRIDGE_CORS_ORIGIN` | 空 | 允许的浏览器来源。**空 = 不发 CORS 头（拒绝跨源）**；`*` = 允许任意源（不带 credentials）；`a,b` = 白名单。注意：`/`、`/ui`、`/healthz` 属公开静态路径，**不受此限制**（页面无敏感数据），数据端点仍按白名单 |
-| `BRIDGE_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
+| `BRIDGE_PERMISSION_REPLY` | `once` | 自动应答权限请求：`once`（仅本次）/ `always`（记住）/ `reject`（拒绝）/ `off`（不干预） |
+
+### Responses API / 用量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BRIDGE_RESPONSES_ENABLED` | `true` | 是否开放 `/v1/responses` |
+| `BRIDGE_RESPONSE_TTL` | `30m` | 已保存响应的保留时长（`previous_response_id` 依赖） |
+| `BRIDGE_USAGE_ENABLED` | `true` | 是否开放 `/v1/usage` |
+| `BRIDGE_USAGE_TTL` | `30s` | 用量报告缓存时长（避免频繁打 console API） |
+
+### 限流 / 指标
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BRIDGE_RATE_LIMIT` | `0`（不限） | 每 key/IP 每分钟请求数 |
+| `BRIDGE_RATE_BURST` | `0`（同 limit） | 突发容量（桶大小） |
+| `BRIDGE_RATE_LIMIT_GLOBAL` | `0`（不限） | 全局每分钟上限（跨所有 key/IP） |
+| `BRIDGE_TRUST_PROXY` | `false` | 是否信任 `X-Forwarded-For` / `X-Real-IP` 识别客户端 IP |
+| `BRIDGE_METRICS_PUBLIC` | `false` | `/metrics` 是否免鉴权 |
+
 
 ## 已实现端点
 
@@ -495,7 +548,7 @@ agent 干活时（读文件、跑命令）会沉默很久。开启 `BRIDGE_TOOL_
 后，工具活动以注释形式插进 content，客户端能看到进度：
 
 ```
-<opencode-tool> bash: ls -la /opt/iptv</opencode-tool>
+<opencode-tool> bash: ls -la /path/to/project</opencode-tool>
 ```
 
 这些注释在**重放历史时会被自动剥掉**，不会污染上游上下文。若客户端自己做

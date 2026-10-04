@@ -281,23 +281,23 @@ func TestConversationKeyExplicitWins(t *testing.T) {
 }
 
 func TestConversationKeyStable(t *testing.T) {
-	a := ConversationKey("", "system prompt", "", "/opt/iptv")
-	b := ConversationKey("", "system prompt", "", "/opt/iptv")
+	a := ConversationKey("", "system prompt", "", "/tmp/proj")
+	b := ConversationKey("", "system prompt", "", "/tmp/proj")
 	if a != b {
 		t.Fatal("same inputs must yield same key")
 	}
 }
 
 func TestConversationKeyDiffersBySystem(t *testing.T) {
-	a := ConversationKey("", "sys A", "", "/opt/iptv")
-	b := ConversationKey("", "sys B", "", "/opt/iptv")
+	a := ConversationKey("", "sys A", "", "/tmp/proj")
+	b := ConversationKey("", "sys B", "", "/tmp/proj")
 	if a == b {
 		t.Fatal("different system prompts must not collide")
 	}
 }
 
 func TestConversationKeyDiffersByDir(t *testing.T) {
-	a := ConversationKey("", "sys", "", "/opt/iptv")
+	a := ConversationKey("", "sys", "", "/tmp/proj")
 	b := ConversationKey("", "sys", "", "/root")
 	if a == b {
 		t.Fatal("different directories must not collide")
@@ -1178,7 +1178,7 @@ func TestConfigFileParsesQuotesAndComments(t *testing.T) {
 	p := writeTempCfg(t, `
 # 注释
 BRIDGE_API_KEY="sk-with space"
-BRIDGE_DIRECTORY=/opt/iptv   # 行尾注释
+BRIDGE_DIRECTORY=/tmp/proj   # 行尾注释
 export BRIDGE_AGENT='plan'
 
    # 空行与缩进
@@ -1193,7 +1193,7 @@ BRIDGE_MAX_CONVERSATIONS=7
 	if m["BRIDGE_API_KEY"] != "sk-with space" {
 		t.Errorf("quoted value: %q", m["BRIDGE_API_KEY"])
 	}
-	if m["BRIDGE_DIRECTORY"] != "/opt/iptv" {
+	if m["BRIDGE_DIRECTORY"] != "/tmp/proj" {
 		t.Errorf("inline comment not stripped: %q", m["BRIDGE_DIRECTORY"])
 	}
 	if m["BRIDGE_AGENT"] != "plan" {
@@ -1788,8 +1788,8 @@ func TestCompletionIDPrefix(t *testing.T) {
 
 // user 必须参与分桶：不同终端用户不应共用同一个桶。
 func TestConversationKeyDiffersByUser(t *testing.T) {
-	a := ConversationKey("", "sys", "user-a", "/opt/iptv")
-	b := ConversationKey("", "sys", "user-b", "/opt/iptv")
+	a := ConversationKey("", "sys", "user-a", "/tmp/proj")
+	b := ConversationKey("", "sys", "user-b", "/tmp/proj")
 	if a == b {
 		t.Fatal("不同 user 不应共用分桶 key")
 	}

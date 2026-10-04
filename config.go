@@ -257,7 +257,7 @@ func LoadConfig() (Config, error) {
 
 		APIKey: loader.str("BRIDGE_API_KEY", ""),
 
-		Directory:    loader.str("BRIDGE_DIRECTORY", "/opt/iptv"),
+		Directory:    loader.str("BRIDGE_DIRECTORY", defaultProjectDir()),
 		Agent:        loader.str("BRIDGE_AGENT", "build"),
 		DefaultModel: loader.str("BRIDGE_DEFAULT_MODEL", ""),
 
@@ -313,6 +313,15 @@ func defaultOpencodeDB() string {
 		return ""
 	}
 	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+}
+
+// defaultProjectDir 未配置 BRIDGE_DIRECTORY 时用桥启动时的当前工作目录，
+// 避免把某个固定路径写死进默认值。
+func defaultProjectDir() string {
+	if wd, err := os.Getwd(); err == nil && wd != "" {
+		return wd
+	}
+	return "."
 }
 
 // normalizePermissionReply 校验权限自动应答策略。

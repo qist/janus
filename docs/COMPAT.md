@@ -87,7 +87,7 @@ SDK 3.24.0 会读取并按类型校验这些字段，全部通过：
 ### 上游默认模型（实测）
 
 `GET /api/model/default` 当前返回（全局一致，**不随 directory 变化** —— 实测
-`/opt/iptv`、`/root`、`/opt/tvfusion` 结果相同）：
+`/path/to/project`、`/root`、`/path/to/other` 结果相同）：
 
 ```json
 {"providerID":"opencode","id":"fledge-alpha-free","name":"Fledge Alpha Free",

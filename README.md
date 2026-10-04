@@ -216,7 +216,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `BRIDGE_DIRECTORY` | 桥启动时的工作目录 | 会话默认工作目录（OpenCode 项目路径） |
-| `BRIDGE_DEFAULT_MODEL` | 空 | `default`/`auto`/空别名使用的模型（如 `opencode-go/gpt-6-luna`）；空=跟随上游默认 |
+| `BRIDGE_DEFAULT_MODEL` | 空 | `default`/`auto`/空别名使用的模型（如 `opencode-go/gpt-6-luna`）；**留空=跟随上游默认**。客户端显式传的 `model` 始终透传，不受此影响。注意：上游默认若是 `opencode/*` 免费模型，经 API 调用会 403（免费额度只能在 OpenCode 内用），需要支持"不带 model"的请求就显式填一个可用的 |
 | `BRIDGE_AGENT` | `build` | 默认 agent，取值见下 |
 | `BRIDGE_SESSION_TTL` | `30m` | 会话空闲回收时间（同时删上游 session） |
 | `BRIDGE_REQUEST_TIMEOUT` | `600s` | 单次补全总超时 |

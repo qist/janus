@@ -22,7 +22,7 @@ func TestUIPage(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Errorf("Content-Type = %q", ct)
 	}
-	for _, want := range []string{"用量面板", "/v1/usage", "/v1/models", "cache_read_tokens", "缓存命中率", "chartBox", "支持的模型", "catalogBody", "catalogFree", "仅免费"} {
+	for _, want := range []string{"用量面板", "/v1/usage", "/v1/models", "cache_read_tokens", "缓存命中率", "chartBox", "支持的模型", "catalogBody", "catalogFree", "仅免费", "data-copy", "复制模型名", "copyText"} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("页面缺少 %q", want)
 		}

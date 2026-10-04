@@ -120,6 +120,17 @@ td .bar{margin-top:3px}
 .pill.def{color:var(--amber);border-color:#6a5320;background:#2a2210}
 .pill.free{color:var(--ok);border-color:#1f6a4a;background:#0f2a1f}
 
+/* ---------- 复制模型名 ---------- */
+.copybtn{background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;
+  padding:0 6px;margin-left:8px;font-size:12px;line-height:1.7;vertical-align:1px}
+.copybtn:hover{color:var(--text);border-color:#3d4f85;background:#202b4d}
+.toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(12px);
+  background:#1b2440;border:1px solid #2c3a66;color:var(--text);border-radius:10px;
+  padding:9px 16px;font-size:13px;box-shadow:0 12px 30px #0008;opacity:0;pointer-events:none;
+  transition:opacity .18s,transform .18s;z-index:80;max-width:80vw;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
 /* ---------- 结构条 ---------- */
 .stack{display:flex;height:10px;border-radius:6px;overflow:hidden;background:#1a2340;margin-top:14px}
 .stack i{height:100%}
@@ -261,7 +272,6 @@ td .bar{margin-top:3px}
       <div class="chart-empty" id="catalogEmpty">暂无数据</div>
     </div>
   </section>
-
   <section id="liveSec" style="display:none">
     <h2>桥接进程 <span class="tag">自本次启动 /metrics</span></h2>
     <div class="grid cards" id="liveCards"></div>
@@ -287,6 +297,8 @@ td .bar{margin-top:3px}
   </div>
 </div>
 
+<div class="toast" id="toast"></div>
+
 <script>
 (function(){
 'use strict';
@@ -299,6 +311,29 @@ function $(s){return document.querySelector(s);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function el(id){return document.getElementById(id);}
+
+/* ---------- 复制到剪贴板 + 轻提示 ---------- */
+function copyText(text){
+  function fallback(){
+    var ta=document.createElement('textarea');
+    ta.value=text; ta.setAttribute('readonly','');
+    ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    var ok=false; try{ ok=document.execCommand('copy'); }catch(e){ ok=false; }
+    document.body.removeChild(ta); return ok;
+  }
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(text).then(function(){return true;},function(){return fallback();});
+  }
+  return Promise.resolve(fallback());
+}
+var toastTimer=null;
+function toast(msg){
+  var t=el('toast'); if(!t) return;
+  t.textContent=msg; t.classList.add('show');
+  if(toastTimer) clearTimeout(toastTimer);
+  toastTimer=setTimeout(function(){ t.classList.remove('show'); },1800);
+}
 
 /* ---------- 格式化 ---------- */
 function fmtInt(n){ if(n==null) return '–'; return Number(n).toLocaleString('en-US'); }
@@ -581,7 +616,9 @@ function renderCatalog(){
     var mods=r.modalities.length?r.modalities.join(' / '):'–';
     var effs=r.efforts.length?r.efforts.join(' / '):'–';
     return '<tr>'+
-      '<td><div class="mname">'+esc(r.id)+tags+'</div></td>'+
+      '<td><div class="mname">'+esc(r.id)+tags+
+        '<button class="copybtn" data-copy="'+esc(r.id)+'" title="复制模型名（粘到 CC 的 ANTHROPIC_MODEL 或客户端 model 字段）">⧉ 复制</button>'+
+        '</div></td>'+
       '<td>'+esc(r.provider||'–')+'</td>'+
       '<td class="num"'+(r.context?(' title="'+r.context+' tokens"'):'')+'>'+(r.context?fmtCompact(r.context):'–')+'</td>'+
       '<td class="num"'+(r.output?(' title="'+r.output+' tokens"'):'')+'>'+(r.output?fmtCompact(r.output):'–')+'</td>'+
@@ -722,6 +759,13 @@ function bind(){
   el('catalogSearch').addEventListener('input',function(){ state.catQuery=el('catalogSearch').value; renderCatalog(); });
   el('catalogProvider').addEventListener('change',function(){ state.catProvider=el('catalogProvider').value; renderCatalog(); });
   el('catalogFree').addEventListener('change',function(){ state.catFree=el('catalogFree').value; renderCatalog(); });
+  el('catalogBody').addEventListener('click',function(e){
+    var n=e.target;
+    while(n&&n!==this&&!(n.getAttribute&&n.getAttribute('data-copy'))) n=n.parentNode;
+    if(!n||n===this) return;
+    var v=n.getAttribute('data-copy');
+    copyText(v).then(function(ok){ toast(ok?('已复制模型名：'+v):'复制失败，请手动选择'); });
+  });
   var cths=document.querySelectorAll('th[data-ck]');
   for(var ci=0;ci<cths.length;ci++){
     (function(th){ th.addEventListener('click',function(){

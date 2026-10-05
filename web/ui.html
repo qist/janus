@@ -266,6 +266,11 @@ td .bar{margin-top:3px}
             <option value="50" selected>50 条</option>
             <option value="100">100 条</option>
           </select>
+          <select id="reqGroup" title="分组汇总">
+            <option value="list" selected>逐条</option>
+            <option value="model">按模型汇总</option>
+            <option value="session">按会话汇总</option>
+          </select>
         </div>
         <span class="dim" id="reqNote">命中=缓存读取，未命中=新增输入；命中率=命中/(命中+未命中)</span>
       </div>
@@ -355,7 +360,7 @@ td .bar{margin-top:3px}
 var KEY='bridge.usage.key', AUTOKEY='bridge.usage.auto';
 var state={report:null,metrics:null,requests:null,key:localStorage.getItem(KEY)||'',timer:null,
   metric:'cost_usd',days:30,sortKey:'cost_usd',sortDir:-1,
-  reqQuery:'',reqSortKey:'time',reqSortDir:-1,
+  reqQuery:'',reqSortKey:'time',reqSortDir:-1,reqGroup:'list',
   catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1};
 
 function $(s){return document.querySelector(s);}
@@ -696,38 +701,62 @@ function reqRows(){
   });
   return rows;
 }
+function reqAgg(key, rows){
+  var m={};
+  rows.forEach(function(r){
+    var k=r[key]||'?';
+    var a=m[k]; if(!a){ a=m[k]={key:k,n:0,hit:0,miss:0,out:0,reason:0,cost:0,dur:0,last:''}; }
+    a.n++; a.hit+=Number(r.cache_read_tokens)||0; a.miss+=Number(r.input_tokens)||0;
+    a.out+=Number(r.output_tokens)||0; a.reason+=Number(r.reasoning_tokens)||0;
+    a.cost+=Number(r.cost_usd)||0; a.dur+=Number(r.duration_ms)||0;
+    var t=r.time||''; if(t>a.last) a.last=t;
+  });
+  return Object.keys(m).map(function(k){return m[k];}).sort(function(a,b){ return (b.hit+b.miss)-(a.hit+a.miss); });
+}
+function reqRate(hit,miss){ var t=hit+miss; return t>0?hit/t:0; }
+function reqColor(rate){ return rate>=0.9?'#38d2b1':(rate>=0.5?'#f5b942':'#ff6b6b'); }
+function reqRow(t, model, sid, hit, miss, out, reason, dur, cost){
+  return '<tr>'+
+    '<td>'+esc(t||'')+'</td>'+
+    '<td>'+esc(model||'')+'</td>'+
+    '<td class="dim">'+esc(sid||'')+'</td>'+
+    '<td class="num">'+fmtInt(hit)+'</td>'+
+    '<td class="num">'+fmtInt(miss)+'</td>'+
+    '<td class="num" style="color:'+reqColor(reqRate(hit,miss))+'">'+fmtPct(reqRate(hit,miss))+'</td>'+
+    '<td class="num">'+fmtInt(out)+'</td>'+
+    '<td class="num">'+fmtInt(reason)+'</td>'+
+    '<td class="num">'+(dur?(dur/1000).toFixed(1)+'s':'')+'</td>'+
+    '<td class="num">'+fmtUSD(cost)+'</td>'+
+  '</tr>';
+}
 function renderRequests(){
-  var rows=reqRows(), tb=el('reqBody');
-  el('reqTag').textContent=rows.length?('· '+rows.length+' 条'):'';
-  var foot=el('reqFoot');
-  if(!rows.length){ tb.innerHTML=''; el('reqEmpty').style.display='block'; foot.style.display='none'; return; }
+  var rows=reqRows(), tb=el('reqBody'), foot=el('reqFoot');
+  var group=state.reqGroup||'list';
+  if(!rows.length){ tb.innerHTML=''; el('reqEmpty').style.display='block'; foot.style.display='none'; el('reqTag').textContent=''; return; }
   el('reqEmpty').style.display='none';
+
+  if(group==='list'){
+    el('reqTag').textContent='· '+rows.length+' 条';
+    tb.innerHTML=rows.map(function(r){
+      var t=r.time?new Date(r.time).toLocaleTimeString():'';
+      var sid=(r.session||'').replace(/^ses_/,'').slice(0,10);
+      return reqRow(t, r.model, sid, r.cache_read_tokens, r.input_tokens, r.output_tokens, r.reasoning_tokens, r.duration_ms, r.cost_usd);
+    }).join('');
+  } else {
+    var agg=reqAgg(group==='model'?'model':'session', rows);
+    el('reqTag').textContent='· '+agg.length+' 组 / '+rows.length+' 条';
+    tb.innerHTML=agg.map(function(a){
+      if(group==='model') return reqRow('', a.key+'（'+a.n+' 次）', '', a.hit, a.miss, a.out, a.reason, a.dur, a.cost);
+      return reqRow('', '', (a.key||'').replace(/^ses_/,'').slice(0,10)+'（'+a.n+' 次）', a.hit, a.miss, a.out, a.reason, a.dur, a.cost);
+    }).join('');
+  }
+
   var sh=0,sm=0,so=0,sr=0,sc=0;
-  tb.innerHTML=rows.map(function(r){
-    var hit=Number(r.cache_hit_rate)||0;
-    var color=hit>=0.9?'#38d2b1':(hit>=0.5?'#f5b942':'#ff6b6b');
-    var t=r.time?new Date(r.time).toLocaleTimeString():'';
-    var sid=(r.session||'').replace(/^ses_/,'').slice(0,10);
-    sh+=Number(r.cache_read_tokens)||0; sm+=Number(r.input_tokens)||0; so+=Number(r.output_tokens)||0;
-    sr+=Number(r.reasoning_tokens)||0; sc+=Number(r.cost_usd)||0;
-    return '<tr>'+
-      '<td>'+esc(t)+'</td>'+
-      '<td>'+esc(r.model||'')+'</td>'+
-      '<td class="dim" title="'+esc(r.session||'')+'">'+esc(sid)+'</td>'+
-      '<td class="num">'+fmtInt(r.cache_read_tokens)+'</td>'+
-      '<td class="num">'+fmtInt(r.input_tokens)+'</td>'+
-      '<td class="num" style="color:'+color+'">'+fmtPct(hit)+'</td>'+
-      '<td class="num">'+fmtInt(r.output_tokens)+'</td>'+
-      '<td class="num">'+fmtInt(r.reasoning_tokens)+'</td>'+
-      '<td class="num">'+(r.duration_ms?(r.duration_ms/1000).toFixed(1)+'s':'')+'</td>'+
-      '<td class="num">'+fmtUSD(r.cost_usd)+'</td>'+
-    '</tr>';
-  }).join('');
-  var tot=sh+sm;
+  rows.forEach(function(r){ sh+=Number(r.cache_read_tokens)||0; sm+=Number(r.input_tokens)||0; so+=Number(r.output_tokens)||0; sr+=Number(r.reasoning_tokens)||0; sc+=Number(r.cost_usd)||0; });
   foot.style.display='';
   el('reqFootRow').innerHTML='<td colspan="3">合计 '+rows.length+' 条</td>'+
     '<td class="num">'+fmtInt(sh)+'</td><td class="num">'+fmtInt(sm)+'</td>'+
-    '<td class="num">'+fmtPct(tot>0?sh/tot:0)+'</td><td class="num">'+fmtInt(so)+'</td>'+
+    '<td class="num">'+fmtPct(reqRate(sh,sm))+'</td><td class="num">'+fmtInt(so)+'</td>'+
     '<td class="num">'+fmtInt(sr)+'</td><td class="num"></td><td class="num">'+fmtUSD(sc)+'</td>';
 }
 function loadRequests(){
@@ -893,6 +922,7 @@ function bind(){
   el('reqWindow').addEventListener('change',loadRequests);
   el('reqLimit').addEventListener('change',loadRequests);
   el('reqSearch').addEventListener('input',function(){ state.reqQuery=el('reqSearch').value; renderRequests(); });
+  el('reqGroup').addEventListener('change',function(){ state.reqGroup=el('reqGroup').value; renderRequests(); });
   var rths=document.querySelectorAll('th[data-rk]');
   for(var ri=0;ri<rths.length;ri++){
     (function(th){ th.addEventListener('click',function(){

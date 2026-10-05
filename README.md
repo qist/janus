@@ -262,6 +262,74 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 
 > 填一个不存在的 id，上游通常不报错，但行为不保证；请用实际存在的 agent。
 
+### 工具执行模式（三选一，重要）
+
+「工具在哪执行」由 `BRIDGE_AGENT` + `BRIDGE_TOOL_CALLING` 两个开关决定，按部署形态选一种：
+
+#### 方式 A：OpenCode 原生执行（工具跑在 janus 主机上）
+
+让 OpenCode agent 用**它自带**的 `read/write/edit/bash` 等工具，在**服务端（janus 所在机器、会话目录下）**执行。客户端只收发文本，**无需声明 tools**。
+
+```ini
+BRIDGE_AGENT=build                  # 任意有工具权限的 agent：build / plan / general …
+BRIDGE_TOOL_CALLING=false           # 关掉客户端工具桥
+BRIDGE_DIRECTORY=/path/to/project   # 必需：原生工具在此目录下执行
+```
+
+- 适用：janus 与「要操作的目录」在同一台机器（本机自用）。
+- 优点：链路最短，**绕开 MCP 工具桥**，没有 404 / 回填 / 等待超时那一套。
+- 注意：工具以 janus 运行用户（常为 root）在 `BRIDGE_DIRECTORY` 下执行。
+
+#### 方式 B：客户端执行（内置 MCP 工具桥）
+
+禁用 OpenCode 自带工具，agent 只调用**客户端在请求里声明的 `tools`**；janus 用内置 MCP server 把它们暴露给 agent，工具实际在**客户端**执行。
+
+```ini
+BRIDGE_AGENT=orchestrator    # 自定义 agent：deny 掉内置的 read/write/shell…（见下）
+BRIDGE_TOOL_CALLING=true     # 打开工具桥（默认值）
+```
+
+`orchestrator` 需在 OpenCode 配置 `~/.config/opencode/opencode.jsonc` 里自定义：
+
+```jsonc
+{
+  "agents": {
+    "orchestrator": {
+      "mode": "primary",
+      "permissions": [
+        { "action": "shell", "resource": "*", "effect": "deny" },
+        { "action": "edit",  "resource": "*", "effect": "deny" },
+        { "action": "read",  "resource": "*", "effect": "deny" },
+        { "action": "glob",  "resource": "*", "effect": "deny" },
+        { "action": "grep",  "resource": "*", "effect": "deny" },
+        { "action": "webfetch", "resource": "*", "effect": "deny" },
+        { "action": "websearch", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "question", "resource": "*", "effect": "deny" },
+        { "action": "browser", "resource": "*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*", "effect": "deny" }
+      ]
+    }
+  }
+}
+```
+
+- 适用：janus 集中部署，而文件/命令要在**客户端那台机器**上执行（opencode-openai-bridge 的远程模式）。
+- 代价：依赖客户端工具桥，可能出现 MCP 404 / 客户端不回填 / 等待超时等；相关参数见「工具调用」一节。
+
+#### 方式 C：不用工具（纯问答）
+
+agent 不做任何读写/命令，只用模型知识回答：
+
+```ini
+BRIDGE_AGENT=orchestrator    # 用那个 deny 掉所有内置工具的 agent
+BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没工具
+```
+
+- 适用：只想把它当普通聊天/问答用，或安全上不允许它动文件系统。
+
+> 小结：**A = 服务端原生执行**，**B = 客户端桥接执行**，**C = 不执行工具**。
+
 ### 输出与事件
 
 | 变量 | 默认 | 说明 |

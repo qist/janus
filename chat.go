@@ -691,7 +691,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if v, ok := PickVariant(*m, req.ReasoningEffort); ok {
 				ref.Variant = v
 			} else {
-				s.log.Warnf("model %s has no reasoning variant for effort %q (available: %v); ignoring",
+				// 模型没有可选思考档位时忽略 effort 是预期行为，降为 DEBUG 免刷屏
+				s.log.Debugf("model %s has no reasoning variant for effort %q (available: %v); ignoring",
 					ref.ProviderID+"/"+ref.ID, req.ReasoningEffort, VariantIDs(*m))
 			}
 		}
@@ -789,6 +790,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		mode = DiffAppend
 	}
 
+	// 要新建会话（sessionID 为空）时必须发完整历史：库里可能还留着上一轮历史快照，
+	// Diff 会算成 append 只发增量，而新会话没有旧上下文。清 session_id 后重建时靠这里兜底。
+	if conv.snapshotSessionID() == "" {
+		delta = req.Messages
+	}
+
 	// ---- 会话就绪 ----
 	newSession, err := s.ensureSession(ctx, conv, ref, agent, dir, req.Messages)
 	if err != nil {
@@ -837,6 +844,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 本次刚建的空会话直接丢弃，否则它会以「有 sessionID 但无历史」的
 		// 状态留在桶里，下次请求得靠 DiffReset 兜底重建，白白多一轮。
 		if newSession {
+			s.resetSession(conv)
+		} else if isSessionGone(err) {
+			// 上游把会话弄丢了（OpenCode 重启/清理）：清掉本地引用，
+			// 下次请求会重建会话并重放完整历史（见上面的 sessionID=="" 分支）。
+			s.log.Warnf("upstream session %s is gone (key=%s); will recreate on next request", sid, conv.Key)
 			s.resetSession(conv)
 		}
 		st, typ, msg := s.mapUpstreamError(err)

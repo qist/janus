@@ -58,6 +58,7 @@ type pendingCall struct {
 	ToolName string // 客户端原本的工具名（已去掉命名空间）
 	MCPName  string // 暴露给 agent 的名字（带命名空间）
 	Args     string // JSON 字符串
+	ConvKey  string // 所属会话 key（日志定位用）
 
 	ord    int64 // 到达顺序（parallel=false 时按它逐个返回）
 	result chan ToolResult
@@ -257,6 +258,7 @@ func (s *toolSession) park(callID, original, mcpName, args string) *pendingCall 
 		ToolName: original,
 		MCPName:  mcpName,
 		Args:     args,
+		ConvKey:  s.key,
 		result:   make(chan ToolResult, 1),
 	}
 	s.mu.Lock()
@@ -458,6 +460,10 @@ func (b *ToolBridge) waitResult(ctx context.Context, p *pendingCall) ToolResult 
 	case <-ctx.Done():
 		return ToolResult{Content: "bridge: tool call aborted: " + ctx.Err().Error(), IsError: true}
 	case <-t.C:
+		if b.log != nil {
+			b.log.Warnf("tool call timed out: client did not return a result within %s (tool=%s conv=%s); releasing agent",
+				b.wait, p.ToolName, p.ConvKey)
+		}
 		return ToolResult{
 			Content: fmt.Sprintf("bridge: client did not return a tool result within %s", b.wait),
 			IsError: true,

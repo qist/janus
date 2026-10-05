@@ -272,6 +272,14 @@ func writeOpenAIError(w http.ResponseWriter, status int, typ, msg, code string) 
 	}})
 }
 
+// isSessionGone 判断上游错误是否是"会话不存在"（OpenCode 重启/清理后常见）。
+// 命中时应清掉本地对该 session 的引用，下次请求重建并重放完整历史。
+func isSessionGone(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusNotFound &&
+		strings.Contains(strings.ToLower(ae.Msg), "session")
+}
+
 // mapUpstreamError 把 OpenCode 的错误翻译成 OpenAI 语义。
 //
 // 是 Server 的方法，因为连接错误信息里要带上"当前实际在用的"上游地址 ——

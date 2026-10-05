@@ -181,9 +181,14 @@ func (s *Server) deleteSession(sid string) {
 	defer cancel()
 	if err := s.up.DeleteSession(dctx, sid); err != nil {
 		s.log.Debugf("delete session %s: %v", sid, err)
-		return
+	} else {
+		s.log.Infof("janitor deleted session %s", sid)
 	}
-	s.log.Infof("janitor deleted session %s", sid)
+	// 无论上游删除是否成功，都要清掉库里对该 session 的引用，
+	// 否则之后会拿死 session 去打上游（502 Session not found）。
+	if s.db != nil {
+		s.db.clearSession(sid)
+	}
 }
 
 var _ = fmt.Sprintf

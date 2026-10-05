@@ -147,6 +147,18 @@ func (d *dbStore) deleteConv(key string) {
 	d.db.Delete(&dbConversation{}, "key = ?", key)
 }
 
+// clearSession 把引用该上游 session 的会话行的 session_id 清空（保留历史快照）。
+// janitor 删掉上游会话后必须调用：否则库里残留死 sessionID，下次请求拿它去打
+// 会得到 502 "Session not found"。清空后下次请求会重建会话（并重放完整历史）。
+func (d *dbStore) clearSession(sid string) {
+	if d == nil || sid == "" {
+		return
+	}
+	d.db.Model(&dbConversation{}).Where("session_id = ?", sid).Updates(map[string]any{
+		"session_id": "", "provider_id": "", "model_id": "", "variant": "",
+	})
+}
+
 func (d *dbStore) gcConvs(before int64) {
 	if d == nil {
 		return

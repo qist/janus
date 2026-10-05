@@ -731,6 +731,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	conv := s.store.Acquire(key, req.Messages)
 	defer s.store.Release(conv)
 
+	// 上一轮被客户端中止过（用户点了终止 / 断连）：新内容不能再续接到那个
+	// 残缺会话上，否则新任务会看到旧任务的上下文和中断残影。重开干净会话。
+	if conv.takeTerminated() {
+		s.log.Infof("previous turn was terminated; starting a fresh session (key=%s)", conv.Key)
+		s.resetSession(conv)
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 

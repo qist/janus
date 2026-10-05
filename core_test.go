@@ -222,6 +222,21 @@ func TestToolResultAnnotationTruncatesAndSanitizes(t *testing.T) {
 	}
 }
 
+// 被中止的会话要能被标记，且标记只消费一次（下一轮重开会话）。
+func TestConversationTerminatedFlag(t *testing.T) {
+	c := &Conversation{}
+	if c.takeTerminated() {
+		t.Fatal("初始不应为 true")
+	}
+	c.markTerminated()
+	if !c.takeTerminated() {
+		t.Fatal("mark 后应为 true")
+	}
+	if c.takeTerminated() {
+		t.Fatal("take 后应被清除")
+	}
+}
+
 // ---------- ResolveModel ----------
 
 func testModels() []OCModel {

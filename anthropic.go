@@ -442,6 +442,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	conv := s.store.Acquire(key, inputMsgs)
 	defer s.store.Release(conv)
 
+	// 上一轮被中止过：重开干净会话，别把新任务续接到残缺会话上。
+	if conv.takeTerminated() {
+		s.log.Infof("previous turn was terminated; starting a fresh session (key=%s)", conv.Key)
+		s.resetSession(conv)
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 

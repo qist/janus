@@ -71,6 +71,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	case outcome = <-ex.done:
 	case <-clientGone:
 		cancel()
+		conv.markTerminated()
 		s.log.Infof("client disconnected, interrupting %s", sid)
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)

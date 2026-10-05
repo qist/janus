@@ -42,12 +42,23 @@ type Conversation struct {
 
 	lastActive atomic.Int64 // 毫秒，eviction 不需要抢锁读
 	createdAt  time.Time
+
+	// terminated：上一轮被客户端中止（断连/主动终止）过。中止后上游会话
+	// 停在一个残缺的回合上，下一次请求必须重开干净会话，绝不能把「新任务」
+	// 续接到那个已中止的会话（否则新任务会看到旧任务的上下文/中断残影）。
+	terminated atomic.Bool
 }
 
 func (c *Conversation) touch() { c.lastActive.Store(time.Now().UnixMilli()) }
 func (c *Conversation) idle() time.Duration {
 	return time.Since(time.UnixMilli(c.lastActive.Load()))
 }
+
+// markTerminated 标记本会话上一轮被中止；下一轮请求据此重开会话。
+func (c *Conversation) markTerminated() { c.terminated.Store(true) }
+
+// takeTerminated 读取并清除中止标记（只消费一次）。
+func (c *Conversation) takeTerminated() bool { return c.terminated.Swap(false) }
 
 func (c *Conversation) snapshotLast() []ChatMessage {
 	c.stateMu.RLock()

@@ -227,6 +227,7 @@ func (s *Server) streamAnthropic(ctx context.Context, w http.ResponseWriter, r *
 	case outcome = <-ex.done:
 	case <-clientGone:
 		cancel()
+		conv.markTerminated()
 		s.log.Infof("client disconnected, interrupting %s", sid)
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)

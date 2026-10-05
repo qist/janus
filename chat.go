@@ -731,6 +731,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ---- 历史差分 ----
+	stored := conv.snapshotLast()
+	mode, delta := Diff(stored, req.Messages)
+
+	// DiffReset 必须先于「工具注册」处理：resetSession 会注销本会话的工具桥，
+	// 若先注册再重置，新会话就会没有工具（agent 只剩内置工具）。
+	if mode == DiffReset && conv.snapshotSessionID() != "" {
+		if d, ok := TolerateReset(stored, req.Messages); ok {
+			s.log.Infof("history mismatch tolerated, appending last user turn (key=%s)", conv.Key)
+			mode, delta = DiffAppend, d
+		} else {
+			s.resetSession(conv)
+		}
+	}
+
 	// ---- 工具：注册/更新（客户端声明了 tools）或注销（不再声明）----
 	if s.cfg.ToolCalling {
 		switch {
@@ -756,10 +771,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ---- 历史差分 ----
-	stored := conv.snapshotLast()
-	mode, delta := Diff(stored, req.Messages)
-
 	if mode == DiffNone {
 		// 缓存里是空回复时不能回放 —— 上游偶发空回复（实测有过一次 91s 后返回空），
 		// 一旦缓存下来，之后每个完全相同的请求都会拿到这个空结果，看起来像"桥坏了"。
@@ -776,19 +787,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.log.Debugf("no usable cached response for %s; re-running last user turn", conv.Key)
 		delta = retry
 		mode = DiffAppend
-	}
-
-	// DiffReset：客户端历史与桥记录不一致。优先尝试「忍耐」——只要 user 轮次
-	// 仍对得上，就把它当成尾部格式差异，追加最后一条 user 继续用现有会话，
-	// 避免频繁重开会话（重开会丢上下文、让缓存冷启动、MCP 反复重注册变 404）。
-	// 只有确实像"改了早期历史/换话题"时才重开。
-	if mode == DiffReset && conv.snapshotSessionID() != "" {
-		if d, ok := TolerateReset(stored, req.Messages); ok {
-			s.log.Infof("history mismatch tolerated, appending last user turn (key=%s)", conv.Key)
-			mode, delta = DiffAppend, d
-		} else {
-			s.resetSession(conv)
-		}
 	}
 
 	// ---- 会话就绪 ----

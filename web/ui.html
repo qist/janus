@@ -84,6 +84,12 @@ h2 .tag{font-weight:400;color:var(--dim);font-size:12px}
 .chart-head .seg{display:flex;gap:6px;flex-wrap:wrap}
 .seg button{padding:6px 11px;font-size:12px}
 .seg button.on{background:#2c3d6b;border-color:#4f7dff;color:#fff}
+/* 标签页 */
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 14px}
+.tabs button{padding:7px 15px;font-size:13px;border-radius:9px}
+.tabs button.on{background:#2c3d6b;border-color:#4f7dff;color:#fff}
+.tabpane{display:none}
+.tabpane.on{display:block}
 #chartBox{width:100%}
 #chart{width:100%;height:auto;display:block}
 .chart-empty{color:var(--dim);text-align:center;padding:60px 0}
@@ -181,6 +187,14 @@ td .bar{margin-top:3px}
 
   <div class="banner" id="banner"></div>
 
+  <nav class="tabs" id="tabs">
+    <button data-tab="usage" class="on">用量</button>
+    <button data-tab="requests">最近请求</button>
+    <button data-tab="models">模型</button>
+    <button data-tab="runtime">运行</button>
+  </nav>
+
+  <div class="tabpane on" data-pane="usage">
   <section>
     <h2>账户余额 <span class="tag" id="billingMode"></span></h2>
     <div class="grid cards" id="billingCards"></div>
@@ -248,7 +262,9 @@ td .bar{margin-top:3px}
       <div class="chart-empty" id="modelEmpty">暂无数据</div>
     </div>
   </section>
+  </div><!-- /usage -->
 
+  <div class="tabpane" data-pane="requests">
   <section>
     <h2>最近请求（缓存命中率）<span class="tag" id="reqTag"></span></h2>
     <div class="panel tbl-wrap">
@@ -295,7 +311,9 @@ td .bar{margin-top:3px}
       <div class="chart-empty" id="reqEmpty">暂无数据</div>
     </div>
   </section>
+  </div><!-- /requests -->
 
+  <div class="tabpane" data-pane="models">
   <section>
     <h2>支持的模型 <span class="tag" id="catalogTag"></span></h2>
     <div class="panel tbl-wrap">
@@ -327,10 +345,14 @@ td .bar{margin-top:3px}
       <div class="chart-empty" id="catalogEmpty">暂无数据</div>
     </div>
   </section>
+  </div><!-- /models -->
+
+  <div class="tabpane" data-pane="runtime">
   <section id="liveSec" style="display:none">
     <h2>桥接进程 <span class="tag">自本次启动 /metrics</span></h2>
     <div class="grid cards" id="liveCards"></div>
   </section>
+  </div><!-- /runtime -->
 
   <div class="foot">
     <span>数据来源：<code class="dim">/v1/usage</code>（OpenCode console API + Go inference）</span>
@@ -935,12 +957,29 @@ function restartAuto(){
   if(sec>0) state.timer=setInterval(load,sec*1000);
 }
 
+/* ---------- 标签页 ---------- */
+var TABKEY='janus.ui.tab';
+function showTab(name){
+  var btns=el('tabs').querySelectorAll('button');
+  for(var i=0;i<btns.length;i++) btns[i].className=(btns[i].getAttribute('data-tab')===name)?'on':'';
+  var panes=document.querySelectorAll('.tabpane');
+  for(var j=0;j<panes.length;j++) panes[j].className='tabpane'+((panes[j].getAttribute('data-pane')===name)?' on':'');
+  try{ localStorage.setItem(TABKEY,name); }catch(e){}
+  // 切回用量页时重画图表（隐藏时宽度为 0，画出来会不对）
+  if(name==='usage'&&typeof renderChart==='function'){ try{ renderChart(); }catch(e){} }
+}
+
 /* ---------- Key 弹窗 ---------- */
 function openKey(){ el('keyInput').value=state.key||''; el('keyMask').className='mask show'; el('keyInput').focus(); }
 function closeKey(){ el('keyMask').className='mask'; }
 
 /* ---------- 事件绑定 ---------- */
 function bind(){
+  el('tabs').addEventListener('click',function(e){
+    var b=e.target.closest('button[data-tab]'); if(!b) return;
+    showTab(b.getAttribute('data-tab'));
+  });
+  try{ var savedTab=localStorage.getItem(TABKEY); if(savedTab) showTab(savedTab); }catch(e){}
   el('btnRefresh').addEventListener('click',load);
   el('autoSel').addEventListener('change',restartAuto);
   el('reqWindow').addEventListener('change',loadRequests);

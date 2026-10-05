@@ -87,17 +87,25 @@ make dist-linux     # Linux 全架构发布包：amd64 / arm64 / arm / 386
 `opencode-go/deepseek-v4.1-flash`。模型列表：`GET /v1/models`
 （首条固定是 `default`，共 69 条）。
 
-## 自动发现上游（重要）
+## 自动发现 / 自动拉起上游（重要）
 
 OpenCode 桌面端/Hub **每次重启都会换随机端口和随机密码**，写死配置撑不过一次重启。
-因此默认 `OPENCODE_URL=auto`，启动时和断连时都会：
+因此默认 `OPENCODE_URL=auto`：
 
-1. 扫 `/proc/*/cmdline` 找 `opencode ... serve --port N` 的进程
-2. 从 `/proc/<pid>/environ` 读 `OPENCODE_SERVER_PASSWORD`
-3. 用 Basic 认证逐个探活 `/api/info`，第一个通的即采用
-4. 断连时后台每 30s 重试一次，探到新端点就热替换（含 SSE 重连）
+1. 启动时先扫 `/proc/*/cmdline` 找已在跑的 `opencode ... serve --port N` 进程
+2. 从 `/proc/<pid>/environ` 读 `OPENCODE_SERVER_PASSWORD`，Basic 探活 `/api/info`
+3. **没找到在跑的**：检查 `opencode` 是否安装——
+   - 已安装 → 由本桥以随机端口拉起
+     `opencode serve --hostname 127.0.0.1 --port <随机>`，密码由本桥生成并直接使用
+     （`OPENCODE_AUTOSTART=false` 可关闭自动拉起）
+   - 没安装 → 打日志提示安装：`curl -fsSL https://opencode.ai/v2/install | bash`
+4. 断连时后台每 30s 重试一次（同样是「先发现、没有就拉起」），探到新端点就热替换（含 SSE 重连）
 
-若要指向固定/远程实例，显式设置 `OPENCODE_URL` 即可（此时需同时给 `OPENCODE_PASSWORD`）。
+所以桌面端开不开都行：开着就复用它，没开本桥自己拉一个。模型授权（OAuth）仍由 OpenCode
+自己存在库里，本桥不参与。
+
+若要指向固定/远程实例，显式设置 `OPENCODE_URL` 即可（此时需同时给 `OPENCODE_PASSWORD`，
+且不会自动拉起）。
 
 > 需要与 OpenCode 进程同用户运行、且 `/proc` 可读（Linux）。其他平台请显式配置。
 
@@ -217,7 +225,9 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `OPENCODE_URL` | `auto` | `auto`=自动发现（推荐）；或固定 `http://host:port`（此时必须配密码） |
+| `OPENCODE_URL` | `auto` | `auto`=自动发现/自动拉起（推荐）；或固定 `http://host:port`（此时必须配密码） |
+| `OPENCODE_AUTOSTART` | `true` | `auto` 且没找到在跑的 OpenCode 时，由本桥以随机端口拉起一个；`false`=只发现不拉起 |
+| `OPENCODE_BIN` | 空 | 显式指定 `opencode` 可执行文件；空=自动查找（PATH、`~/.opencode/bin/opencode`） |
 | `OPENCODE_USERNAME` | `opencode` | 上游 Basic 用户名 |
 | `OPENCODE_PASSWORD` | 空 | 上游密码（优先） |
 | `OPENCODE_SERVER_PASSWORD` | 空 | 上游密码别名（与 `OPENCODE_PASSWORD` 二选一） |
@@ -791,6 +801,7 @@ janus/
     ├── upstream.go        OpenCode 客户端（endpoint 热替换）
     ├── eventbus.go        单条 SSE 连接 + fan-out + 权限自动应答
     ├── discover.go        上游自动发现 + 端点热切换
+    ├── autostart.go       没找到在跑的 OpenCode 时自动拉起（随机端口 + 生成的密码）
     ├── mcp.go             内置 MCP server（暴露客户端 tools）
     ├── toolbridge.go      工具注册表 / 挂起调用 / 防串会话
     ├── toolflow.go        工具调用编排（注册/回填/恢复/清理）

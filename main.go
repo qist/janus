@@ -38,9 +38,10 @@ func main() {
 	}
 
 	if cfg.UpstreamAuto {
-		// 自动发现：OpenCode 桌面端端口/密码每次都变，读 /proc 找到活的那个
-		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		ep, derr := Discover(dctx, probeEndpoint)
+		// 自动发现 + 必要时自己拉起：OpenCode 桌面端端口/密码每次都变，
+		// 没有在跑的（比如桌面端没开）就以随机端口拉一个，读 /proc 找到活的那个。
+		dctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		ep, derr := EnsureUpstream(dctx, log, cfg.OpencodeBin, cfg.AutostartUpstream)
 		cancel()
 		if derr != nil {
 			log.Warnf("upstream auto-discovery failed: %v (will keep retrying in background)", derr)

@@ -25,6 +25,12 @@ type Config struct {
 	// 随机端口和随机密码，靠它才能免配置续上。
 	UpstreamAuto bool
 
+	// AutostartUpstream：自动发现找不到运行中的 OpenCode 时，由本桥以随机端口
+	// 把 `opencode serve` 拉起来（OPENCODE_AUTOSTART，默认 true）。
+	// OpencodeBin 可选，显式指定 opencode 可执行文件（OPENCODE_BIN）。
+	AutostartUpstream bool
+	OpencodeBin       string
+
 	Username string // Basic 用户名，OpenCode 固定为 "opencode"
 	Password string // 即 OPENCODE_SERVER_PASSWORD
 
@@ -281,6 +287,9 @@ func LoadConfig() (Config, error) {
 		Addr:         loader.str("BRIDGE_ADDR", "0.0.0.0:2810"),
 		Upstream:     strings.TrimRight(upstream, "/"),
 		UpstreamAuto: auto,
+
+		AutostartUpstream: loader.boolean("OPENCODE_AUTOSTART", true),
+		OpencodeBin:       loader.str("OPENCODE_BIN", ""),
 
 		Username: loader.str("OPENCODE_USERNAME", "opencode"),
 		Password: pw,

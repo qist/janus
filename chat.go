@@ -914,6 +914,13 @@ func (c *Conversation) key() string { return c.Key }
 // 先过一遍别名映射（BRIDGE_MODEL_MAP，如 claude-3-5-sonnet=...），
 // 其余交给 ResolveModel 按 provider/model 或裸名解析。
 func (s *Server) resolveModel(ctx context.Context, raw string, list []OCModel) (OCModelRef, error) {
+	if isJanusAlias(raw) {
+		ref, err := s.resolveJanusModel(ctx, list)
+		if err == nil {
+			s.rememberModel(ref)
+		}
+		return ref, err
+	}
 	if isDefaultAlias(raw) {
 		ref, err := s.resolveDefaultModel(ctx, list)
 		if err == nil {
@@ -980,17 +987,9 @@ func stripContextSuffix(raw string) string {
 }
 
 // resolveDefaultModel 使用桥配置的默认模型覆盖；未配置时才跟随上游默认。
-// 优先级：web 运行时选定的默认模型 > BRIDGE_DEFAULT_MODEL > 上游默认。
 // 订阅 opencode-go 套餐的用户可以把 default 固定到 go provider，避免误用
 // opencode/fledge-alpha-free 这条默认线路。
 func (s *Server) resolveDefaultModel(ctx context.Context, list []OCModel) (OCModelRef, error) {
-	if runtime := strings.TrimSpace(s.runtimeDefaultModel()); runtime != "" {
-		if ref, err := ResolveModel(runtime, list); err == nil {
-			return ref, nil
-		} else {
-			s.log.Warnf("runtime default model %q unresolvable, falling back: %v", runtime, err)
-		}
-	}
 	if configured := strings.TrimSpace(s.cfg.DefaultModel); configured != "" {
 		ref, err := ResolveModel(configured, list)
 		if err != nil {
@@ -1003,6 +1002,25 @@ func (s *Server) resolveDefaultModel(ctx context.Context, list []OCModel) (OCMod
 		return OCModelRef{}, fmt.Errorf("cannot resolve upstream default model: %w", err)
 	}
 	return OCModelRef{ProviderID: def.ProviderID, ID: def.ID}, nil
+}
+
+// isJanusAlias 判断客户端是否在用 janus 虚拟模型（web 里选的默认模型）。
+// 用产品名做别名，避免和已有的 default（指向上游默认）撞名。
+func isJanusAlias(raw string) bool {
+	return strings.EqualFold(strings.TrimSpace(raw), "janus")
+}
+
+// resolveJanusModel 解析 janus 虚拟模型：
+// web 运行时选择 > BRIDGE_DEFAULT_MODEL > 上游默认。
+func (s *Server) resolveJanusModel(ctx context.Context, list []OCModel) (OCModelRef, error) {
+	if runtime := strings.TrimSpace(s.runtimeDefaultModel()); runtime != "" {
+		if ref, err := ResolveModel(runtime, list); err == nil {
+			return ref, nil
+		} else {
+			s.log.Warnf("janus default model %q unresolvable, falling back: %v", runtime, err)
+		}
+	}
+	return s.resolveDefaultModel(ctx, list)
 }
 
 // isDefaultAlias 判断客户端是否在请求"上游默认模型"。

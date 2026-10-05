@@ -805,8 +805,8 @@ function renderCatalog(){
   el('catalogTag').textContent=total?(rows.length+(rows.length!==total?(' / '+total):'')+' 个模型'):'';
   el('catalogEmpty').style.display=rows.length?'none':'block';
   el('catalogBody').innerHTML=rows.map(function(r){
-    var tags=(r.isDefault?'<span class="pill def">默认别名</span>':'')+(r.isCurDefault?'<span class="pill def">当前默认</span>':'')+(r.free?'<span class="pill free">免费</span>':'')+(r.used?'<span class="pill used">已用</span>':'');
-    var defBtn=(r.id==='default'||r.id==='auto')?'':'<button class="copybtn setdefbtn" data-setdef="'+esc(r.id)+'" title="设为默认：客户端填 default / 留空 时映射到它">设为默认</button>';
+    var tags=(r.id==='default'?'<span class="pill def">默认别名</span>':'')+(r.id==='janus'?'<span class="pill def">janus 别名</span>':'')+(r.isCurDefault?'<span class="pill def">janus 当前</span>':'')+(r.free?'<span class="pill free">免费</span>':'')+(r.used?'<span class="pill used">已用</span>':'');
+    var defBtn=(r.id==='default'||r.id==='auto'||r.id==='janus')?'':'<button class="copybtn setdefbtn" data-setdef="'+esc(r.id)+'" title="设为 janus 默认：客户端模型名填 janus 时用它">设为 janus</button>';
     var mods=r.modalities.length?r.modalities.join(' / '):'–';
     var effs=r.efforts.length?r.efforts.join(' / '):'–';
     return '<tr>'+
@@ -979,7 +979,7 @@ function bind(){
       var mid=n.getAttribute('data-setdef');
       apiJSON('POST','/v1/settings',{default_model:mid}).then(function(){
         state.defModel=mid; renderCatalog();
-        toast('已设为默认：'+mid+'（客户端填 default 或留空即用它）');
+        toast('已设为 janus 默认：'+mid+'（客户端模型名填 janus 即用它）');
       }).catch(function(err){ toast('设置失败：'+((err&&err.message)||err)); });
       return;
     }

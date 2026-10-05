@@ -392,12 +392,23 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		MinContext: atoiOrZero(q.Get("min_context")),
 	}
 
-	out := ModelList{Object: "list", Data: make([]ModelObject, 0, len(list)+1)}
+	out := ModelList{Object: "list", Data: make([]ModelObject, 0, len(list)+2)}
 
-	// 首条放一个虚拟模型 "default"，让客户端下拉框里就有"用上游默认"这个选项，
-	// 不必写死 fledge-alpha-free 这类具体名字（上游换默认时客户端无需改配置）。
+	// 虚拟模型：客户端下拉框里可直接选，不必写死具体模型名。
+	//   janus   → web 里选的默认模型（见 /ui「支持的模型」→ 设为默认）
+	//   default → 上游 / BRIDGE_DEFAULT_MODEL 的默认（旧语义）
 	// 只有在没有任何过滤条件时才放，否则会污染过滤结果。
 	if filter.Empty() {
+		if ref, err := s.resolveJanusModel(r.Context(), list); err == nil {
+			if def := FindModel(list, ref); def != nil {
+				obj := ToOpenAI(*def)
+				obj.ID = "janus"
+				obj.OwnedBy = "janus"
+				out.Data = append(out.Data, obj)
+			}
+		} else {
+			s.log.Warnf("cannot resolve janus default model: %v", err)
+		}
 		if ref, err := s.resolveDefaultModel(r.Context(), list); err == nil {
 			if def := FindModel(list, ref); def != nil {
 				obj := ToOpenAI(*def)

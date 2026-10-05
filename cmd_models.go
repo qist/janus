@@ -37,6 +37,8 @@ func runModels(args []string) {
 	log := NewLogger("warn")
 
 	if cfg.UpstreamAuto {
+		// CLI 只查询模型：优先复用已在跑的实例，避免每次 `janus models` 都多拉一个。
+		cfg.ReuseExternal = true
 		// 与主程序一致：先发现已在跑的 OpenCode，没有就按配置自动拉起
 		dctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		ep, derr := EnsureUpstream(dctx, log, &cfg, cfg.AutostartUpstream)

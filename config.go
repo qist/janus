@@ -31,6 +31,11 @@ type Config struct {
 	AutostartUpstream bool
 	OpencodeBin       string
 
+	// ReuseExternal：是否复用已在跑的外部 OpenCode（OPENCODE_REUSE_EXTERNAL，默认 true）。
+	// 设为 false 时 janus 总是自己拉起一个，从而能通过 OPENCODE_CONFIG_CONTENT
+	// 注入自己生成的 agent 配置（复用外部实例时注入不生效）。
+	ReuseExternal bool
+
 	Username string // Basic 用户名，OpenCode 固定为 "opencode"
 	Password string // 即 OPENCODE_SERVER_PASSWORD
 
@@ -290,6 +295,7 @@ func LoadConfig() (Config, error) {
 
 		AutostartUpstream: loader.boolean("OPENCODE_AUTOSTART", true),
 		OpencodeBin:       loader.str("OPENCODE_BIN", ""),
+		ReuseExternal:     loader.boolean("OPENCODE_REUSE_EXTERNAL", true),
 
 		Username: loader.str("OPENCODE_USERNAME", "opencode"),
 		Password: pw,

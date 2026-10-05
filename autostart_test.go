@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -50,6 +51,14 @@ func TestOpenCodeInlineConfig(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %s in %s", want, s)
 		}
+	}
+}
+
+// 禁用复用 + 禁用拉起时，必须报错而不是去发现/拉起。
+func TestEnsureUpstreamNoReuseNoSpawn(t *testing.T) {
+	if _, err := EnsureUpstream(context.Background(), NewLogger("error"),
+		&Config{ReuseExternal: false}, false); err == nil {
+		t.Fatal("expected error")
 	}
 }
 

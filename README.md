@@ -228,6 +228,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 |---|---|---|
 | `OPENCODE_URL` | `auto` | `auto`=自动发现/自动拉起（推荐）；或固定 `http://host:port`（此时必须配密码） |
 | `OPENCODE_AUTOSTART` | `true` | `auto` 且没找到在跑的 OpenCode 时，由本桥以随机端口拉起一个；`false`=只发现不拉起 |
+| `OPENCODE_REUSE_EXTERNAL` | `true` | 是否复用已在跑的外部 OpenCode。`false`=总是自己拉起（这样才能注入 janus 自动生成的 agent 配置） |
 | `OPENCODE_BIN` | 空 | 显式指定 `opencode` 可执行文件；空=自动查找（PATH、`~/.opencode/bin/opencode`） |
 | `OPENCODE_USERNAME` | `opencode` | 上游 Basic 用户名 |
 | `OPENCODE_PASSWORD` | 空 | 上游密码（优先） |

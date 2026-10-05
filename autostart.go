@@ -126,15 +126,27 @@ func SpawnOpenCode(ctx context.Context, log *Logger, cfg *Config) (*Endpoint, er
 	}
 }
 
-// EnsureUpstream 返回可用上游：优先复用已在跑的 opencode；没有且允许时自己拉一个。
+// EnsureUpstream 返回可用上游：默认优先复用已在跑的 opencode；没有且允许时自己拉一个。
+// cfg.ReuseExternal=false 时跳过复用，总是自己拉一个（这样才能注入生成的 agent 配置）。
 func EnsureUpstream(ctx context.Context, log *Logger, cfg *Config, allowSpawn bool) (*Endpoint, error) {
-	ep, derr := Discover(ctx, probeEndpoint)
-	if derr == nil {
-		return ep, nil
+	var derr error
+	if cfg.ReuseExternal {
+		var ep *Endpoint
+		ep, derr = Discover(ctx, probeEndpoint)
+		if derr == nil {
+			return ep, nil
+		}
 	}
 	if !allowSpawn {
+		if derr == nil {
+			derr = fmt.Errorf("no running OpenCode and autostart disabled")
+		}
 		return nil, derr
 	}
-	log.Infof("no running OpenCode found (%v); starting one…", derr)
+	if cfg.ReuseExternal {
+		log.Infof("no running OpenCode found (%v); starting one…", derr)
+	} else {
+		log.Infof("reuse disabled (OPENCODE_REUSE_EXTERNAL=false); starting janus-managed OpenCode…")
+	}
 	return SpawnOpenCode(ctx, log, cfg)
 }

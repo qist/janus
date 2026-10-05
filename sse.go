@@ -129,6 +129,20 @@ func (s *sseWriter) deltaReasoning(text string) error {
 	})
 }
 
+// keepAlive 发一个空的 delta 数据块做保活。
+// 不用 SSE 注释（`: ping`）：部分客户端（如 CodeBuddy）只在收到 `data:` 时
+// 才重置读超时，注释不算，于是空闲 >30s 就报「模型超过 30 秒未返回数据」。
+// OpenAI 兼容客户端对空 delta 块是标准处理，不会产生额外内容。
+func (s *sseWriter) keepAlive() error {
+	return s.writeChunk(ChatChunk{
+		ID:      s.id,
+		Object:  "chat.completion.chunk",
+		Created: s.created,
+		Model:   s.model,
+		Choices: []ChunkChoice{{Index: 0, Delta: Delta{}}},
+	})
+}
+
 func (s *sseWriter) finish(reason string, u *Usage, _ bool) error {
 	ch := ChatChunk{
 		ID:      s.id,

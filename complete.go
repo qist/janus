@@ -31,7 +31,8 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	// handler 返回后绝不能再写 ResponseWriter（详见 markClosed 注释）
 	defer sw.markClosed()
 
-	// 心跳：agent 跑工具时可能几分钟没有增量，用 SSE 注释保活
+	// 保活：agent 跑工具时可能几分钟没有增量；发空 delta 数据块让客户端
+	// 重置读超时（注释 ping 有些客户端不认）。
 	hbDone := make(chan struct{})
 	defer close(hbDone)
 	go func() {
@@ -42,7 +43,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 			case <-hbDone:
 				return
 			case <-t.C:
-				sw.ping()
+				_ = sw.keepAlive()
 			}
 		}
 	}()

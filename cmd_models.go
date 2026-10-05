@@ -37,12 +37,13 @@ func runModels(args []string) {
 	log := NewLogger("warn")
 
 	if cfg.UpstreamAuto {
-		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		ep, derr := Discover(dctx, probeEndpoint)
+		// 与主程序一致：先发现已在跑的 OpenCode，没有就按配置自动拉起
+		dctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		ep, derr := EnsureUpstream(dctx, log, cfg.OpencodeBin, cfg.AutostartUpstream)
 		cancel()
 		if derr != nil {
-			fmt.Fprintln(os.Stderr, "upstream auto-discovery failed: "+derr.Error())
-			fmt.Fprintln(os.Stderr, "提示：先启动 OpenCode，或设置 OPENCODE_URL / OPENCODE_PASSWORD。")
+			fmt.Fprintln(os.Stderr, "upstream auto-discovery/autostart failed: "+derr.Error())
+			fmt.Fprintln(os.Stderr, "提示：先安装/启动 OpenCode，或设置 OPENCODE_URL / OPENCODE_PASSWORD。")
 			os.Exit(1)
 		}
 		cfg.Upstream, cfg.Username, cfg.Password = ep.Base, ep.User, ep.Pass

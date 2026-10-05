@@ -166,8 +166,12 @@ func (e *executor) addTokens(t *OCTokens) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.usage.PromptTokens += t.Input
-	e.usage.CompletionTokens += t.Output
+	// 上游 t.Input 是「未命中缓存」的新增输入，t.Cache.Read 是复用缓存的部分；
+	// OpenAI 语义里 prompt_tokens 是两者之和，cached_tokens 才是命中的子集。
+	// t.Output 是可见正文、t.Reason 是思考，两者独立计数；completion_tokens 含
+	// reasoning（后者是明细子集），故相加，保证「输出 = 思考 + 回复」自洽。
+	e.usage.PromptTokens += t.Input + t.Cache.Read
+	e.usage.CompletionTokens += t.Output + t.Reason
 	if e.usage.PromptTokensDetails == nil {
 		e.usage.PromptTokensDetails = &TokenDetails{}
 	}
@@ -175,6 +179,7 @@ func (e *executor) addTokens(t *OCTokens) {
 		e.usage.CompletionTokensDetails = &CompletionDetails{}
 	}
 	e.usage.PromptTokensDetails.CachedTokens += t.Cache.Read
+	e.usage.PromptTokensDetails.CacheCreationTokens += t.Cache.Write
 	e.usage.CompletionTokensDetails.ReasoningTokens += t.Reason
 }
 

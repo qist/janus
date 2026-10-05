@@ -193,6 +193,9 @@ type Usage struct {
 
 type TokenDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+	// CacheCreationTokens 为写入缓存的 token（上游 cache.write）。OpenAI 无此字段，
+	// 但网关普遍透出，标准客户端会忽略。
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 }
 
 type CompletionDetails struct {

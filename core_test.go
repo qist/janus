@@ -384,12 +384,11 @@ func TestAddTokensAccumulates(t *testing.T) {
 	e.addTokens(tk)
 
 	u := e.snapshot().usage
-	// OpenAI 语义：completion_tokens 已包含 reasoning_tokens（后者是明细子项），
-	// 所以这里只把 output 累进 completion，reasoning 单独记在 details 里。
-	if u.PromptTokens != 200 || u.CompletionTokens != 100 {
+	// prompt_tokens = 未命中输入 + 缓存命中；completion_tokens 含 reasoning（明细子项）。
+	if u.PromptTokens != 260 || u.CompletionTokens != 140 {
 		t.Fatalf("got %+v", u)
 	}
-	if u.TotalTokens != 300 {
+	if u.TotalTokens != 400 {
 		t.Fatalf("total = %d", u.TotalTokens)
 	}
 	if u.PromptTokensDetails.CachedTokens != 60 {
@@ -1524,6 +1523,46 @@ func TestSSENormalFinish(t *testing.T) {
 	}
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Errorf("缺少 [DONE]:\n%s", body)
+	}
+}
+
+// 未显式请求 include_usage 时也要发 usage（CodeBuddy 等客户端依赖它统计输出与缓存）。
+func TestSSEFinishAlwaysUsage(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw, err := newSSE(rec, "opencode/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sw.begin()
+	u := Usage{PromptTokens: 5, CompletionTokens: 6, TotalTokens: 11,
+		PromptTokensDetails: &TokenDetails{CachedTokens: 4}}
+	if err := sw.finish("stop", &u, false); err != nil {
+		t.Fatal(err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"total_tokens":11`) || !strings.Contains(body, `"cached_tokens":4`) {
+		t.Errorf("未请求 include_usage 也应输出 usage:\n%s", body)
+	}
+}
+
+// prompt_tokens 应为「未命中 + 命中」总量，cached_tokens 为命中的子集。
+func TestAddTokensCacheIntoPrompt(t *testing.T) {
+	e := &executor{}
+	tk := &OCTokens{Input: 10, Output: 2}
+	tk.Cache.Read = 90
+	tk.Cache.Write = 5
+	e.addTokens(tk)
+	if e.usage.PromptTokens != 100 {
+		t.Fatalf("PromptTokens = %d, want 100", e.usage.PromptTokens)
+	}
+	if e.usage.PromptTokensDetails == nil || e.usage.PromptTokensDetails.CachedTokens != 90 {
+		t.Fatalf("CachedTokens = %+v, want 90", e.usage.PromptTokensDetails)
+	}
+	if e.usage.PromptTokensDetails.CacheCreationTokens != 5 {
+		t.Fatalf("CacheCreationTokens = %d, want 5", e.usage.PromptTokensDetails.CacheCreationTokens)
+	}
+	if e.usage.CompletionTokens != 2 {
+		t.Fatalf("CompletionTokens = %d, want 2", e.usage.CompletionTokens)
 	}
 }
 

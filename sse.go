@@ -129,7 +129,7 @@ func (s *sseWriter) deltaReasoning(text string) error {
 	})
 }
 
-func (s *sseWriter) finish(reason string, u *Usage, includeUsage bool) error {
+func (s *sseWriter) finish(reason string, u *Usage, _ bool) error {
 	ch := ChatChunk{
 		ID:      s.id,
 		Object:  "chat.completion.chunk",
@@ -145,7 +145,10 @@ func (s *sseWriter) finish(reason string, u *Usage, includeUsage bool) error {
 		return err
 	}
 
-	if includeUsage && u != nil {
+	// 始终带上 usage（不依赖客户端的 stream_options.include_usage）：
+	// 不少客户端（如 CodeBuddy）不显式请求它，但仍要靠 usage 统计输出与缓存命中。
+	// 单独一个 choices 为空的 chunk 是 OpenAI 的标准写法，标准客户端会正确解析。
+	if u != nil {
 		usageOnly := ChatChunk{
 			ID:      s.id,
 			Object:  "chat.completion.chunk",

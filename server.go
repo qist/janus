@@ -323,8 +323,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	info := map[string]any{
-		"status":   "ok",
-		"upstream": s.cfg.Upstream,
+		"status": "ok",
+		// 用实时端点：auto 模式会自动发现/热切换上游，cfg.Upstream 是启动时的旧值。
+		"upstream": s.up.endpoint(),
 	}
 	if err := s.up.do(ctx, http.MethodGet, "/api/info", nil, nil, nil); err != nil {
 		info["status"] = "upstream_unreachable"

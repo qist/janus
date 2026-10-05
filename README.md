@@ -196,6 +196,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 
 - **余额**：余额 / 可用额度 / 信用额度 / 计费模式
 - **Go 套餐限额**：5 小时滚动 / 每周 / 每月的已用百分比与重置倒计时（仅 Go 账号显示，数据来自 inference 主机的非公开接口）
+- **最近请求（缓存命中率）**：逐条列出上游模型请求的命中/未命中/命中率/输出/耗时（`/v1/requests`，可直接对账官方 console 的 request-logs，无需打开官方页面）
 - **累计用量**：花费、请求数、输入/输出 tokens、缓存读取/写入、**缓存命中率**、Token 结构占比
 - **每日趋势**：按天的花费 / 请求数 / tokens 柱状图（7/14/30/90 天 / 全部）
 - **模型用量**：按模型分组的请求、输入/输出、缓存读取、命中率、花费及占比，表头点击排序
@@ -318,6 +319,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | GET | `/v1/models` | 模型列表（支持过滤，见下） |
 | GET | `/v1/models/{id}` | 单个模型**完整详情**（上下文、思考档位、能力、价格） |
 | GET | `/v1/usage` | 账号余额 + 用量（扩展端点，见下） |
+| GET | `/v1/requests` | 最近逐条请求日志（含每次缓存命中/未命中/命中率；扩展端点，`?since=<ms>&limit<=100`） |
 | GET | `/metrics` | Prometheus 指标（默认需鉴权） |
 | POST | `/v1/chat/completions` | 流式 + 非流式 |
 | POST | `/v1/responses` | OpenAI **Responses API**（流式 + 非流式） |

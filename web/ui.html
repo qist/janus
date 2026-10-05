@@ -250,6 +250,39 @@ td .bar{margin-top:3px}
   </section>
 
   <section>
+    <h2>最近请求（缓存命中率）<span class="tag" id="reqTag"></span></h2>
+    <div class="panel tbl-wrap">
+      <div class="filter">
+        <div class="fgroup">
+          <select id="reqWindow" title="时间范围">
+            <option value="1">最近 1 小时</option>
+            <option value="3" selected>最近 3 小时</option>
+            <option value="6">最近 6 小时</option>
+            <option value="24">最近 24 小时</option>
+          </select>
+          <select id="reqLimit" title="条数">
+            <option value="20">20 条</option>
+            <option value="50" selected>50 条</option>
+            <option value="100">100 条</option>
+          </select>
+        </div>
+        <span class="dim" id="reqNote">逐条：命中=缓存读取，未命中=新增输入；命中率=命中/(命中+未命中)</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th><th>模型</th><th>会话</th>
+            <th class="num">命中</th><th class="num">未命中</th>
+            <th class="num">命中率</th><th class="num">输出</th><th class="num">耗时</th>
+          </tr>
+        </thead>
+        <tbody id="reqBody"></tbody>
+      </table>
+      <div class="chart-empty" id="reqEmpty">暂无数据</div>
+    </div>
+  </section>
+
+  <section>
     <h2>支持的模型 <span class="tag" id="catalogTag"></span></h2>
     <div class="panel tbl-wrap">
       <div class="filter">
@@ -311,7 +344,7 @@ td .bar{margin-top:3px}
 (function(){
 'use strict';
 var KEY='bridge.usage.key', AUTOKEY='bridge.usage.auto';
-var state={report:null,metrics:null,key:localStorage.getItem(KEY)||'',timer:null,
+var state={report:null,metrics:null,requests:null,key:localStorage.getItem(KEY)||'',timer:null,
   metric:'cost_usd',days:30,sortKey:'cost_usd',sortDir:-1,
   catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1};
 
@@ -636,6 +669,41 @@ function catalogRows(){
   });
   return rows;
 }
+/* ---------- 渲染：最近请求（缓存命中率） ---------- */
+function renderRequests(){
+  var rows=state.requests||[], tb=el('reqBody');
+  el('reqTag').textContent=rows.length?('· '+rows.length+' 条'):'';
+  if(!rows.length){ tb.innerHTML=''; el('reqEmpty').style.display='block'; return; }
+  el('reqEmpty').style.display='none';
+  tb.innerHTML=rows.map(function(r){
+    var hit=Number(r.cache_hit_rate)||0;
+    var color=hit>=0.9?'#38d2b1':(hit>=0.5?'#f5b942':'#ff6b6b');
+    var t=r.time?new Date(r.time).toLocaleTimeString():'';
+    var sid=(r.session||'').replace(/^ses_/,'').slice(0,10);
+    return '<tr>'+
+      '<td>'+esc(t)+'</td>'+
+      '<td>'+esc(r.model||'')+'</td>'+
+      '<td class="dim">'+esc(sid)+'</td>'+
+      '<td class="num">'+fmtInt(r.cache_read_tokens)+'</td>'+
+      '<td class="num">'+fmtInt(r.input_tokens)+'</td>'+
+      '<td class="num" style="color:'+color+'">'+fmtPct(hit)+'</td>'+
+      '<td class="num">'+fmtInt(r.output_tokens)+'</td>'+
+      '<td class="num">'+(r.duration_ms?(r.duration_ms/1000).toFixed(1)+'s':'')+'</td>'+
+    '</tr>';
+  }).join('');
+}
+function loadRequests(){
+  var hours=parseInt(el('reqWindow').value,10)||3;
+  var limit=parseInt(el('reqLimit').value,10)||50;
+  var since=Date.now()-hours*3600*1000;
+  return api('/v1/requests?since='+since+'&limit='+limit).then(function(o){
+    state.requests=(o&&o.requests)||[];
+    renderRequests();
+  }).catch(function(err){
+    el('reqNote').textContent='请求日志加载失败：'+((err&&err.message)||err);
+    if(!state.requests) el('reqEmpty').style.display='block';
+  });
+}
 function renderCatalog(){
   var list=state.catalog||[],provs={},i;
   for(i=0;i<list.length;i++){ var p=(list[i]||{}).owned_by; if(p) provs[p]=true; }
@@ -733,6 +801,8 @@ function setLoading(on){
 }
 function load(){
   setLoading(true);
+  // 最近请求（缓存命中率）：与用量解耦，失败不影响其它区块
+  var reqP=loadRequests();
   // 模型目录独立加载：即使用量接口不可用（凭据过期 / console 故障），
   // 也照常展示 /v1/models 支持的模型。
   var catalogP=api('/v1/models').then(function(obj){
@@ -763,7 +833,7 @@ function load(){
     }else{
       showBanner('err','<b>请求失败：</b>'+esc(err.message));
     }
-  }).then(function(){ return catalogP; }).then(function(){ setLoading(false); });
+  }).then(function(){ return catalogP; }).then(function(){ return reqP; }).then(function(){ setLoading(false); });
 }
 
 /* ---------- 自动刷新 ---------- */
@@ -782,6 +852,8 @@ function closeKey(){ el('keyMask').className='mask'; }
 function bind(){
   el('btnRefresh').addEventListener('click',load);
   el('autoSel').addEventListener('change',restartAuto);
+  el('reqWindow').addEventListener('change',loadRequests);
+  el('reqLimit').addEventListener('change',loadRequests);
   el('btnKey').addEventListener('click',openKey);
   el('keyCancel').addEventListener('click',closeKey);
   el('keyMask').addEventListener('click',function(e){ if(e.target===el('keyMask')) closeKey(); });

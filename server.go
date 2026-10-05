@@ -287,6 +287,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 	mux.HandleFunc("GET /v1/usage", s.handleUsage)
+	mux.HandleFunc("GET /v1/requests", s.handleRequests)
 	mux.HandleFunc("POST /v1/responses", s.handleCreateResponse)
 	mux.HandleFunc("GET /v1/responses/{id}", s.handleGetResponse)
 	mux.HandleFunc("DELETE /v1/responses/{id}", s.handleDeleteResponse)
@@ -542,6 +543,44 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)
+}
+
+// handleRequests 暴露最近的上游请求日志（含每次的缓存命中率），供面板对账，
+// 无需打开官方 console。扩展端点：GET /v1/requests?since=<ms>&limit=<n>
+func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
+	if err := s.checkAuth(r); err != nil {
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
+		return
+	}
+	if !s.cfg.UsageEnabled {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
+			"requests endpoint disabled (BRIDGE_USAGE_ENABLED=false)", "disabled")
+		return
+	}
+	var since int64
+	if v := r.URL.Query().Get("since"); v != "" {
+		since, _ = strconv.ParseInt(v, 10, 64)
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	logs, err := s.usage.RequestLogs(ctx, since, limit)
+	if err != nil {
+		s.log.Warnf("request logs failed: %v", err)
+		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
+			"cannot read request logs: "+err.Error(), "requests_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"requests":   logs,
+		"fetched_at": time.Now().UTC(),
+	})
 }
 
 func (s *Server) handleUnknownV1(w http.ResponseWriter, r *http.Request) {

@@ -476,3 +476,107 @@ func (r goUsageRaw) toUsage() *GoUsage {
 		Monthly: conv(r.Usage.Monthly),
 	}
 }
+
+// ---------- 逐条请求日志（缓存命中率） ----------
+//
+// 官方 console 的日志页用的是 GET {console}/request-logs?since=<ms>&category=inference&limit=<n>，
+// 同样用 OAuth 凭据 + org 头。这里拉最近若干条，换算成便于展示/对账的结构。
+// 注意：inputTokens 不含缓存命中；prompt = input + cacheRead。
+
+type RequestLog struct {
+	Time         time.Time `json:"time"`
+	Model        string    `json:"model"`
+	Provider     string    `json:"provider"`
+	Session      string    `json:"session"`
+	Finish       string    `json:"finish"`
+	InputTokens  int64     `json:"input_tokens"`      // 未命中
+	CacheRead    int64     `json:"cache_read_tokens"` // 命中
+	CacheWrite   int64     `json:"cache_write_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	Reasoning    int64     `json:"reasoning_tokens"`
+	PromptTokens int64     `json:"prompt_tokens"`  // input + cacheRead
+	CacheHitRate float64   `json:"cache_hit_rate"` // cacheRead / prompt
+	DurationMs   int64     `json:"duration_ms"`
+	CostUSD      float64   `json:"cost_usd"`
+}
+
+type requestLogRaw struct {
+	SessionID        string  `json:"sessionID"`
+	RequestedModel   string  `json:"requestedModel"`
+	Model            string  `json:"model"`
+	Provider         string  `json:"provider"`
+	StartedAt        int64   `json:"startedAt"` // 毫秒
+	DurationMs       int64   `json:"durationMs"`
+	Outcome          string  `json:"outcome"`
+	InputTokens      flexInt `json:"inputTokens"`
+	OutputTokens     flexInt `json:"outputTokens"`
+	ReasoningTokens  flexInt `json:"reasoningTokens"`
+	CacheReadTokens  flexInt `json:"cacheReadTokens"`
+	CacheWriteTokens flexInt `json:"cacheWriteTokens"`
+	Cost             float64 `json:"cost"`
+	Finish           struct {
+		Reason string `json:"reason"`
+	} `json:"finish"`
+}
+
+// RequestLogs 拉取最近的上游请求日志。sinceMs<=0 时默认看最近 6 小时；limit 上限 100。
+func (c *UsageClient) RequestLogs(ctx context.Context, sinceMs int64, limit int) ([]RequestLog, error) {
+	cred, err := readCredential(c.dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if sinceMs <= 0 {
+		sinceMs = time.Now().Add(-6 * time.Hour).UnixMilli()
+	}
+	path := fmt.Sprintf("/request-logs?since=%d&category=inference&limit=%d", sinceMs, limit)
+
+	var wrap struct {
+		Items []requestLogRaw `json:"items"`
+	}
+	if err := c.get(ctx, cred, path, &wrap); err != nil {
+		return nil, err
+	}
+
+	out := make([]RequestLog, 0, len(wrap.Items))
+	for _, it := range wrap.Items {
+		out = append(out, it.toRequestLog())
+	}
+	return out, nil
+}
+
+// toRequestLog 把官方原始记录换算成展示结构（命中率 = cacheRead / (input+cacheRead)）。
+func (it requestLogRaw) toRequestLog() RequestLog {
+	input := int64(it.InputTokens)
+	read := int64(it.CacheReadTokens)
+	prompt := input + read
+	var hit float64
+	if prompt > 0 {
+		hit = float64(read) / float64(prompt)
+	}
+	model := it.RequestedModel
+	if model == "" {
+		model = it.Model
+	}
+	return RequestLog{
+		Time:         time.UnixMilli(it.StartedAt),
+		Model:        model,
+		Provider:     it.Provider,
+		Session:      it.SessionID,
+		Finish:       it.Finish.Reason,
+		InputTokens:  input,
+		CacheRead:    read,
+		CacheWrite:   int64(it.CacheWriteTokens),
+		OutputTokens: int64(it.OutputTokens),
+		Reasoning:    int64(it.ReasoningTokens),
+		PromptTokens: prompt,
+		CacheHitRate: hit,
+		DurationMs:   it.DurationMs,
+		CostUSD:      it.Cost,
+	}
+}

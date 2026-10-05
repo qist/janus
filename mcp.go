@@ -40,10 +40,6 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	token := r.PathValue("token")
 	sess := s.tools.Get(token)
-	if sess == nil {
-		http.Error(w, "unknown mcp session", http.StatusNotFound)
-		return
-	}
 
 	switch r.Method {
 	case http.MethodGet:
@@ -77,6 +73,15 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	// 通知类：无 id → 202
 	if len(req.ID) == 0 || string(req.ID) == "null" {
 		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	// 未知 token：会话重置/回收后，上游可能还拿着旧的 MCP 配置在调。
+	// 不再返回 404（上游会据此判定整条 MCP 连接失败、agent 报"服务挂了"），
+	// 而是给一个"空会话"式的可恢复响应，让上游平滑收敛。
+	if sess == nil {
+		s.log.Debugf("mcp request for unknown session (method=%s); serving empty session", req.Method)
+		s.handleUnknownMCPSession(w, token, &req)
 		return
 	}
 
@@ -178,6 +183,43 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		s.log.Debugf("mcp unhandled method %q", req.Method)
+		mcpErr(w, req.ID, -32601, "method not found: "+req.Method)
+	}
+}
+
+// handleUnknownMCPSession 给"未知 token"的 MCP 请求一个可恢复响应，而不是 404：
+// initialize / ping / tools/list 正常返回（工具列表为空），tools/call 明确报错。
+// 这样上游（OpenCode 的 MCP 客户端）不会把整条连接判死，agent 也不会报"服务挂了"。
+func (s *Server) handleUnknownMCPSession(w http.ResponseWriter, token string, req *mcpRequest) {
+	switch req.Method {
+	case "initialize":
+		var p struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		ver := p.ProtocolVersion
+		if ver == "" {
+			ver = "2025-06-18"
+		}
+		w.Header().Set("Mcp-Session-Id", token)
+		mcpReply(w, req.ID, map[string]any{
+			"protocolVersion": ver,
+			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+			"serverInfo":      map[string]any{"name": "janus", "version": "1.0"},
+		})
+	case "ping":
+		mcpReply(w, req.ID, map[string]any{})
+	case "tools/list":
+		mcpReply(w, req.ID, map[string]any{"tools": []any{}})
+	case "tools/call":
+		mcpReply(w, req.ID, map[string]any{
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "bridge: this tool server is stale (session was reset); no tools available",
+			}},
+			"isError": true,
+		})
+	default:
 		mcpErr(w, req.ID, -32601, "method not found: "+req.Method)
 	}
 }

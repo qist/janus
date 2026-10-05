@@ -499,7 +499,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if mode == DiffReset && conv.snapshotSessionID() != "" {
-		s.resetSession(conv)
+		if d, ok := TolerateReset(stored, inputMsgs); ok {
+			s.log.Infof("history mismatch tolerated, appending last user turn (key=%s)", conv.Key)
+			mode, delta = DiffAppend, d
+		} else {
+			s.resetSession(conv)
+		}
 	}
 
 	if _, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs); err != nil {

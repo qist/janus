@@ -383,8 +383,11 @@ func TestMCPUnknownTool(t *testing.T) {
 func TestMCPUnknownToken(t *testing.T) {
 	srv, _ := newMCPTestServer(t)
 	rec := mcpPost(t, srv, "deadbeef", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("未知 token 应 404，got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("未知 token 应给可恢复响应(200)，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"tools":[]`) {
+		t.Fatalf("未知 token 的 tools/list 应返回空工具表:\n%s", rec.Body.String())
 	}
 }
 

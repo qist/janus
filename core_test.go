@@ -1571,6 +1571,41 @@ func TestAddTokensCacheIntoPrompt(t *testing.T) {
 	}
 }
 
+// 客户端重排 assistant/tool 消息（只影响尾部）时，应容忍并追加最后一条 user，
+// 而不是重开会话。改了早期 user 或尾部不是 user 时不 tolerate。
+func TestTolerateReset(t *testing.T) {
+	stored := []ChatMessage{
+		{Role: "system", Content: MessageContent{Text: "s"}},
+		{Role: "user", Content: MessageContent{Text: "u1"}},
+		{Role: "assistant", Content: MessageContent{Text: "a1"}},
+		{Role: "user", Content: MessageContent{Text: "u2"}},
+	}
+	incoming := []ChatMessage{
+		{Role: "system", Content: MessageContent{Text: "s"}},
+		{Role: "user", Content: MessageContent{Text: "u1"}},
+		{Role: "assistant", Content: MessageContent{Text: "a1-CHANGED"}}, // 被重格式化
+		{Role: "user", Content: MessageContent{Text: "u2"}},
+		{Role: "assistant", Content: MessageContent{Text: "a2"}},
+		{Role: "user", Content: MessageContent{Text: "u3"}},
+	}
+	d, ok := TolerateReset(stored, incoming)
+	if !ok || len(d) != 1 || d[0].Content.Text != "u3" {
+		t.Fatalf("ok=%v d=%+v", ok, d)
+	}
+
+	bad := []ChatMessage{
+		{Role: "system", Content: MessageContent{Text: "s"}},
+		{Role: "user", Content: MessageContent{Text: "u1-DIFFERENT"}},
+		{Role: "user", Content: MessageContent{Text: "u2"}},
+	}
+	if _, ok := TolerateReset(stored, bad); ok {
+		t.Fatal("早期 user 被改写不应 tolerate")
+	}
+	if _, ok := TolerateReset(stored, incoming[:len(incoming)-1]); ok {
+		t.Fatal("尾部不是 user 不应 tolerate（工具结果走专门路径）")
+	}
+}
+
 // ---------- 路由 ----------
 
 // stubUpstream 起一个最小的假上游，避免测试依赖真实 OpenCode（也避免连不可达

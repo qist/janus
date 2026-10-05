@@ -778,11 +778,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		mode = DiffAppend
 	}
 
-	// DiffReset：理论上分桶前缀匹配后只会出现在「空会话但 sessionID 已存在」
-	// （首次 prompt 失败过）的情况。此时上游 session 可能残留半截上下文，
-	// 必须换一个干净的，否则新话题会带着旧上下文。
+	// DiffReset：客户端历史与桥记录不一致。优先尝试「忍耐」——只要 user 轮次
+	// 仍对得上，就把它当成尾部格式差异，追加最后一条 user 继续用现有会话，
+	// 避免频繁重开会话（重开会丢上下文、让缓存冷启动、MCP 反复重注册变 404）。
+	// 只有确实像"改了早期历史/换话题"时才重开。
 	if mode == DiffReset && conv.snapshotSessionID() != "" {
-		s.resetSession(conv)
+		if d, ok := TolerateReset(stored, req.Messages); ok {
+			s.log.Infof("history mismatch tolerated, appending last user turn (key=%s)", conv.Key)
+			mode, delta = DiffAppend, d
+		} else {
+			s.resetSession(conv)
+		}
 	}
 
 	// ---- 会话就绪 ----

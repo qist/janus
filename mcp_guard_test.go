@@ -52,14 +52,14 @@ func TestMCPAllowListRejectsForeignSource(t *testing.T) {
 	s := NewServer(Config{APIKey: "x", MCPAllow: "127.0.0.1/32, ::1"}, NewLogger("error"))
 	sess := s.tools.Register("f:x", nil)
 
-	// 白名单来源 → 走到 token 校验（未知 token 404）
+	// 白名单来源 → 进入处理；未知 token 现在给"空会话"可恢复响应（200），不再 404
 	req := httptest.NewRequest(http.MethodPost, "/mcp/x", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetPathValue("token", "nope")
 	rec := httptest.NewRecorder()
 	s.handleMCP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("白名单来源应进入校验(404)，got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("白名单来源应进入处理(200)，got %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	// 非白名单来源 → 403
@@ -70,5 +70,29 @@ func TestMCPAllowListRejectsForeignSource(t *testing.T) {
 	s.handleMCP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("非白名单来源应 403，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// 未知 token 不再 404：initialize/ping/tools-list 正常、tools-call 明确报错，
+// 让上游平滑收敛而不是判成"服务挂了"。
+func TestMCPUnknownSessionRecoverable(t *testing.T) {
+	s := NewServer(Config{APIKey: "x"}, NewLogger("error"))
+	cases := []struct{ method, params, want string }{
+		{"initialize", `{"protocolVersion":"2025-06-18"}`, `"serverInfo"`},
+		{"tools/list", `{}`, `"tools":[]`},
+		{"tools/call", `{"name":"x","arguments":{}}`, `"isError":true`},
+	}
+	for _, c := range cases {
+		body := `{"jsonrpc":"2.0","id":1,"method":"` + c.method + `","params":` + c.params + `}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp/stale", strings.NewReader(body))
+		req.SetPathValue("token", "stale")
+		rec := httptest.NewRecorder()
+		s.handleMCP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: code=%d body=%s", c.method, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), c.want) {
+			t.Fatalf("%s: body=%s, want contains %s", c.method, rec.Body.String(), c.want)
+		}
 	}
 }

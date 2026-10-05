@@ -453,6 +453,39 @@ func Diff(stored, incoming []ChatMessage) (DiffMode, []ChatMessage) {
 	return DiffReset, incoming
 }
 
+// TolerateReset 在 DiffReset 时判断：能否用「追加最后一条 user」代替重开会话。
+//
+// 不同客户端会把历史里的 assistant/tool 消息重新格式化（丢掉 reasoning、
+// 重排 tool_calls 等），导致严格前缀匹配失败、被判成"改写历史"而重开会话。
+// 只要「历史里的 user 轮次」仍逐个对得上、且最后一条是 user，就认为只是
+// 尾部差异，返回该 user 消息作为增量；否则返回 false（认为是真换话题）。
+func TolerateReset(stored, incoming []ChatMessage) ([]ChatMessage, bool) {
+	if len(incoming) == 0 || incoming[len(incoming)-1].Role != "user" {
+		return nil, false
+	}
+	su, iu := userTexts(stored), userTexts(incoming)
+	if len(iu) == 0 || len(iu) < len(su) {
+		return nil, false
+	}
+	for i := range su {
+		if su[i] != iu[i] {
+			return nil, false
+		}
+	}
+	return []ChatMessage{incoming[len(incoming)-1]}, true
+}
+
+// userTexts 抽出历史里所有 user 消息的文本，用于「只按 user 轮次」对齐。
+func userTexts(msgs []ChatMessage) []string {
+	var out []string
+	for _, m := range msgs {
+		if m.Role == "user" {
+			out = append(out, m.Content.Text)
+		}
+	}
+	return out
+}
+
 // firstSystem 取首条 system 内容（用于 key 指纹）。
 func firstSystem(msgs []ChatMessage) string {
 	for _, m := range msgs {

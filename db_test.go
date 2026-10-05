@@ -173,3 +173,23 @@ func TestResponsesChainSurvivesRestart(t *testing.T) {
 		t.Fatalf("链断了: %v", r2.PreviousResponseID)
 	}
 }
+
+func TestDBSettingRoundTrip(t *testing.T) {
+	d, err := openDB(filepath.Join(t.TempDir(), "janus.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.close()
+
+	if _, ok := d.getSetting("default_model"); ok {
+		t.Fatal("expected absent")
+	}
+	d.setSetting("default_model", "opencode/claude-sonnet-5-5")
+	if v, ok := d.getSetting("default_model"); !ok || v != "opencode/claude-sonnet-5-5" {
+		t.Fatalf("got %q ok=%v", v, ok)
+	}
+	d.setSetting("default_model", "opencode-go/deepseek-v4-pro") // 覆盖
+	if v, _ := d.getSetting("default_model"); v != "opencode-go/deepseek-v4-pro" {
+		t.Fatalf("got %q", v)
+	}
+}

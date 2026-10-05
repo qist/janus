@@ -52,6 +52,29 @@ type Server struct {
 
 	// db 为 nil 时纯内存；非 nil 时响应与会话映射落 SQLite。
 	db *dbStore
+
+	// defaultModel 是运行时可切换的默认模型（web 里选），持久化在 DB。
+	// 非空时优先于 cfg.DefaultModel；空则回落 cfg.DefaultModel / 上游默认。
+	defaultMu    sync.RWMutex
+	defaultModel string
+}
+
+// runtimeDefaultModel 返回 web 里选定的默认模型（可能为空）。
+func (s *Server) runtimeDefaultModel() string {
+	s.defaultMu.RLock()
+	defer s.defaultMu.RUnlock()
+	return s.defaultModel
+}
+
+// setRuntimeDefaultModel 设置并持久化默认模型（空=清除，回落配置）。
+func (s *Server) setRuntimeDefaultModel(v string) {
+	v = strings.TrimSpace(v)
+	s.defaultMu.Lock()
+	s.defaultModel = v
+	s.defaultMu.Unlock()
+	if s.db != nil {
+		s.db.setSetting("default_model", v)
+	}
 }
 
 func NewServer(cfg Config, log *Logger) *Server {
@@ -87,6 +110,9 @@ func NewServer(cfg Config, log *Logger) *Server {
 			srv.db = opened
 			srv.store.attachDB(opened)
 			srv.responses.attachDB(opened)
+			if v, ok := opened.getSetting("default_model"); ok {
+				srv.defaultModel = v
+			}
 			log.Infof("persistence enabled: %s", cfg.DBPath)
 		}
 	}
@@ -289,6 +315,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 	mux.HandleFunc("GET /v1/usage", s.handleUsage)
 	mux.HandleFunc("GET /v1/requests", s.handleRequests)
+	mux.HandleFunc("GET /v1/settings", s.handleGetSettings)
+	mux.HandleFunc("POST /v1/settings", s.handleSetSettings)
 	mux.HandleFunc("POST /v1/responses", s.handleCreateResponse)
 	mux.HandleFunc("GET /v1/responses/{id}", s.handleGetResponse)
 	mux.HandleFunc("DELETE /v1/responses/{id}", s.handleDeleteResponse)
@@ -588,6 +616,55 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 		"requests":   logs,
 		"fetched_at": time.Now().UTC(),
 	})
+}
+
+// handleGetSettings 返回运行时可改的设置（目前只有 default_model）。
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	if err := s.checkAuth(r); err != nil {
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"default_model":            s.runtimeDefaultModel(),
+		"configured_default_model": s.cfg.DefaultModel, // env 兜底，只读
+	})
+}
+
+// handleSetSettings 设置运行时默认模型：body {"default_model":"provider/id[:variant]"}。
+// 空字符串表示清除（回落到 BRIDGE_DEFAULT_MODEL / 上游默认）。
+func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
+	if err := s.checkAuth(r); err != nil {
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
+		return
+	}
+	body, err := readBody(r, s.cfg.MaxBodyBytes)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error(), "")
+		return
+	}
+	var in struct {
+		DefaultModel *string `json:"default_model"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil || in.DefaultModel == nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
+			`body must be {"default_model": "<provider/id[:variant]>"}`, "invalid_request")
+		return
+	}
+	v := strings.TrimSpace(*in.DefaultModel)
+	if v != "" {
+		list, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadGateway, "api_error", "cannot list models: "+err.Error(), "")
+			return
+		}
+		if _, err := ResolveModel(v, list); err != nil {
+			writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
+			return
+		}
+	}
+	s.setRuntimeDefaultModel(v)
+	s.log.Infof("runtime default model set to %q", v)
+	writeJSON(w, http.StatusOK, map[string]any{"default_model": v})
 }
 
 func (s *Server) handleUnknownV1(w http.ResponseWriter, r *http.Request) {

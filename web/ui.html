@@ -361,7 +361,7 @@ var KEY='bridge.usage.key', AUTOKEY='bridge.usage.auto';
 var state={report:null,metrics:null,requests:null,key:localStorage.getItem(KEY)||'',timer:null,
   metric:'cost_usd',days:30,sortKey:'cost_usd',sortDir:-1,
   reqQuery:'',reqSortKey:'time',reqSortDir:-1,reqGroup:'list',
-  catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1};
+  catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1,defModel:''};
 
 function $(s){return document.querySelector(s);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
@@ -442,6 +442,19 @@ function api(path){
         var err=new Error(msg); err.status=res.status; throw err;
       }
       return body;
+    });
+  });
+}
+function apiJSON(method,path,body){
+  return fetch(path,{method:method,headers:headers({'Content-Type':'application/json'}),
+    body:body?JSON.stringify(body):undefined}).then(function(res){
+    return res.text().then(function(text){
+      var b=null; try{ b=JSON.parse(text); }catch(e){}
+      if(!res.ok){
+        var msg=(b&&b.error&&b.error.message)||text||('HTTP '+res.status);
+        var err=new Error(msg); err.status=res.status; throw err;
+      }
+      return b;
     });
   });
 }
@@ -669,6 +682,7 @@ function catalogRows(){
       modalities:m.input_modalities||[],
       efforts:m.supported_reasoning_efforts||[],
       isDefault:id==='default',
+      isCurDefault:!!state.defModel&&id===state.defModel,
       used:!!(used[id]||used[prov+'/'+id])});
   }
   var k=state.catSortKey,d=state.catSortDir;
@@ -771,6 +785,12 @@ function loadRequests(){
     if(!state.requests) el('reqEmpty').style.display='block';
   });
 }
+function loadSettings(){
+  return api('/v1/settings').then(function(o){
+    state.defModel=(o&&o.default_model)||'';
+    renderCatalog();
+  }).catch(function(){ /* 设置不可用不影响模型目录 */ });
+}
 function renderCatalog(){
   var list=state.catalog||[],provs={},i;
   for(i=0;i<list.length;i++){ var p=(list[i]||{}).owned_by; if(p) provs[p]=true; }
@@ -785,12 +805,14 @@ function renderCatalog(){
   el('catalogTag').textContent=total?(rows.length+(rows.length!==total?(' / '+total):'')+' 个模型'):'';
   el('catalogEmpty').style.display=rows.length?'none':'block';
   el('catalogBody').innerHTML=rows.map(function(r){
-    var tags=(r.isDefault?'<span class="pill def">默认</span>':'')+(r.free?'<span class="pill free">免费</span>':'')+(r.used?'<span class="pill used">已用</span>':'');
+    var tags=(r.isDefault?'<span class="pill def">默认别名</span>':'')+(r.isCurDefault?'<span class="pill def">当前默认</span>':'')+(r.free?'<span class="pill free">免费</span>':'')+(r.used?'<span class="pill used">已用</span>':'');
+    var defBtn=(r.id==='default'||r.id==='auto')?'':'<button class="copybtn setdefbtn" data-setdef="'+esc(r.id)+'" title="设为默认：客户端填 default / 留空 时映射到它">设为默认</button>';
     var mods=r.modalities.length?r.modalities.join(' / '):'–';
     var effs=r.efforts.length?r.efforts.join(' / '):'–';
     return '<tr>'+
       '<td><div class="mname">'+esc(r.id)+tags+
         '<button class="copybtn" data-copy="'+esc(r.id)+'" title="复制模型名（粘到 CC 的 ANTHROPIC_MODEL 或客户端 model 字段）">⧉ 复制</button>'+
+        defBtn+
         '</div></td>'+
       '<td>'+esc(r.provider||'–')+'</td>'+
       '<td class="num"'+(r.context?(' title="'+r.context+' tokens"'):'')+'>'+(r.context?fmtCompact(r.context):'–')+'</td>'+
@@ -870,6 +892,8 @@ function load(){
   setLoading(true);
   // 最近请求（缓存命中率）：与用量解耦，失败不影响其它区块
   var reqP=loadRequests();
+  // 运行时设置（默认模型）
+  var setP=loadSettings();
   // 模型目录独立加载：即使用量接口不可用（凭据过期 / console 故障），
   // 也照常展示 /v1/models 支持的模型。
   var catalogP=api('/v1/models').then(function(obj){
@@ -900,7 +924,7 @@ function load(){
     }else{
       showBanner('err','<b>请求失败：</b>'+esc(err.message));
     }
-  }).then(function(){ return catalogP; }).then(function(){ return reqP; }).then(function(){ setLoading(false); });
+  }).then(function(){ return catalogP; }).then(function(){ return reqP; }).then(function(){ return setP; }).then(function(){ setLoading(false); });
 }
 
 /* ---------- 自动刷新 ---------- */
@@ -949,8 +973,16 @@ function bind(){
   el('catalogFree').addEventListener('change',function(){ state.catFree=el('catalogFree').value; renderCatalog(); });
   el('catalogBody').addEventListener('click',function(e){
     var n=e.target;
-    while(n&&n!==this&&!(n.getAttribute&&n.getAttribute('data-copy'))) n=n.parentNode;
+    while(n&&n!==this&&!(n.getAttribute&&(n.getAttribute('data-copy')||n.getAttribute('data-setdef')))) n=n.parentNode;
     if(!n||n===this) return;
+    if(n.getAttribute('data-setdef')){
+      var mid=n.getAttribute('data-setdef');
+      apiJSON('POST','/v1/settings',{default_model:mid}).then(function(){
+        state.defModel=mid; renderCatalog();
+        toast('已设为默认：'+mid+'（客户端填 default 或留空即用它）');
+      }).catch(function(err){ toast('设置失败：'+((err&&err.message)||err)); });
+      return;
+    }
     var v=n.getAttribute('data-copy');
     copyText(v).then(function(ok){ toast(ok?('已复制模型名：'+v):'复制失败，请手动选择'); });
   });

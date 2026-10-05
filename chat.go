@@ -980,9 +980,17 @@ func stripContextSuffix(raw string) string {
 }
 
 // resolveDefaultModel 使用桥配置的默认模型覆盖；未配置时才跟随上游默认。
+// 优先级：web 运行时选定的默认模型 > BRIDGE_DEFAULT_MODEL > 上游默认。
 // 订阅 opencode-go 套餐的用户可以把 default 固定到 go provider，避免误用
 // opencode/fledge-alpha-free 这条默认线路。
 func (s *Server) resolveDefaultModel(ctx context.Context, list []OCModel) (OCModelRef, error) {
+	if runtime := strings.TrimSpace(s.runtimeDefaultModel()); runtime != "" {
+		if ref, err := ResolveModel(runtime, list); err == nil {
+			return ref, nil
+		} else {
+			s.log.Warnf("runtime default model %q unresolvable, falling back: %v", runtime, err)
+		}
+	}
 	if configured := strings.TrimSpace(s.cfg.DefaultModel); configured != "" {
 		ref, err := ResolveModel(configured, list)
 		if err != nil {

@@ -41,6 +41,14 @@ type dbConversation struct {
 	UpdatedAt int64 `gorm:"index"`
 }
 
+// dbSetting 是运行时可改的键值设置（如 default_model），
+// 让 web 里选的默认模型不写 env 也能持久化、立即生效。
+type dbSetting struct {
+	Key       string `gorm:"primaryKey;size:80"`
+	Value     string `gorm:"size:512"`
+	UpdatedAt int64
+}
+
 // dbMemoryDSN 表示"不用文件、纯内存"。
 func dbMemoryDSN(path string) bool {
 	switch strings.ToLower(strings.TrimSpace(path)) {
@@ -67,7 +75,7 @@ func openDB(path string) (*dbStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := gdb.AutoMigrate(&dbResponse{}, &dbConversation{}); err != nil {
+	if err := gdb.AutoMigrate(&dbResponse{}, &dbConversation{}, &dbSetting{}); err != nil {
 		return nil, err
 	}
 	return &dbStore{db: gdb}, nil
@@ -164,6 +172,26 @@ func (d *dbStore) gcConvs(before int64) {
 		return
 	}
 	d.db.Delete(&dbConversation{}, "updated_at > 0 AND updated_at < ?", before)
+}
+
+// ---------- settings ----------
+
+func (d *dbStore) getSetting(key string) (string, bool) {
+	if d == nil {
+		return "", false
+	}
+	var row dbSetting
+	if err := d.db.First(&row, "key = ?", key).Error; err != nil {
+		return "", false
+	}
+	return row.Value, true
+}
+
+func (d *dbStore) setSetting(key, value string) {
+	if d == nil {
+		return
+	}
+	d.db.Save(&dbSetting{Key: key, Value: value, UpdatedAt: time.Now().Unix()})
 }
 
 // defaultDBPath 按 XDG 规则给出默认库路径。

@@ -213,6 +213,12 @@ type UsageClient struct {
 	mu       sync.Mutex
 	cached   *UsageReport
 	cachedAt time.Time
+
+	// request-logs 短缓存：UI 自动刷新/重复调用时避免每次都打 console（可能被限速）。
+	reqMu       sync.Mutex
+	reqItems    []RequestLog
+	reqLimit    int
+	reqCachedAt time.Time
 }
 
 func NewUsageClient(cfg Config, log *Logger) *UsageClient {
@@ -519,17 +525,31 @@ type requestLogRaw struct {
 	} `json:"finish"`
 }
 
+// requestLogsTTL 是 /v1/requests 的短缓存时长：避免 UI 自动刷新或重复调用
+// 每次都打 console（该接口可能被上游限速）。窗口参数变化很快也不影响，
+// 因为只按 limit 命中，最多返回 TTL 内的旧数据。
+const requestLogsTTL = 5 * time.Second
+
 // RequestLogs 拉取最近的上游请求日志。sinceMs<=0 时默认看最近 6 小时；limit 上限 100。
 func (c *UsageClient) RequestLogs(ctx context.Context, sinceMs int64, limit int) ([]RequestLog, error) {
-	cred, err := readCredential(c.dbPath)
-	if err != nil {
-		return nil, err
-	}
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 100 {
 		limit = 100
+	}
+	// 短缓存命中：直接复用，不打上游。
+	c.reqMu.Lock()
+	if c.reqItems != nil && c.reqLimit == limit && time.Since(c.reqCachedAt) < requestLogsTTL {
+		items := c.reqItems
+		c.reqMu.Unlock()
+		return items, nil
+	}
+	c.reqMu.Unlock()
+
+	cred, err := readCredential(c.dbPath)
+	if err != nil {
+		return nil, err
 	}
 	if sinceMs <= 0 {
 		sinceMs = time.Now().Add(-6 * time.Hour).UnixMilli()
@@ -547,6 +567,10 @@ func (c *UsageClient) RequestLogs(ctx context.Context, sinceMs int64, limit int)
 	for _, it := range wrap.Items {
 		out = append(out, it.toRequestLog())
 	}
+
+	c.reqMu.Lock()
+	c.reqItems, c.reqLimit, c.reqCachedAt = out, limit, time.Now()
+	c.reqMu.Unlock()
 	return out, nil
 }
 

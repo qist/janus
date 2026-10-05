@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -573,7 +574,12 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 
 	logs, err := s.usage.RequestLogs(ctx, since, limit)
 	if err != nil {
-		s.log.Warnf("request logs failed: %v", err)
+		if errors.Is(err, context.Canceled) {
+			// 客户端主动断开导致的取消是正常现象，降为 Debug 免刷屏。
+			s.log.Debugf("request logs canceled by client")
+		} else {
+			s.log.Warnf("request logs failed: %v", err)
+		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
 			"cannot read request logs: "+err.Error(), "requests_unavailable")
 		return

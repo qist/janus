@@ -314,6 +314,10 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 **已实现（见 DESIGN.md）**：OpenAI/Anthropic/Responses 三套协议、会话分桶与历史重放、工具桥（MCP）、权限自动应答、上游自动发现与托管、`/v1/usage`、`/v1/requests` + `/ui`、持久化、工具结果注释、终止后重开会话。
 
+**已实现（本路线的早期落点）**：
+- **harness 配置自动注入**：janus 通过 `OPENCODE_CONFIG_CONTENT` 注入自动生成的 `orchestrator` 白名单（§3.3），无需手写 `~/.config/opencode/opencode.jsonc`；
+- **janus 自管上游**：`OPENCODE_REUSE_EXTERNAL=false` 时 janus 总是自己拉起 OpenCode（注入的前提）。
+
 **本路线新增**：模型访问层、Role/虚拟模型、权限策略、异步 Job、ACP、平台层（DB/OIDC/多用户）、派单。
 
 ---

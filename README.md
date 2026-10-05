@@ -259,7 +259,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `plan` | 只读/规划，先规划再动手 |
 | `general` | 通用 agent（OpenCode 内置，偏子任务） |
 | `explore` | 搜索/阅读代码，不改文件 |
-| 自定义 id | 在 OpenCode 配置（`~/.config/opencode/opencode.jsonc` 的 `agents`）里自定义的 agent。例如 `orchestrator`：禁用内置工具、只用客户端声明的 tools，实现"桥只部署一处、工具在客户端执行"（见 `docs/DESIGN.md` §5.7.2） |
+| 自定义 id | 在 OpenCode 配置（`~/.config/opencode/opencode.jsonc` 的 `agents`）里自定义的 agent。janus 的 `orchestrator` 属于此类，但**由 janus 自动生成并注入**（见「工具执行模式」方式 B），**无需手写** |
 
 > 填一个不存在的 id，上游通常不报错，但行为不保证；请用实际存在的 agent。
 
@@ -286,11 +286,11 @@ BRIDGE_DIRECTORY=/path/to/project   # 必需：原生工具在此目录下执行
 禁用 OpenCode 自带工具，agent 只调用**客户端在请求里声明的 `tools`**；janus 用内置 MCP server 把它们暴露给 agent，工具实际在**客户端**执行。
 
 ```ini
-BRIDGE_AGENT=orchestrator    # 自定义 agent：deny 掉内置的 read/write/shell…（见下）
+BRIDGE_AGENT=orchestrator    # janus 自动生成的 agent：禁用全部内置工具（见下）
 BRIDGE_TOOL_CALLING=true     # 打开工具桥（默认值）
 ```
 
-`orchestrator` 需在 OpenCode 配置 `~/.config/opencode/opencode.jsonc` 里自定义：
+`orchestrator` **由 janus 自动生成并注入**（通过 `OPENCODE_CONFIG_CONTENT`，优先级高于全局/项目配置），**不需要手写** `~/.config/opencode/opencode.jsonc`。生成的是**白名单**：
 
 ```jsonc
 {
@@ -298,22 +298,18 @@ BRIDGE_TOOL_CALLING=true     # 打开工具桥（默认值）
     "orchestrator": {
       "mode": "primary",
       "permissions": [
-        { "action": "shell", "resource": "*", "effect": "deny" },
-        { "action": "edit",  "resource": "*", "effect": "deny" },
-        { "action": "read",  "resource": "*", "effect": "deny" },
-        { "action": "glob",  "resource": "*", "effect": "deny" },
-        { "action": "grep",  "resource": "*", "effect": "deny" },
-        { "action": "webfetch", "resource": "*", "effect": "deny" },
-        { "action": "websearch", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "question", "resource": "*", "effect": "deny" },
-        { "action": "browser", "resource": "*", "effect": "deny" },
-        { "action": "external_directory", "resource": "*", "effect": "deny" }
+        { "action": "*",       "resource": "*", "effect": "deny"  },  // 禁掉所有内置工具
+        { "action": "execute", "resource": "*", "effect": "allow" },  // Code Mode 必需，否则 MCP 工具全看不到
+        { "action": "ob-*",    "resource": "*", "effect": "allow" }   // 只放行 janus 工具桥注册的客户端工具
       ]
     }
   }
 }
 ```
+
+> 为什么用白名单而不是逐个 deny：黑名单会随 OpenCode 版本改工具名而失效（实测 v2 就漏过 `execute`/`search` 之类）。
+>
+> **前提**：注入只对 **janus 自己拉起的** OpenCode 生效。若本机另有 OpenCode 在跑，janus 默认会复用它、注入不生效 —— 设 `OPENCODE_REUSE_EXTERNAL=false` 让 janus 总是自管上游即可（见配置表）。
 
 - 适用：janus 集中部署，而文件/命令要在**客户端那台机器**上执行（opencode-openai-bridge 的远程模式）。
 - 代价：依赖客户端工具桥，可能出现 MCP 404 / 客户端不回填 / 等待超时等；相关参数见「工具调用」一节。
@@ -323,7 +319,7 @@ BRIDGE_TOOL_CALLING=true     # 打开工具桥（默认值）
 agent 不做任何读写/命令，只用模型知识回答：
 
 ```ini
-BRIDGE_AGENT=orchestrator    # 用那个 deny 掉所有内置工具的 agent
+BRIDGE_AGENT=orchestrator    # janus 自动生成的 orchestrator（无内置工具）
 BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没工具
 ```
 
@@ -821,7 +817,7 @@ Janus 背后是一个**能执行 shell、读写文件**的 agent（默认以启�
 - 桥自身**不做 TLS**，公网/不可信网络务必套反向代理（Caddy/nginx）加 HTTPS。
 - **内置 MCP 端点** `/mcp/{token}` 用 128 位随机 token 鉴权，且随会话（一轮结束即注销）短命；仍可用 `BRIDGE_MCP_ALLOW` 按来源 IP/CIDR 再收一层。防串会话：空闲会话的工具调用会被立即拒绝。
 - **权限自动应答** `BRIDGE_PERMISSION_REPLY`：`once`（默认）只放行单次，`always` 会写入 OpenCode 的持久权限，`reject` 更保守。
-- 想要"agent 不碰本机、工具在客户端执行"，用 `orchestrator` agent（见 `docs/DESIGN.md` §5.7.2）。
+- 想要"agent 不碰本机、工具在客户端执行"，用 `orchestrator` agent（由 janus 自动生成并注入，见「工具执行模式」方式 B）。
 
 ## 已知限制
 

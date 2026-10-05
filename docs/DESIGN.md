@@ -548,39 +548,38 @@ desktop 端等其他会话一律不碰。
 默认 agent 是 `build`，它会用 OpenCode 的**内置工具**（`shell`/`read`/`edit`…），
 这些在**桥所在的机器**上执行 —— 于是"代码在哪台机器，agent 就得部署在哪台机器"。
 
-要改成**桥只部署一处、工具在客户端执行**，给 OpenCode 加一个只允许客户端 MCP 工具、
-禁用内置工具的 agent，并让桥用它（`BRIDGE_AGENT=orchestrator`）：
+要改成**桥只部署一处、工具在客户端执行**，桥需要一个"只允许客户端 MCP 工具、
+禁用内置工具"的 agent，并让桥用它（`BRIDGE_AGENT=orchestrator`）。
+
+**该 agent 由 janus 自动生成并注入**（`opencode_config.go` → `OPENCODE_CONFIG_CONTENT`，
+优先级高于全局/项目配置），**不需要手写** `~/.config/opencode/opencode.jsonc`：
 
 ```jsonc
-// ~/.config/opencode/opencode.jsonc
 {
   "agents": {
     "orchestrator": {
       "mode": "primary",
       "permissions": [
-        { "action": "shell",    "resource": "*", "effect": "deny" },
-        { "action": "edit",     "resource": "*", "effect": "deny" },
-        { "action": "read",     "resource": "*", "effect": "deny" },
-        { "action": "glob",     "resource": "*", "effect": "deny" },
-        { "action": "grep",     "resource": "*", "effect": "deny" },
-        { "action": "webfetch", "resource": "*", "effect": "deny" },
-        { "action": "websearch","resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "question", "resource": "*", "effect": "deny" },
-        { "action": "browser",  "resource": "*", "effect": "deny" },
-        { "action": "external_directory", "resource": "*", "effect": "deny" }
+        { "action": "*",       "resource": "*", "effect": "deny"  },  // 禁掉所有内置工具
+        { "action": "execute", "resource": "*", "effect": "allow" },  // Code Mode 必需
+        { "action": "ob-*",    "resource": "*", "effect": "allow" }   // 只放行工具桥的客户端工具
       ]
     }
   }
 }
 ```
 
-**关键**：不要 deny `execute`。V2 里 MCP（客户端声明的）工具挂在 Code Mode 的
-`execute` 目录下，deny 掉 `execute` 会让模型一个 MCP 工具都看不到。内置工具各
-自的 deny 仍然生效（Code Mode 里"每个嵌套工具仍走自己的权限"）。
+**为什么是白名单而不是逐个 deny**：黑名单会随 OpenCode 版本改工具名而失效 —— 实测
+v2 就漏过 `execute`/`search` 之类的新动作，导致 orchestrator 仍能跑主机工具。
+`execute` 必须放行（V2 里客户端 MCP 工具挂在 Code Mode 的 `execute` 下，deny 掉它
+模型一个 MCP 工具都看不到）；`ob-*` 是 janus 工具桥注册的 MCP server 名前缀
+（`mcpNamePrefix`）。内置工具被 `*` deny 覆盖。
+
+**前提**：注入只对 **janus 自己拉起的** OpenCode 生效。若本机另有 OpenCode 在跑，
+默认会复用它、注入不生效 —— 设 `OPENCODE_REUSE_EXTERNAL=false` 让 janus 总是自管上游。
 
 代价：完全依赖客户端声明的工具集，且每次工具调用多一轮 MCP 往返。
-`question` 必须 deny —— 桥只自动应答权限，没人应答交互式提问，会挂住。
+`question` 被 `*` deny 覆盖 —— 桥只自动应答权限，没人应答交互式提问，会挂住。
 
 ### 5.7.3 图片附件
 
@@ -813,6 +812,27 @@ Store + executor + ToolBridge**，`anthropic.go` / `anthropic_stream.go` 只做�
 - `POST /v1/messages/count_tokens` 提供粗略 token 估算（Claude Code 会调用）
 - 开关 `BRIDGE_ANTHROPIC_ENABLED`（默认 true）
 
+### 5.16 最近请求与面板（`GET /v1/requests`、`/ui`）
+
+`GET /v1/requests?since=<ms>&limit=<n>`（bridge API key 鉴权）从官方 console 的
+`/request-logs` 拉逐条推理记录，换算成便于展示/对账的结构（`input_tokens` 不含命中；
+`prompt = input + cache_read`；命中率 = `cache_read / prompt`）。`/ui` 有一页
+「最近请求」，默认 30s 自动刷新。
+
+- **短缓存**：同一 `limit` 在 **5s** 内复用上次结果，避免 UI 自动刷新/重复调用每次
+  都打上游（该接口可能被限速）。窗口参数变化很快也命中（只按 `limit` 缓存）。
+- **取消不算错**：调用方（浏览器）断开导致的 `context.Canceled` 降为 Debug，不再刷
+  WARN；真超时是 `context deadline exceeded`（handler 超时 20s）。
+- 开关 `BRIDGE_USAGE_ENABLED`。
+
+### 5.17 会话重置时清理 MCP 注册
+
+`resetSession`（历史不匹配等触发）除了丢弃上游 session，还会**立即 `RemoveMCP`** 旧的
+工具桥 server。原因：OpenCode 会把**同一 location 下注册的所有 MCP server 暴露给每个
+session**，残留的旧 server 会被 agent 调用并得到
+`bridge: this tool server is stale (session was reset); no tools available`。
+以前只靠 janitor 周期兜底，中间有空窗；现在重置即删，janitor 仍兜底。
+
 ## 6. 配置
 
 配置来源优先级：**真实环境变量 > 配置文件 > 内置默认值**。
@@ -837,6 +857,9 @@ $EDITOR janus.env
 | `BRIDGE_CONFIG` | 空 | 配置文件路径 |
 | `BRIDGE_ADDR` | `0.0.0.0:2810` | 监听地址 |
 | `OPENCODE_URL` | `auto` | 上游地址；`auto` = 自动发现（§5.3.1） |
+| `OPENCODE_AUTOSTART` | `true` | `auto` 且没找到在跑的 OpenCode 时，由本桥拉起一个 |
+| `OPENCODE_REUSE_EXTERNAL` | `true` | 是否复用已在跑的外部 OpenCode；`false`=总是自己拉起（才能注入生成的 agent 配置，§5.7.2） |
+| `OPENCODE_BIN` | 空 | 显式指定 `opencode` 可执行文件 |
 | `OPENCODE_USERNAME` | `opencode` | Basic 用户名（固定） |
 | `OPENCODE_PASSWORD` | —（auto 模式下自动获取） | 即 `OPENCODE_SERVER_PASSWORD` |
 | `BRIDGE_API_KEY` | 空 | 对客户端的鉴权；空=接受任意 Bearer（WARN） |

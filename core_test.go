@@ -1564,6 +1564,11 @@ func TestAddTokensCacheIntoPrompt(t *testing.T) {
 	if e.usage.CompletionTokens != 2 {
 		t.Fatalf("CompletionTokens = %d, want 2", e.usage.CompletionTokens)
 	}
+	// DeepSeek 风格明细：hit + miss = prompt_tokens
+	snap := e.snapshot().usage
+	if snap.PromptCacheHitTokens != 90 || snap.PromptCacheMissTokens != 10 {
+		t.Fatalf("cache hit/miss = %d/%d, want 90/10", snap.PromptCacheHitTokens, snap.PromptCacheMissTokens)
+	}
 }
 
 // ---------- 路由 ----------

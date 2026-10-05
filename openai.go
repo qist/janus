@@ -189,6 +189,11 @@ type Usage struct {
 	TotalTokens             int                `json:"total_tokens"`
 	PromptTokensDetails     *TokenDetails      `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionDetails `json:"completion_tokens_details,omitempty"`
+
+	// DeepSeek 风格的缓存明细（不少国产客户端/网关用它统计缓存命中率）。
+	// 语义：prompt_tokens = hit + miss。
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
 }
 
 type TokenDetails struct {

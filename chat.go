@@ -236,6 +236,11 @@ func (e *executor) snapshot() runResult {
 	defer e.mu.Unlock()
 	u := e.usage
 	u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	// DeepSeek 风格缓存明细：hit=命中、miss=未命中，二者之和=prompt_tokens。
+	if u.PromptTokensDetails != nil {
+		u.PromptCacheHitTokens = u.PromptTokensDetails.CachedTokens
+		u.PromptCacheMissTokens = u.PromptTokens - u.PromptTokensDetails.CachedTokens
+	}
 	fin := e.finish
 	if fin == "" {
 		fin = "stop"

@@ -74,8 +74,8 @@ func randomPassword() string {
 //
 // 进程用 Setsid 独立会话启动，stdout/stderr 丢弃；但 systemd 下它仍在
 // janus.service 的 cgroup 内，服务重启时会一起被回收（随后本桥会再拉起）。
-func SpawnOpenCode(ctx context.Context, log *Logger, bin string) (*Endpoint, error) {
-	path, err := findOpenCodeBinary(bin)
+func SpawnOpenCode(ctx context.Context, log *Logger, cfg *Config) (*Endpoint, error) {
+	path, err := findOpenCodeBinary(cfg.OpencodeBin)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,13 @@ func SpawnOpenCode(ctx context.Context, log *Logger, bin string) (*Endpoint, err
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	cmd := exec.Command(path, "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port))
-	cmd.Env = append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+pass)
+	env := append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+pass)
+	// 自动注入 janus 需要的 agent 定义（内联配置，优先级高于全局/项目配置），
+	// 不再依赖手写 ~/.config/opencode/opencode.jsonc。
+	if content := opencodeInlineConfig(cfg); content != "" {
+		env = append(env, "OPENCODE_CONFIG_CONTENT="+content)
+	}
+	cmd.Env = env
 	cmd.Stdout = nil // /dev/null
 	cmd.Stderr = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -121,7 +127,7 @@ func SpawnOpenCode(ctx context.Context, log *Logger, bin string) (*Endpoint, err
 }
 
 // EnsureUpstream 返回可用上游：优先复用已在跑的 opencode；没有且允许时自己拉一个。
-func EnsureUpstream(ctx context.Context, log *Logger, bin string, allowSpawn bool) (*Endpoint, error) {
+func EnsureUpstream(ctx context.Context, log *Logger, cfg *Config, allowSpawn bool) (*Endpoint, error) {
 	ep, derr := Discover(ctx, probeEndpoint)
 	if derr == nil {
 		return ep, nil
@@ -130,5 +136,5 @@ func EnsureUpstream(ctx context.Context, log *Logger, bin string, allowSpawn boo
 		return nil, derr
 	}
 	log.Infof("no running OpenCode found (%v); starting one…", derr)
-	return SpawnOpenCode(ctx, log, bin)
+	return SpawnOpenCode(ctx, log, cfg)
 }

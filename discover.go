@@ -205,7 +205,7 @@ func (s *Server) WatchUpstream(ctx context.Context, allowDiscover bool) {
 		}
 
 		dctx, dcancel := context.WithTimeout(ctx, 25*time.Second)
-		ep, derr := EnsureUpstream(dctx, s.log, s.cfg.OpencodeBin, s.cfg.AutostartUpstream)
+		ep, derr := EnsureUpstream(dctx, s.log, &s.cfg, s.cfg.AutostartUpstream)
 		dcancel()
 
 		if derr != nil {

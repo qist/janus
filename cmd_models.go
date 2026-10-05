@@ -39,7 +39,7 @@ func runModels(args []string) {
 	if cfg.UpstreamAuto {
 		// 与主程序一致：先发现已在跑的 OpenCode，没有就按配置自动拉起
 		dctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-		ep, derr := EnsureUpstream(dctx, log, cfg.OpencodeBin, cfg.AutostartUpstream)
+		ep, derr := EnsureUpstream(dctx, log, &cfg, cfg.AutostartUpstream)
 		cancel()
 		if derr != nil {
 			fmt.Fprintln(os.Stderr, "upstream auto-discovery/autostart failed: "+derr.Error())

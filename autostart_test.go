@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestFindOpenCodeBinaryOverride(t *testing.T) {
 	got, err := findOpenCodeBinary("/custom/opencode")
@@ -29,6 +33,23 @@ func TestRandomPasswordUnique(t *testing.T) {
 	}
 	if a == b {
 		t.Fatal("expected different passwords")
+	}
+}
+
+// 自动生成的 OpenCode 内联配置：必须是合法 JSON，且含 orchestrator 白名单。
+func TestOpenCodeInlineConfig(t *testing.T) {
+	s := opencodeInlineConfig(&Config{ToolCalling: true})
+	if s == "" {
+		t.Fatal("empty config")
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, s)
+	}
+	for _, want := range []string{`"orchestrator"`, `"effect":"deny"`, `"execute"`, `"ob-*"`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %s in %s", want, s)
+		}
 	}
 }
 

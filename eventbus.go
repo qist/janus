@@ -54,6 +54,18 @@ type evtToolInput struct {
 	Text               string `json:"text"`
 }
 
+// evtToolResult 是 session.tool.success / session.tool.failed 的载荷。
+// content 是工具输出（文件内容、命令输出、子代理结论等）。
+type evtToolResult struct {
+	SessionID string `json:"sessionID"`
+	ID        string `json:"id"`
+	Content   []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	Error string `json:"error"`
+}
+
 type evtUsage struct {
 	SessionID string    `json:"sessionID"`
 	Cost      float64   `json:"cost"`

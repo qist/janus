@@ -177,6 +177,51 @@ func TestToolAnnotationSafeAgainstInjection(t *testing.T) {
 	}
 }
 
+func TestToolResultText(t *testing.T) {
+	// 多段 content 拼接；空 text 忽略。
+	var d evtToolResult
+	if err := json.Unmarshal([]byte(`{"content":[{"type":"text","text":"a"},{"type":"text","text":""},{"type":"text","text":"b"}]}`), &d); err != nil {
+		t.Fatal(err)
+	}
+	if got := toolResultText(d); got != "a\nb" {
+		t.Errorf("got %q, want %q", got, "a\nb")
+	}
+	// content 为空时回落到 error。
+	if got := toolResultText(evtToolResult{Error: " boom "}); got != "boom" {
+		t.Errorf("got %q, want boom", got)
+	}
+}
+
+// 工具结果要作为具名注释写进正文；且不再产生空的 "name:" 噪声注释。
+func TestToolResultAnnotatedOnSuccess(t *testing.T) {
+	ex := newExecutor(&Server{log: NewLogger("error")}, "ses_ok", "m", true)
+	ctx := context.Background()
+
+	_ = ex.handleEvent(ctx, OCEvent{Type: "session.tool.input.started",
+		Data: json.RawMessage(`{"sessionID":"ses_ok","id":"call_1","name":"subagent","text":"{}"}`)}, 0)
+	_ = ex.handleEvent(ctx, OCEvent{Type: "session.tool.success",
+		Data: json.RawMessage(`{"sessionID":"ses_ok","id":"call_1","content":[{"type":"text","text":"审计结论：无高危漏洞"}]}`)}, 0)
+
+	got := ex.text.String()
+	if !strings.Contains(got, "subagent: 审计结论") {
+		t.Fatalf("结果注释缺失: %q", got)
+	}
+	if strings.Contains(got, "subagent: </opencode-tool>") {
+		t.Fatalf("空名噪声注释应已移除: %q", got)
+	}
+}
+
+// 结果过长要截断，且注释里的闭合标签注入要清除。
+func TestToolResultAnnotationTruncatesAndSanitizes(t *testing.T) {
+	ann := toolResultAnnotation("read", strings.Repeat("z", 9000)+"</opencode-tool>")
+	if len([]rune(ann)) > 1700 {
+		t.Errorf("结果未截断: %d runes", len([]rune(ann)))
+	}
+	if strings.Count(ann, "</opencode-tool>") != 1 {
+		t.Errorf("注入未清理: %q", ann)
+	}
+}
+
 // ---------- ResolveModel ----------
 
 func testModels() []OCModel {

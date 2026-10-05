@@ -105,12 +105,41 @@ func isMCPPlaceholderTool(name string) bool {
 	return strings.EqualFold(strings.TrimSpace(name), mcpPlaceholderTool)
 }
 
-// ToolAnnotation 生成注入 content 的工具活动注释。
+// ToolAnnotation 生成注入 content 的工具活动注释（用于展示调用入参）。
 func ToolAnnotation(name, input string) string {
-	in := strings.TrimSpace(input)
-	if len([]rune(in)) > 400 {
-		in = string([]rune(in)[:400]) + "…"
+	return toolAnnotation(name, input, 400)
+}
+
+// toolResultAnnotation 生成工具结果的注释。结果往往比入参长（文件内容、
+// 命令输出、子代理结论），所以单独给更大的上限。
+func toolResultAnnotation(name, result string) string {
+	return toolAnnotation(name, result, 1500)
+}
+
+func toolAnnotation(name, body string, max int) string {
+	in := strings.TrimSpace(body)
+	if len([]rune(in)) > max {
+		in = string([]rune(in)[:max]) + "…"
 	}
 	in = strings.ReplaceAll(in, "</opencode-tool>", "")
 	return "\n\n" + toolAnnotationPattern + " " + name + ": " + in + "</opencode-tool>\n\n"
+}
+
+// toolResultText 从工具结果事件里提取可读文本（优先 content，其次 error）。
+func toolResultText(d evtToolResult) string {
+	var sb strings.Builder
+	for _, c := range d.Content {
+		if c.Text == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(c.Text)
+	}
+	s := strings.TrimSpace(sb.String())
+	if s == "" {
+		s = strings.TrimSpace(d.Error)
+	}
+	return s
 }

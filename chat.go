@@ -107,12 +107,17 @@ type executor struct {
 	toolSess *toolSession
 	toolsOut []*pendingCall
 
+	// toolNames 记录 callID → 工具名（session.tool.input.started 给出，
+	// 结果事件里只有 callID，用它把结果注释回上具名）。
+	toolNames map[string]string
+
 	// 输出预算（max_tokens 的近似实现）
 	budget *tokenBudget
 }
 
 func newExecutor(srv *Server, sid, model string, toolAnn bool) *executor {
-	return &executor{srv: srv, sid: sid, model: model, toolAnn: toolAnn, parallel: true, done: make(chan string, 4)}
+	return &executor{srv: srv, sid: sid, model: model, toolAnn: toolAnn, parallel: true,
+		toolNames: map[string]string{}, done: make(chan string, 4)}
 }
 
 func (e *executor) addText(s string) error {
@@ -578,12 +583,31 @@ func (e *executor) handleEvent(ctx context.Context, ev OCEvent, promptAt int64) 
 			e.srv.log.Debugf("tool event started: name=%q text=%q data=%s", d.Name, d.Text, truncate(string(ev.Data), 400))
 			e.mu.Lock()
 			e.toolCalls++
+			if d.ID != "" {
+				e.toolNames[d.ID] = d.Name
+			}
 			e.mu.Unlock()
-			// MCP 工具（客户端声明的 tools + 桥自己执行的 web_search）在事件里
-			// 统一叫 "execute"，而真正的工具调用已通过 tool bridge 以
-			// tool_calls / tool_use 下发给客户端，这条注解对它们纯属噪声，跳过。
-			if e.toolAnn && !isMCPPlaceholderTool(d.Name) {
-				_ = e.addToolText(ToolAnnotation(d.Name, ""))
+			// 这里不注空名（那正是满屏 "glob:" / "subagent:" 噪声的来源）；
+			// 入参由 input.ended 注、结果由 success/failed 注。
+		}
+
+	case "session.tool.success", "session.tool.failed":
+		// 工具结果：把产出（文件内容 / 命令输出 / 子代理结论）注释进正文，
+		// 否则工具型任务（如整项目审计）期间正文几乎为空，客户端看不到任何进展。
+		if !e.toolAnn {
+			return false
+		}
+		var d evtToolResult
+		if json.Unmarshal(ev.Data, &d) == nil {
+			e.mu.Lock()
+			name := e.toolNames[d.ID]
+			delete(e.toolNames, d.ID)
+			e.mu.Unlock()
+			// MCP 工具（"execute"）的真实调用已由 tool bridge 下发，注解属噪声。
+			if name != "" && !isMCPPlaceholderTool(name) {
+				if out := toolResultText(d); out != "" {
+					_ = e.addToolText(toolResultAnnotation(name, out))
+				}
 			}
 		}
 

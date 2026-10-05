@@ -1012,13 +1012,13 @@ func isDefaultAlias(raw string) bool {
 // 删除放后台：客户端不该为会话回收等待。
 func (s *Server) resetSession(conv *Conversation) {
 	old := conv.snapshotSessionID()
+	oldMCP := conv.mcpName
 	conv.setSessionID("")
 	conv.clearLast()
 	conv.setResponse(nil)
 	conv.model = OCModelRef{}
 	conv.agent = ""
 	// 重开会话意味着 agent 状态全丢，挂起的工具调用也必须作废，
-	// 对应的 MCP 注册交给 janitor 按"已不在 ToolBridge 里"清理。
 	if conv.mcpName != "" {
 		conv.mcpName = ""
 		conv.toolsFP = ""
@@ -1026,6 +1026,24 @@ func (s *Server) resetSession(conv *Conversation) {
 		conv.pendingTools = nil
 		conv.toolsRegAt = time.Time{}
 		s.tools.Unregister(conv.Key)
+	}
+	// 立刻把旧 MCP server 从上游删掉：OpenCode 会把同 location 的所有 MCP
+	// server 暴露给每个 session，残留的旧 server 会被 agent 调用并得到
+	// "stale (session was reset)"。以前只靠 janitor 兜底，中间有空窗。
+	if oldMCP != "" {
+		dir := conv.directory
+		if dir == "" {
+			dir = s.cfg.Directory
+		}
+		go func(name string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.up.RemoveMCP(ctx, dir, name); err != nil {
+				s.log.Debugf("remove stale mcp %s after reset: %v", name, err)
+			} else {
+				s.log.Infof("removed stale mcp server %s (session reset)", name)
+			}
+		}(oldMCP)
 	}
 	if old == "" {
 		return

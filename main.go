@@ -80,13 +80,27 @@ func main() {
 		}
 	}()
 
-	// 模型列表预热
+	// 模型列表预热：OpenCode 刚起来时模型列表可能还是空的，重试几次再放弃。
 	go func() {
-		mc, cancel := context.WithTimeout(ctx, 20*time.Second)
-		defer cancel()
-		if _, err := srv.models.Get(mc, srv.up, cfg.Directory, true); err != nil {
-			log.Warnf("model list warmup failed: %v", err)
+		const attempts = 6
+		var err error
+		for i := 1; i <= attempts; i++ {
+			mc, cancel := context.WithTimeout(ctx, 20*time.Second)
+			_, err = srv.models.Get(mc, srv.up, cfg.Directory, true)
+			cancel()
+			if err == nil {
+				if i > 1 {
+					log.Infof("model list warmup ok (attempt %d)", i)
+				}
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
 		}
+		log.Warnf("model list warmup failed after %d attempts: %v", attempts, err)
 	}()
 
 	// janitor：回收闲置会话

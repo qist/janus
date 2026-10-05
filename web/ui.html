@@ -254,6 +254,7 @@ td .bar{margin-top:3px}
     <div class="panel tbl-wrap">
       <div class="filter">
         <div class="fgroup">
+          <input id="reqSearch" type="search" placeholder="搜索 模型 / 会话 / finish" autocomplete="off" spellcheck="false">
           <select id="reqWindow" title="时间范围">
             <option value="1">最近 1 小时</option>
             <option value="3" selected>最近 3 小时</option>
@@ -266,17 +267,25 @@ td .bar{margin-top:3px}
             <option value="100">100 条</option>
           </select>
         </div>
-        <span class="dim" id="reqNote">逐条：命中=缓存读取，未命中=新增输入；命中率=命中/(命中+未命中)</span>
+        <span class="dim" id="reqNote">命中=缓存读取，未命中=新增输入；命中率=命中/(命中+未命中)</span>
       </div>
       <table>
         <thead>
           <tr>
-            <th>时间</th><th>模型</th><th>会话</th>
-            <th class="num">命中</th><th class="num">未命中</th>
-            <th class="num">命中率</th><th class="num">输出</th><th class="num">耗时</th>
+            <th data-rk="time">时间</th>
+            <th data-rk="model">模型</th>
+            <th data-rk="session">会话</th>
+            <th data-rk="cache_read_tokens" class="num">命中</th>
+            <th data-rk="input_tokens" class="num">未命中</th>
+            <th data-rk="cache_hit_rate" class="num">命中率</th>
+            <th data-rk="output_tokens" class="num">输出</th>
+            <th data-rk="reasoning_tokens" class="num">思考</th>
+            <th data-rk="duration_ms" class="num">耗时</th>
+            <th data-rk="cost_usd" class="num">费用</th>
           </tr>
         </thead>
         <tbody id="reqBody"></tbody>
+        <tfoot id="reqFoot" style="display:none"><tr id="reqFootRow"></tr></tfoot>
       </table>
       <div class="chart-empty" id="reqEmpty">暂无数据</div>
     </div>
@@ -346,6 +355,7 @@ td .bar{margin-top:3px}
 var KEY='bridge.usage.key', AUTOKEY='bridge.usage.auto';
 var state={report:null,metrics:null,requests:null,key:localStorage.getItem(KEY)||'',timer:null,
   metric:'cost_usd',days:30,sortKey:'cost_usd',sortDir:-1,
+  reqQuery:'',reqSortKey:'time',reqSortDir:-1,
   catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1};
 
 function $(s){return document.querySelector(s);}
@@ -670,27 +680,55 @@ function catalogRows(){
   return rows;
 }
 /* ---------- 渲染：最近请求（缓存命中率） ---------- */
+function reqRows(){
+  var rows=(state.requests||[]).slice();
+  var q=(state.reqQuery||'').toLowerCase();
+  if(q) rows=rows.filter(function(r){
+    return ((r.model||'')+' '+(r.session||'')+' '+(r.finish||'')).toLowerCase().indexOf(q)>=0;
+  });
+  var k=state.reqSortKey||'time', d=state.reqSortDir||-1;
+  rows.sort(function(a,b){
+    var va=a[k], vb=b[k], r;
+    if(k==='time'){ va=new Date(va).getTime()||0; vb=new Date(vb).getTime()||0; }
+    if(typeof va==='string'||typeof vb==='string'){ va=String(va==null?'':va); vb=String(vb==null?'':vb); r=va<vb?-1:(va>vb?1:0); }
+    else { r=(Number(va)||0)-(Number(vb)||0); }
+    return r*d;
+  });
+  return rows;
+}
 function renderRequests(){
-  var rows=state.requests||[], tb=el('reqBody');
+  var rows=reqRows(), tb=el('reqBody');
   el('reqTag').textContent=rows.length?('· '+rows.length+' 条'):'';
-  if(!rows.length){ tb.innerHTML=''; el('reqEmpty').style.display='block'; return; }
+  var foot=el('reqFoot');
+  if(!rows.length){ tb.innerHTML=''; el('reqEmpty').style.display='block'; foot.style.display='none'; return; }
   el('reqEmpty').style.display='none';
+  var sh=0,sm=0,so=0,sr=0,sc=0;
   tb.innerHTML=rows.map(function(r){
     var hit=Number(r.cache_hit_rate)||0;
     var color=hit>=0.9?'#38d2b1':(hit>=0.5?'#f5b942':'#ff6b6b');
     var t=r.time?new Date(r.time).toLocaleTimeString():'';
     var sid=(r.session||'').replace(/^ses_/,'').slice(0,10);
+    sh+=Number(r.cache_read_tokens)||0; sm+=Number(r.input_tokens)||0; so+=Number(r.output_tokens)||0;
+    sr+=Number(r.reasoning_tokens)||0; sc+=Number(r.cost_usd)||0;
     return '<tr>'+
       '<td>'+esc(t)+'</td>'+
       '<td>'+esc(r.model||'')+'</td>'+
-      '<td class="dim">'+esc(sid)+'</td>'+
+      '<td class="dim" title="'+esc(r.session||'')+'">'+esc(sid)+'</td>'+
       '<td class="num">'+fmtInt(r.cache_read_tokens)+'</td>'+
       '<td class="num">'+fmtInt(r.input_tokens)+'</td>'+
       '<td class="num" style="color:'+color+'">'+fmtPct(hit)+'</td>'+
       '<td class="num">'+fmtInt(r.output_tokens)+'</td>'+
+      '<td class="num">'+fmtInt(r.reasoning_tokens)+'</td>'+
       '<td class="num">'+(r.duration_ms?(r.duration_ms/1000).toFixed(1)+'s':'')+'</td>'+
+      '<td class="num">'+fmtUSD(r.cost_usd)+'</td>'+
     '</tr>';
   }).join('');
+  var tot=sh+sm;
+  foot.style.display='';
+  el('reqFootRow').innerHTML='<td colspan="3">合计 '+rows.length+' 条</td>'+
+    '<td class="num">'+fmtInt(sh)+'</td><td class="num">'+fmtInt(sm)+'</td>'+
+    '<td class="num">'+fmtPct(tot>0?sh/tot:0)+'</td><td class="num">'+fmtInt(so)+'</td>'+
+    '<td class="num">'+fmtInt(sr)+'</td><td class="num"></td><td class="num">'+fmtUSD(sc)+'</td>';
 }
 function loadRequests(){
   var hours=parseInt(el('reqWindow').value,10)||3;
@@ -854,6 +892,16 @@ function bind(){
   el('autoSel').addEventListener('change',restartAuto);
   el('reqWindow').addEventListener('change',loadRequests);
   el('reqLimit').addEventListener('change',loadRequests);
+  el('reqSearch').addEventListener('input',function(){ state.reqQuery=el('reqSearch').value; renderRequests(); });
+  var rths=document.querySelectorAll('th[data-rk]');
+  for(var ri=0;ri<rths.length;ri++){
+    (function(th){ th.addEventListener('click',function(){
+      var k=th.getAttribute('data-rk');
+      if(state.reqSortKey===k){ state.reqSortDir=-state.reqSortDir; }
+      else { state.reqSortKey=k; state.reqSortDir=(k==='model'||k==='session')?1:-1; }
+      renderRequests();
+    }); })(rths[ri]);
+  }
   el('btnKey').addEventListener('click',openKey);
   el('keyCancel').addEventListener('click',closeKey);
   el('keyMask').addEventListener('click',function(e){ if(e.target===el('keyMask')) closeKey(); });

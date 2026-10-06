@@ -90,6 +90,10 @@ h2 .tag{font-weight:400;color:var(--dim);font-size:12px}
 .tabs button.on{background:#2c3d6b;border-color:#4f7dff;color:#fff}
 .tabpane{display:none}
 .tabpane.on{display:block}
+/* 思考档位按钮组 */
+.effseg{display:flex;gap:4px;flex-wrap:wrap}
+.effseg button{padding:3px 10px;font-size:12px;border-radius:7px}
+.effseg button.on{background:#2c3d6b;border-color:#4f7dff;color:#fff}
 #chartBox{width:100%}
 #chart{width:100%;height:auto;display:block}
 .chart-empty{color:var(--dim);text-align:center;padding:60px 0}
@@ -839,10 +843,10 @@ function renderCatalog(){
     var mods=r.modalities.length?r.modalities.join(' / '):'–';
     var effCell;
     if(r.efforts.length){
-      // 思考档位直接可选：选中即把 janus 默认设为 <模型>:<档位>（选「默认」则不带档位）
-      var eo=['<option value="">默认</option>'];
-      r.efforts.forEach(function(e){ eo.push('<option value="'+esc(e)+'"'+((r.isCurDefault&&e===state.defVar)?' selected':'')+'>'+esc(e)+'</option>'); });
-      effCell='<select class="varSel" data-model="'+esc(r.id)+'" title="选择思考档位（设为 janus 时生效）">'+eo.join('')+'</select>';
+      // 思考档位：点选即设（高亮当前）。点「默认」= 不带档位。
+      var eo=['<button class="effbtn'+((r.isCurDefault&&!state.defVar)?' on':'')+'" data-model="'+esc(r.id)+'" data-eff="">默认</button>'];
+      r.efforts.forEach(function(e){ eo.push('<button class="effbtn'+((r.isCurDefault&&e===state.defVar)?' on':'')+'" data-model="'+esc(r.id)+'" data-eff="'+esc(e)+'">'+esc(e)+'</button>'); });
+      effCell='<div class="effseg">'+eo.join('')+'</div>';
     }else{
       effCell='<span class="muted">–</span>';
     }
@@ -1026,32 +1030,30 @@ function bind(){
   el('catalogProvider').addEventListener('change',function(){ state.catProvider=el('catalogProvider').value; renderCatalog(); });
   el('catalogFree').addEventListener('change',function(){ state.catFree=el('catalogFree').value; renderCatalog(); });
   el('catalogBody').addEventListener('click',function(e){
+    // 思考档位：点选即设（高亮当前）
+    var eb=e.target.closest?e.target.closest('.effbtn'):null;
+    if(eb){
+      var emid=eb.getAttribute('data-model'), eff=eb.getAttribute('data-eff')||'';
+      var efull=eff?(emid+':'+eff):emid;
+      apiJSON('POST','/v1/settings',{default_model:efull}).then(function(){
+        state.defModel=efull; state.defVar=eff; renderCatalog();
+        toast('janus 默认：'+efull+'（档位 '+(eff||'默认')+'）');
+      }).catch(function(err){ toast('设置失败：'+((err&&err.message)||err)); });
+      return;
+    }
     var n=e.target;
     while(n&&n!==this&&!(n.getAttribute&&(n.getAttribute('data-copy')||n.getAttribute('data-setdef')))) n=n.parentNode;
     if(!n||n===this) return;
     if(n.getAttribute('data-setdef')){
       var mid=n.getAttribute('data-setdef');
-      var tr=n.closest('tr'), sel=tr?tr.querySelector('.varSel'):null;
-      var v=sel?sel.value:'';
-      var full=v?(mid+':'+v):mid;
-      apiJSON('POST','/v1/settings',{default_model:full}).then(function(){
-        state.defModel=full; state.defVar=v; renderCatalog();
-        toast('已设为 janus 默认：'+full+'（客户端模型名填 janus 即用它）');
+      apiJSON('POST','/v1/settings',{default_model:mid}).then(function(){
+        state.defModel=mid; state.defVar=''; renderCatalog();
+        toast('已设为 janus 默认：'+mid+'（客户端模型名填 janus 即用它）');
       }).catch(function(err){ toast('设置失败：'+((err&&err.message)||err)); });
       return;
     }
     var v=n.getAttribute('data-copy');
     copyText(v).then(function(ok){ toast(ok?('已复制模型名：'+v):'复制失败，请手动选择'); });
-  });
-  el('catalogBody').addEventListener('change',function(e){
-    var s=e.target;
-    if(!s||!s.classList||!s.classList.contains('varSel')) return;
-    var mid=s.getAttribute('data-model'), v=s.value;
-    var full=v?(mid+':'+v):mid;
-    apiJSON('POST','/v1/settings',{default_model:full}).then(function(){
-      state.defModel=full; state.defVar=v; renderCatalog();
-      toast('janus 默认：'+full+'（档位 '+(v||'默认')+'）');
-    }).catch(function(err){ toast('设置失败：'+((err&&err.message)||err)); });
   });
   var cths=document.querySelectorAll('th[data-ck]');
   for(var ci=0;ci<cths.length;ci++){

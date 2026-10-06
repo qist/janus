@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -101,7 +102,8 @@ type executor struct {
 
 	seenStarted bool
 	upFail      *upstreamFailure // 上游给出的失败原因（若有）
-	done        chan string      // 终态："succeeded"/"failed"/"interrupted"/"timeout"/"tool_calls"
+	done        chan string      // 终态："succeeded"/"failed"/"interrupted"/"timeout"/"tool_calls"/"stalled"
+	lastData    atomic.Int64     // 最近一次"真实数据"（delta/事件）的时间（毫秒）
 
 	// 工具调用：agent 通过内置 MCP server 调用了客户端声明的工具
 	toolSess *toolSession
@@ -116,8 +118,19 @@ type executor struct {
 }
 
 func newExecutor(srv *Server, sid, model string, toolAnn bool) *executor {
-	return &executor{srv: srv, sid: sid, model: model, toolAnn: toolAnn, parallel: true,
+	e := &executor{srv: srv, sid: sid, model: model, toolAnn: toolAnn, parallel: true,
 		toolNames: map[string]string{}, done: make(chan string, 4)}
+	e.touchData()
+	return e
+}
+
+// touchData 记录一次"真实数据"（模型 delta / 上游 session 事件）。
+// 流式空闲超时据此判断是否卡死；心跳（keepAlive）不算，否则永远不触发。
+func (e *executor) touchData() { e.lastData.Store(time.Now().UnixMilli()) }
+
+// idleFor 返回距上次真实数据过了多久。
+func (e *executor) idleFor() time.Duration {
+	return time.Since(time.UnixMilli(e.lastData.Load()))
 }
 
 func (e *executor) addText(s string) error {
@@ -478,6 +491,19 @@ func (e *executor) runEvents(ctx context.Context, sub *subscription, promptAt in
 			}(waitDone)
 
 		case <-reconcileTick.C:
+			// 流式空闲超时：上游卡住（长时间没有任何真实数据，心跳不算）→ 中断并收尾。
+			// 一直有真实输出的长回答不受影响（每次事件都会 touchData）。
+			if idle := srv.cfg.StreamIdleTimeout; idle > 0 && e.idleFor() > idle {
+				srv.log.Warnf("stream idle timeout: no data for %s (sid=%s); interrupting upstream",
+					e.idleFor().Round(time.Second), e.sid)
+				go func() {
+					iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+					defer c()
+					_ = srv.up.Interrupt(iCtx, e.sid)
+				}()
+				e.signal("stalled")
+				return
+			}
 			// max_tokens 预算耗尽：立刻收尾（调用方会 interrupt 上游），
 			// 否则客户端还得等上游把整段生成完 —— 那不是 OpenAI 的语义。
 			if e.budgetExhausted() {
@@ -553,6 +579,8 @@ func (e *executor) handleEvent(ctx context.Context, ev OCEvent, promptAt int64) 
 	if json.Unmarshal(ev.Data, &sess) != nil || sess.SessionID != e.sid {
 		return false
 	}
+	// 本会话有事件 = 上游还活着（delta / step / tool / usage 都算真实数据）。
+	e.touchData()
 
 	switch ev.Type {
 	case "session.execution.started":

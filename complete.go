@@ -127,6 +127,10 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 		if uf := ex.failure(); uf != nil {
 			// 上游给了明确原因（余额不足 / 限流 / 鉴权…），照实透出来
 			_, typ, code, msg = mapUpstreamFailure(uf)
+		} else if outcome == "stalled" {
+			code = "idle_timeout"
+			msg = fmt.Sprintf("upstream stalled: no data for %s (turn aborted)",
+				s.cfg.StreamIdleTimeout.Round(time.Second))
 		} else if el := time.Since(started); el > 30*time.Second {
 			msg = fmt.Sprintf("upstream returned an empty completion after %s (likely rate-limited or stalled)", el.Round(time.Second))
 		} else if outcome == "failed" {
@@ -208,6 +212,9 @@ func (t *turnOutcome) emptyCompletionError() (status int, typ, code, msg string)
 	msg = "upstream returned an empty completion"
 	if t.failure != nil {
 		status, typ, code, msg = mapUpstreamFailure(t.failure)
+	} else if t.outcome == "stalled" {
+		status, typ, code = http.StatusGatewayTimeout, "api_error", "idle_timeout"
+		msg = "upstream stalled: no data received (turn aborted)"
 	} else if t.elapsed > 30*time.Second {
 		msg = fmt.Sprintf("upstream returned an empty completion after %s (likely rate-limited or stalled)", t.elapsed.Round(time.Second))
 	} else if t.outcome == "failed" {

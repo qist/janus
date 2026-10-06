@@ -380,7 +380,8 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 | `BRIDGE_RECONCILE_INTERVAL` | `3s` | 事件流对账间隔 |
 | `BRIDGE_IDLE_POLL_INTERVAL` | `1s` | 空闲轮询间隔（终态兜底） |
 | `BRIDGE_PROMPT_GRACE` | `2s` | prompt 后多久才信任 idle 信号 |
-| `BRIDGE_STREAM_HEARTBEAT` | `15s` | SSE 心跳间隔（长工具任务时保活） |
+| `BRIDGE_STREAM_HEARTBEAT` | `15s` | SSE 心跳间隔（长工具任务时保活；发空 delta） |
+| `BRIDGE_STREAM_IDLE_TIMEOUT` | `120s` | 流式**空闲超时**：这么久没有**真实数据**（正文/推理 delta、工具调用、上游事件）就判上游卡死 → 中断并收尾。**心跳不算**；一直有输出的长回答不受影响。`0`/`never`/`off` 关闭 |
 
 ### 工具调用（把客户端 `tools` 暴露给 agent）
 

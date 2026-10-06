@@ -68,6 +68,7 @@ type Config struct {
 	IdlePollInterval  time.Duration // 空闲轮询间隔（终端信号兜底）
 	PromptGracePeriod time.Duration // prompt 后多久才开始信任 idle 信号
 	StreamHeartbeat   time.Duration // SSE 心跳间隔
+	StreamIdleTimeout time.Duration // 流式：多久没有真实数据就判卡死（心跳不算）；0=不启用
 
 	CORSOrigin string
 	LogLevel   string
@@ -366,6 +367,7 @@ func LoadConfig() (Config, error) {
 		IdlePollInterval:  loader.dur("BRIDGE_IDLE_POLL_INTERVAL", 1*time.Second),
 		PromptGracePeriod: loader.dur("BRIDGE_PROMPT_GRACE", 2*time.Second),
 		StreamHeartbeat:   loader.dur("BRIDGE_STREAM_HEARTBEAT", 15*time.Second),
+		StreamIdleTimeout: loader.durTTL("BRIDGE_STREAM_IDLE_TIMEOUT", 120*time.Second),
 
 		CORSOrigin: loader.str("BRIDGE_CORS_ORIGIN", ""),
 		LogLevel:   loader.str("BRIDGE_LOG_LEVEL", "info"),

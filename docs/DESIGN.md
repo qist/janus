@@ -699,6 +699,10 @@ OpenAI 的 `content` 数组形态（`image_url`）已支持；Responses 的 `inp
 - EventBus fan-out channel 带缓冲（64），满了丢弃最旧 delta 并置 `degraded` 标记，收尾时用对账补齐。
 - SessionStore TTL：**普通**会话 `BRIDGE_SESSION_TTL`（默认 30m）、**共享(scope)**会话
   `BRIDGE_SHARED_SESSION_TTL`（默认 24h）无活动即 `DELETE /api/session/{sid}`；设 `never` 即不按空闲回收。
+- **流式空闲超时**：`BRIDGE_STREAM_IDLE_TIMEOUT`（默认 120s）。流式请求超过这么久没有
+  **真实数据**（正文/推理 delta、工具调用、上游 session 事件）就判上游卡死 → 中断上游并收尾。
+  心跳（`BRIDGE_STREAM_HEARTBEAT`）不算数据；一直有真实输出的长回答不受影响。
+  注：`BRIDGE_REQUEST_TIMEOUT`（总超时）只对**非流式**生效。
 - 优雅停机：收到 SIGTERM 后停止接受新请求，`interrupt` 所有在飞会话，关闭 EventBus，最多等 10s。
 
 ### 5.11 客户端"能力协商"细节
@@ -940,6 +944,7 @@ $EDITOR janus.env
 | `BRIDGE_IDLE_POLL_INTERVAL` | `1s` | 空闲轮询间隔（终态主判据） |
 | `BRIDGE_PROMPT_GRACE` | `2s` | prompt 后多久才信任 idle 信号 |
 | `BRIDGE_STREAM_HEARTBEAT` | `15s` | SSE 心跳间隔 |
+| `BRIDGE_STREAM_IDLE_TIMEOUT` | `120s` | 流式空闲超时（无真实数据即判卡死；心跳不算）；`0`/`never` 关闭 |
 | `BRIDGE_TOOL_CALLING` | `true` | 是否把客户端 `tools` 经内置 MCP 暴露给 agent（§5.7） |
 | `BRIDGE_TOOL_CALL_WAIT` | `5m` | **执行类**工具挂起等待上限 |
 | `BRIDGE_TOOL_CALL_WAIT_FAST` | `90s` | **只读/编辑类**工具短等待（§5.7） |

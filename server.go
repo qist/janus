@@ -373,6 +373,10 @@ func (c *Config) applyDefaults() {
 	if c.StreamHeartbeat <= 0 {
 		c.StreamHeartbeat = 15 * time.Second
 	}
+	// <0（never/off/0）= 关闭流式空闲超时
+	if c.StreamIdleTimeout < 0 {
+		c.StreamIdleTimeout = 0
+	}
 	if c.ToolCallWait <= 0 {
 		c.ToolCallWait = 5 * time.Minute
 	}

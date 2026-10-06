@@ -697,7 +697,9 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 			// 客户端主动断开导致的取消是正常现象，降为 Debug 免刷屏。
 			s.log.Debugf("request logs canceled by client")
 		} else {
-			s.log.Warnf("request logs failed: %v", err)
+			// console 的 /request-logs 经常超时/连不上；已做 60s 负缓存，
+			// 这里降为 Debug，别再刷 WARN。
+			s.log.Debugf("request logs failed: %v", err)
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
 			"cannot read request logs: "+err.Error(), "requests_unavailable")

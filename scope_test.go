@@ -31,6 +31,24 @@ func TestScopeKeyStableAndDistinct(t *testing.T) {
 	}
 }
 
+func TestExtractProjectRoot(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "tool", Content: MessageContent{Text: "read /opt/tvfusion/tvfusion-core/local/ads.go and /opt/tvfusion/scripts/dev-server.sh"}},
+		{Role: "assistant", Content: MessageContent{Text: "cd /opt/tvfusion/tvfusion-core"}},
+	}
+	if got := extractProjectRoot(msgs); got != "/opt/tvfusion" {
+		t.Fatalf("got %q want /opt/tvfusion", got)
+	}
+	if got := extractProjectRoot(nil); got != "" {
+		t.Fatalf("empty got %q", got)
+	}
+	// 只出现一次不认（避免误判）
+	one := []ChatMessage{{Role: "tool", Content: MessageContent{Text: "cat /etc/hosts"}}}
+	if got := extractProjectRoot(one); got != "" {
+		t.Fatalf("single got %q", got)
+	}
+}
+
 func TestProjectIdentityPriority(t *testing.T) {
 	s := &Server{cfg: Config{Project: "", ProjectMap: map[string]string{`D:\proj\tvfusion`: "qist/tvfusion"}}}
 	// map 命中（Windows 路径归一）

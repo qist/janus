@@ -724,7 +724,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 会话定位 ----
 	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
-	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), s.cfg.Directory)
+	// 客户端不给项目目录时（如 Trae），从消息里抽项目根，避免所有项目共用 BRIDGE_DIRECTORY。
+	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), extractProjectRoot(req.Messages), s.cfg.Directory)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
 
 	key := s.conversationKey(r, explicit, firstSystem(req.Messages), req.User, dir, req.Messages)

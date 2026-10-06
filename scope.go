@@ -20,6 +20,42 @@ import (
 
 var reWorkspaceFolder = regexp.MustCompile(`(?i)workspace folder:\s*([^\r\n]+)`)
 
+// reAbsPath 匹配消息里的绝对路径（Unix 或 Windows）。
+var reAbsPath = regexp.MustCompile(`(?:^|[\s"'=(,\[:])((?:/[A-Za-z0-9_.@+\-]+)+|[A-Za-z]:\\[^\s"']+)`)
+
+// extractProjectRoot 从客户端消息里抽「项目根目录」——取出现最多的前 3 段路径前缀
+// （如 /opt/tvfusion、D:/project/tvgate）。用于 Trae 这类「不给项目路径」的客户端：
+// 让 janus 用客户端自己的项目当会话目录，从而隔离不同项目。
+// 至少出现 2 次才认，避免误判。
+func extractProjectRoot(msgs []ChatMessage) string {
+	counts := map[string]int{}
+	for _, m := range msgs {
+		s := m.Content.Text
+		if s == "" {
+			continue
+		}
+		for _, mm := range reAbsPath.FindAllStringSubmatch(s, -1) {
+			p := normalizeDir(mm[1])
+			parts := strings.Split(p, "/")
+			n := 3
+			if len(parts) < n {
+				n = len(parts)
+			}
+			root := strings.Join(parts[:n], "/")
+			if root != "" && root != "/" {
+				counts[root]++
+			}
+		}
+	}
+	best, bestN := "", 1
+	for p, n := range counts {
+		if n > bestN {
+			best, bestN = p, n
+		}
+	}
+	return best
+}
+
 // normalizeIDE 从 User-Agent 归一出 IDE 产品名（**剥掉版本**，避免升级产生新 scope）。
 func normalizeIDE(ua string) string {
 	u := strings.ToLower(strings.TrimSpace(ua))

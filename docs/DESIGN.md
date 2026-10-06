@@ -358,7 +358,14 @@ POST /api/session
 **会话生命周期**：全局上限 `BRIDGE_MAX_CONVERSATIONS`（默认 256），
 单 key 候选上限 8，均按 LRU 淘汰。被淘汰的会话进入 `orphans` channel，
 由 janitor 异步 `DELETE /api/session/{sid}`；`orphans` 满则丢弃，靠 TTL 兜底。
-`BRIDGE_SESSION_TTL`（默认 30m）内无人访问也会被 janitor 回收。
+
+按空闲回收分两档（`Store.ttlFor` 按 key 前缀选）：
+
+- **普通会话**（`f:` 指纹 / 显式 key）→ `BRIDGE_SESSION_TTL`（默认 `30m`）；
+- **共享会话**（scope `s:`，见 §5.3.2）→ `BRIDGE_SHARED_SESSION_TTL`（默认 `24h`）。
+
+两者都支持 `never` / `off` / `none` / `0` = **永不按空闲回收**（仍受上面的 LRU 上限约束）。
+持久层「key → sessionID/历史」另由 `BRIDGE_CONV_TTL`（默认 `168h`）清理，同样可设 `never`。
 
 ### 5.3.1 上游端点自动发现
 
@@ -379,7 +386,26 @@ POST /api/session
 
 `OPENCODE_URL` 默认 `auto`；显式配置则不做覆盖，只探活告警。
 
-> 依赖 Linux `/proc` 与同用户权限。其他平台请显式配置端点。
+> **平台限制**：自动发现依赖 Linux `/proc` 与同用户权限。macOS / Windows 没有 `/proc`，
+> 发现不了**已在跑的外部** OpenCode；但仍可让 janus 自己 `autostart` 拉起一个
+> （随机端口 + 随机密码，janus 自己知道），或显式配置 `OPENCODE_URL` 指向固定端点。
+
+### 5.3.2 无会话 id 的退化：scope（IDE + 项目）
+
+Trae / Copilot Chat / CodeBuddy 这类客户端**不给会话 id**，`X-Session-ID` 也拿不到。
+Janus 不猜会话，而是退化为按 **`scope = IDE + 项目`** 定位（`BRIDGE_SCOPE_KEY=true`）：
+
+- **同 IDE + 同项目（跨设备）→ 同一会话**（共享）；不同项目 / 不同 IDE → 隔离。
+- 项目识别取各客户端 firstUser 的权威字段（Trae `Primary working directory`、
+  CodeBuddy `Workspace Folder`、Copilot `following folders`），兜底用消息里最频繁的路径前缀；
+  可用 `BRIDGE_PROJECT` / `BRIDGE_PROJECT_MAP` 覆盖。
+- IDE 从 `User-Agent` 归一（`trae` / `codebuddy` / `githubcopilotchat`），**剥掉版本号**。
+- key 形如 `s:<hex>`，与 `f:` / `x:` 键空间隔离；共享会话用更长的 TTL（见 §5.3）。
+- 远程 + mode B 时客户端项目路径在 janus 主机上不存在，会话目录改用
+  `BRIDGE_WORKSPACES_DIR/<scope>`（janus 创建的中性空目录）。
+
+> 这是**没有会话 id 时的明确退化**，不是"可靠的会话识别"。客户端一旦提供真实
+> session id（`X-Session-ID`），第一优先级会用它。
 
 ### 5.4 流式转换（`stream: true`）
 
@@ -520,6 +546,13 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 若照常挂起就会一直等到 `BRIDGE_TOOL_CALL_WAIT`（5 分钟）才报错。因此 `tools/call`
 先 `waitForWaiter(3s)`：目标会话没有在飞请求（没有 executor 注册 watch）就直接返回
 `isError`，立即失败而不是挂死。
+
+**等待时长分两档**（`ToolBridge.waitFor`）：只读/编辑类工具（`Grep`/`Read`/`Glob`/`LS`/
+`WebFetch`/`Write`/`SearchReplace`/`DeleteFile`）正常秒回，卡住基本是客户端卡死，用
+`BRIDGE_TOOL_CALL_WAIT_FAST`（默认 `90s`）快速判失败、把工具错误还给模型继续；执行类
+（`RunCommand`/`execute_command`…）和**未列出的工具（含未知新工具）**用
+`BRIDGE_TOOL_CALL_WAIT`（默认 `5m`），避免误杀 build / 长命令。列表用
+`BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` 调，设 `none`/`off`/`-` 即禁用短等待。
 
 **结果回填的 id 对齐**：客户端回填的工具结果按 `tool_call_id` 索引，但部分客户端
 （实测 Trae）会用**它自己生成的** id，而不是 janus 下发的 `call_`+hex。因此
@@ -664,14 +697,15 @@ OpenAI 的 `content` 数组形态（`image_url`）已支持；Responses 的 `inp
 - 同一 ConversationKey 的请求串行化：进程内 `per-session mutex`；若发现上游会话仍在执行
   （`/api/session/{sid}` 的 `outcome` 或事件状态），新请求用 `delivery:"queue"` 排队。
 - EventBus fan-out channel 带缓冲（64），满了丢弃最旧 delta 并置 `degraded` 标记，收尾时用对账补齐。
-- SessionStore TTL 默认 30min 无活动即 `DELETE /api/session/{sid}`；可配置 `BRIDGE_KEEP_SESSIONS=1` 保留。
+- SessionStore TTL：**普通**会话 `BRIDGE_SESSION_TTL`（默认 30m）、**共享(scope)**会话
+  `BRIDGE_SHARED_SESSION_TTL`（默认 24h）无活动即 `DELETE /api/session/{sid}`；设 `never` 即不按空闲回收。
 - 优雅停机：收到 SIGTERM 后停止接受新请求，`interrupt` 所有在飞会话，关闭 EventBus，最多等 10s。
 
 ### 5.11 客户端"能力协商"细节
 
 为提升 Trae / CodeBuddy 的成功率：
 
-- 响应加 `Access-Control-Allow-Origin`（可配，对应 OpenCode 的 `--cors` 机制）。
+- 响应按 `BRIDGE_CORS_ORIGIN` 决定是否加 `Access-Control-Allow-Origin`（**空=不加 CORS 头，拒绝跨源**；`*`=任意来源；或逗号白名单）。
 - 支持 `OPTIONS` 预检。
 - `POST` body 允许 `application/json; charset=utf-8`（有客户端会带 charset）。
 - 忽略并容忍客户端发来的 `n`、`logprobs`、`presence_penalty` 等 OpenCode 不支持的字段（不报错）。
@@ -873,35 +907,46 @@ $EDITOR janus.env
 ./scripts/run.sh
 ```
 
-查找顺序：`BRIDGE_CONFIG` 显式指定 → 可执行文件同目录 `janus.env` →
+查找顺序：`JANUS_CONFIG` / `BRIDGE_CONFIG` 显式指定 → 可执行文件同目录 `janus.env` →
 当前目录 `janus.env`。文件语法错误会让桥启动失败（不静默用错配置）。
 
 解析规则：`#` 开头是注释；支持 `export KEY=VALUE`；值两端成对引号会被去掉；
 `KEY=value  # 尾注释` 支持（仅未加引号时）。
 
+> **完整配置表见 `README.md` 的配置章节**（含所有开关与默认值）。这里只列设计上会引用的关键项。
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `BRIDGE_CONFIG` | 空 | 配置文件路径 |
+| `JANUS_CONFIG` / `BRIDGE_CONFIG` | 空 | 配置文件路径（显式指定优先） |
 | `BRIDGE_ADDR` | `0.0.0.0:2810` | 监听地址 |
-| `OPENCODE_URL` | `auto` | 上游地址；`auto` = 自动发现（§5.3.1） |
+| `OPENCODE_URL` | `auto` | 上游地址；`auto` = 自动发现（§5.3.1，仅 Linux） |
 | `OPENCODE_AUTOSTART` | `true` | `auto` 且没找到在跑的 OpenCode 时，由本桥拉起一个 |
 | `OPENCODE_REUSE_EXTERNAL` | `true` | 是否复用已在跑的外部 OpenCode；`false`=总是自己拉起（才能注入生成的 agent 配置，§5.7.2） |
 | `OPENCODE_BIN` | 空 | 显式指定 `opencode` 可执行文件 |
 | `OPENCODE_USERNAME` | `opencode` | Basic 用户名（固定） |
 | `OPENCODE_PASSWORD` | —（auto 模式下自动获取） | 即 `OPENCODE_SERVER_PASSWORD` |
 | `BRIDGE_API_KEY` | 空 | 对客户端的鉴权；空=接受任意 Bearer（WARN） |
-| `BRIDGE_DIRECTORY` | `/path/to/project` | 会话默认工作目录 |
+| `BRIDGE_USER_AGENT` | 空 | **出站**请求的 `User-Agent`；空=内置 `janus/<version> (<os>/<arch>; +repo)` |
+| `BRIDGE_DIRECTORY` | 进程 cwd | 会话默认工作目录 |
 | `BRIDGE_AGENT` | `build` | 默认 agent |
-| `BRIDGE_SESSION_TTL` | `30m` | 会话空闲回收时间 |
+| `BRIDGE_SCOPE_KEY` | `false` | 无会话 id 时按 `scope = IDE+项目` 定位（§5.3.2） |
+| `BRIDGE_PROJECT` / `BRIDGE_PROJECT_MAP` | 空 | 覆盖 / 映射项目识别 |
+| `BRIDGE_WORKSPACES_DIR` | `/var/lib/janus/workspaces` | 远程 per-scope 中性工作目录根 |
+| `BRIDGE_SESSION_TTL` | `30m` | **普通**会话空闲回收；`never`/`0`=永不 |
+| `BRIDGE_SHARED_SESSION_TTL` | `24h` | **共享(scope)**会话空闲回收；`never`/`0`=永不 |
+| `BRIDGE_CONV_TTL` | `168h` | 持久化映射/历史保留；`never`/`0`=永不 |
 | `BRIDGE_REQUEST_TIMEOUT` | `600s` | 单次补全超时 |
 | `BRIDGE_RECONCILE_INTERVAL` | `3s` | 事件流对账间隔 |
 | `BRIDGE_IDLE_POLL_INTERVAL` | `1s` | 空闲轮询间隔（终态主判据） |
 | `BRIDGE_PROMPT_GRACE` | `2s` | prompt 后多久才信任 idle 信号 |
 | `BRIDGE_STREAM_HEARTBEAT` | `15s` | SSE 心跳间隔 |
+| `BRIDGE_TOOL_CALLING` | `true` | 是否把客户端 `tools` 经内置 MCP 暴露给 agent（§5.7） |
+| `BRIDGE_TOOL_CALL_WAIT` | `5m` | **执行类**工具挂起等待上限 |
+| `BRIDGE_TOOL_CALL_WAIT_FAST` | `90s` | **只读/编辑类**工具短等待（§5.7） |
 | `BRIDGE_TOOL_ANNOTATIONS` | `true` | 是否注入 `<opencode-tool>` 注释 |
 | `BRIDGE_PERMISSION_REPLY` | `once` | 自动应答 OpenCode 权限请求：`once|always|reject|off` |
 | `BRIDGE_MAX_CONVERSATIONS` | `256` | 全局会话上限 |
-| `BRIDGE_CORS_ORIGIN` | 空 | 允许的浏览器来源（空=回显） |
+| `BRIDGE_CORS_ORIGIN` | 空 | 允许的浏览器来源；**空=不发 CORS 头（拒绝跨源）** |
 | `BRIDGE_LOG_LEVEL` | `info` | `debug|info|warn|error` |
 
 配置文件 `bridge.json` **未实现**（当前全部走环境变量，避免两套来源歧义）。

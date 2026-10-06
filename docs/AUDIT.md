@@ -142,7 +142,7 @@ OpenCode session ses_…   ← 上下文存这里，prompt 只发增量
 - 不相关话题各占独立会话，互不干扰。
 - 历史被改写/截断 → 另起会话，绝不污染。
 - 完全相同的请求 → `DiffNone` 回放缓存；空缓存则**退回重跑**最后一条 user 消息。
-- 会话有 TTL（默认 30m）、全局上限、单 key 候选上限，LRU 淘汰 + janitor 删上游。
+- 会话有 TTL（普通 `BRIDGE_SESSION_TTL=30m`、共享 scope `BRIDGE_SHARED_SESSION_TTL=24h`，均可设 `never`）、全局上限、单 key 候选上限，LRU 淘汰 + janitor 删上游。
 
 🔧 **改进**：把 OpenAI 标准的 `user` 字段纳入指纹。不带它的话，同一目录、
 同一系统提示词的不同终端用户会共用桶，桶无谓膨胀。

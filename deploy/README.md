@@ -1,5 +1,8 @@
 # 部署
 
+> 本章是 **Linux** 部署（Docker / systemd）。macOS / Windows 直接跑发布包里的二进制即可，
+> 见主 `README.md` 的「跨平台说明」与「在 Windows 上运行」。
+
 ## Docker
 
 ```bash

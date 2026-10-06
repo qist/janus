@@ -312,7 +312,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 ## 12. 现状对照
 
-**已实现（见 DESIGN.md）**：OpenAI/Anthropic/Responses 三套协议、会话分桶与历史重放、工具桥（MCP）、权限自动应答、上游自动发现与托管、`/v1/usage`、`/v1/requests` + `/ui`、持久化、工具结果注释、终止后重开会话。
+**已实现（见 DESIGN.md）**：OpenAI/Anthropic/Responses 三套协议、会话分桶与历史重放、**无会话 id 的 scope（IDE+项目）共享会话**（独立 TTL）、工具桥（MCP，等待分两档）、权限自动应答、上游自动发现与托管、`/v1/usage`、`/v1/requests` + `/ui`、持久化、工具结果注释、终止后重开会话、**跨平台（linux/darwin/windows）**、统一出站 `User-Agent`。
 
 **已实现（本路线的早期落点）**：
 - **harness 配置自动注入**：janus 通过 `OPENCODE_CONFIG_CONTENT` 注入自动生成的 `orchestrator` 白名单（§3.3），无需手写 `~/.config/opencode/opencode.jsonc`；

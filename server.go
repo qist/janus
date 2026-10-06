@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +104,26 @@ func (s *Server) logClientInfo(r *http.Request, user, dir, key string, msgs []Ch
 		hb.WriteByte(' ')
 	}
 	s.log.Infof("client headers: %s", truncate(hb.String(), 1200))
+
+	// 有些客户端把信息放在自定义 token（如 Trae 的 Acl-Token）里：解一下 JWT payload。
+	if tok := r.Header.Get("Acl-Token"); tok != "" {
+		if pl := jwtPayload(tok); pl != "" {
+			s.log.Infof("client Acl-Token payload: %s", truncate(pl, 600))
+		}
+	}
+}
+
+// jwtPayload 解出 JWT 的 payload（第 2 段）明文；失败返回空。
+func jwtPayload(tok string) string {
+	parts := strings.Split(tok, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	b, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // conversationKey 计算会话键：显式会话头 > scope(开启时) > 指纹(system+user+dir)。

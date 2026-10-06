@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -216,12 +217,14 @@ func (s *Server) scopeOf(r *http.Request, clientDir string, msgs []ChatMessage) 
 }
 
 // sessionDir 决定上游 OpenCode 会话的工作目录：
-// 客户端 header > 从消息抽的项目根（**仅当该目录在 janus 主机上真实存在**）> BRIDGE_DIRECTORY。
+// 客户端 header > 从消息抽的项目根（**仅当该目录在 janus 主机上真实存在**）
+// > per-scope 中性工作目录（BRIDGE_WORKSPACES_DIR/<scope>）。
 //
 // 为什么要存在性校验：Trae/Copilot 的项目路径是「客户端侧」的；远程 + mode B 时
 // janus 主机上未必有该目录，上游对不存在的目录注册 MCP 会 500，整轮直接失败。
-// 会话目录回落到 BRIDGE_DIRECTORY 后，隔离仍由 scope（key）保证。
-func (s *Server) sessionDir(headerDir string, msgs []ChatMessage) string {
+// 用 per-scope 中性目录后，agent 的工作区是该项目专属的空目录，不会误认成别的项目；
+// 隔离仍由 scope（key）保证。
+func (s *Server) sessionDir(headerDir string, msgs []ChatMessage, scopeKey string) string {
 	if d := strings.TrimSpace(headerDir); d != "" {
 		return d
 	}
@@ -230,5 +233,13 @@ func (s *Server) sessionDir(headerDir string, msgs []ChatMessage) string {
 			return p
 		}
 	}
-	return s.cfg.Directory
+	name := strings.Trim(strings.TrimPrefix(scopeKey, "s:"), "/")
+	if name == "" {
+		name = "default"
+	}
+	d := filepath.Join(s.cfg.WorkspacesDir, name)
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return s.cfg.Directory
+	}
+	return d
 }

@@ -57,6 +57,9 @@ type Config struct {
 	// ScopeKey=true 时按 scope(=hash(IDE+项目)) 定位会话（没有会话 id 时的兜底），
 	// 而不是按 (system+user+dir)。默认 false。
 	ScopeKey bool
+	// WorkspacesDir 是远程场景下 per-scope 的中性工作目录根（BRIDGE_WORKSPACES_DIR）。
+	// 客户端项目路径在 janus 主机上不存在时，用它当会话目录，避免误认成别的项目。
+	WorkspacesDir string
 
 	SessionTTL        time.Duration // 会话空闲回收
 	RequestTimeout    time.Duration // 单次补全超时
@@ -318,6 +321,7 @@ func LoadConfig() (Config, error) {
 		Project:      loader.str("BRIDGE_PROJECT", ""),
 		ProjectMap:   parseProjectMap(loader.str("BRIDGE_PROJECT_MAP", "")),
 		ScopeKey:     loader.boolean("BRIDGE_SCOPE_KEY", false),
+		WorkspacesDir: loader.str("BRIDGE_WORKSPACES_DIR", "/var/lib/janus/workspaces"),
 
 		SessionTTL:        loader.dur("BRIDGE_SESSION_TTL", 30*time.Minute),
 		RequestTimeout:    loader.dur("BRIDGE_REQUEST_TIMEOUT", 600*time.Second),

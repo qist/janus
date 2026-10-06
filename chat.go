@@ -724,9 +724,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 会话定位 ----
 	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
-	// 远程部署时客户端项目路径在 janus 主机上不存在，会话目录回落到 BRIDGE_DIRECTORY；
-	// 项目隔离由 scope（key）保证（见 scope.go）。
-	dir := s.sessionDir(r.Header.Get("X-OpenCode-Directory"), req.Messages)
+	// 会话目录：客户端项目路径在 janus 主机上不存在时用 per-scope 中性目录（见 scope.go）。
+	scopeK, _ := s.scopeOf(r, r.Header.Get("X-OpenCode-Directory"), req.Messages)
+	dir := s.sessionDir(r.Header.Get("X-OpenCode-Directory"), req.Messages, scopeK)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
 
 	key := s.conversationKey(r, explicit, firstSystem(req.Messages), req.User, dir, req.Messages)

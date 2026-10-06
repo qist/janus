@@ -648,3 +648,23 @@ func TestRemoveToolsClearsState(t *testing.T) {
 func funcSpec(name, desc string) ToolFunction {
 	return ToolFunction{Name: name, Description: desc}
 }
+
+// 客户端回填的结果要能按顺序带出工具名（供 id 对不上时按名字兜底）。
+func TestOrderedToolResults(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_a", Function: &FunctionCall{Name: "RunCommand"}}}},
+		{Role: "tool", ToolCallID: "call_a", Content: MessageContent{Text: "ok-a"}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_b", Function: &FunctionCall{Name: "Grep"}}}},
+		{Role: "tool", ToolCallID: "call_b", Content: MessageContent{Text: "ok-b"}},
+	}
+	items := orderedToolResults(msgs)
+	if len(items) != 2 {
+		t.Fatalf("len=%d", len(items))
+	}
+	if items[0].Name != "RunCommand" || items[0].Result.Content != "ok-a" {
+		t.Fatalf("item0=%+v", items[0])
+	}
+	if items[1].Name != "Grep" || items[1].Result.Content != "ok-b" {
+		t.Fatalf("item1=%+v", items[1])
+	}
+}

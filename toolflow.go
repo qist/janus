@@ -160,6 +160,37 @@ func resultIDs(m map[string]ToolResult) []string {
 	return out
 }
 
+// toolResultItem 是客户端回填的一条工具结果（带它对应的工具名）。
+type toolResultItem struct {
+	ID     string
+	Name   string // 来自请求里 assistant.tool_calls 的 id→name（可能为空）
+	Result ToolResult
+}
+
+// orderedToolResults 按请求里的出现顺序列出客户端回填的工具结果，并带上工具名。
+// 用于「客户端 tool_call_id 与 janus 下发的对不上」时按名字+顺序兜底匹配。
+func orderedToolResults(msgs []ChatMessage) []toolResultItem {
+	nameOf := map[string]string{}
+	for _, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if tc.ID != "" && tc.Function != nil {
+				nameOf[tc.ID] = tc.Function.Name
+			}
+		}
+	}
+	var out []toolResultItem
+	for _, m := range msgs {
+		if m.Role != "tool" || m.ToolCallID == "" {
+			continue
+		}
+		out = append(out, toolResultItem{ID: m.ToolCallID, Name: nameOf[m.ToolCallID], Result: ToolResult{Content: m.Content.Text}})
+	}
+	return out
+}
+
 // resumeToolCalls 处理「客户端回填工具结果」的后续请求。
 //
 // 关键点：
@@ -173,9 +204,27 @@ func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *
 	dir string, sub *subscription, promptAt int64) {
 
 	// 先订阅，再唤醒 agent
+	// 客户端回填的结果按 tool_call_id 索引；但有些客户端（实测）会用它自己生成的
+	// id，而不是 janus 下发的 call_xxx，按 id 会对不上 —— 兜底按「工具名 + 顺序」匹配。
+	items := orderedToolResults(req.Messages)
+	used := map[string]bool{}
 	answered := 0
 	for _, p := range pending {
 		res, ok := results[p.CallID]
+		if ok {
+			used[p.CallID] = true
+		} else {
+			for _, it := range items {
+				if used[it.ID] || it.Name != p.ToolName {
+					continue
+				}
+				res, ok = it.Result, true
+				used[it.ID] = true
+				s.log.Infof("tool result matched by name (id mismatch): pending=%s tool=%s client_id=%s",
+					p.CallID, p.ToolName, it.ID)
+				break
+			}
+		}
 		if !ok {
 			// 客户端没给这一条的结果：以错误收尾，避免 agent 永久挂住。
 			// 打日志把两边 id 都列出来，方便排查 id 对不上。

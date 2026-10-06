@@ -393,6 +393,7 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 | `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` | `Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile` | 走短等待的工具名（逗号分隔，不区分大小写）。**未列出的工具（含未知新工具）一律走长等待**，避免误杀长任务。设成 `none`/`off`/`-` 表示禁用短等待 |
 | `BRIDGE_MCP_URL` | 空 | 注册给 OpenCode 的 MCP 基址（空=本机回环） |
 | `BRIDGE_MCP_ALLOW` | 空 | 限制内置 MCP 端点 `/mcp/{token}` 的来源（逗号分隔 IP/CIDR）。空=不限制；对外暴露或上游在别机时建议设为上游网段 |
+| `BRIDGE_USER_AGENT` | 空 | 所有**出站**请求的 `User-Agent`。空=内置 `janus/<version> (<os>/<arch>; +https://github.com/qist/janus)`。Go 默认的 `Go-http-client/1.1` 易被网关/风控当脚本拦（403/429）；需要时也可覆盖成浏览器式 UA |
 | `BRIDGE_PERMISSION_REPLY` | `once` | 自动应答权限请求：`once`（仅本次）/ `always`（记住）/ `reject`（拒绝）/ `off`（不干预） |
 
 > **结果回填**：客户端用 `role:"tool"` 消息回填结果，按 `tool_call_id` 对应。部分客户端（实测 Trae）会用**自己生成的** id（而非 janus 下发的 `call_`+hex），桥会按「**精确 id → 工具名 → 顺序**」三级对齐，并且只匹配**当前这一轮**的结果（不回放旧结果）。

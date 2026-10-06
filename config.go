@@ -129,6 +129,11 @@ type Config struct {
 	// 留空 = 不限制（OpenCode 与本桥同机时是回环，默认即可）。
 	MCPAllow string
 
+	// UserAgent 覆盖所有出站请求的 User-Agent（BRIDGE_USER_AGENT）。
+	// 留空 = 用内置默认 `janus/<version> (...)`。Go 默认的 `Go-http-client/1.1`
+	// 容易被网关/风控当脚本拦掉，故默认换成 janus 标识。
+	UserAgent string
+
 	// DBPath 持久化库路径（SQLite，github.com/qist/sqlite）。
 	// 空 / memory / off = 纯内存。默认见 defaultDBPath()。
 	DBPath string
@@ -373,11 +378,15 @@ func LoadConfig() (Config, error) {
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),
+		UserAgent:       loader.str("BRIDGE_USER_AGENT", ""),
 		DBPath:          loader.str("BRIDGE_DB", defaultDBPath()),
 		HistoryMaxBytes: loader.integer("BRIDGE_HISTORY_MAX_BYTES", 1<<20),
 		ConvTTL:         loader.dur("BRIDGE_CONV_TTL", 7*24*time.Hour),
 
 		ConfigFile: cfgPath,
+	}
+	if cfg.UserAgent != "" {
+		outboundUA = cfg.UserAgent
 	}
 	return cfg, nil
 }

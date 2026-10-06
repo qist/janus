@@ -4,6 +4,18 @@
 
 ---
 
+## [v0.3.13] - 2026-10-06
+
+### 新增
+- **统一的出站 User-Agent**：对上游 OpenCode / usage / 图片下载等所有出站请求，默认带
+  `janus/<version> (<os>/<arch>; +https://github.com/qist/janus)`，替代 Go 默认的
+  `Go-http-client/1.1`（不少网关 / CDN / 风控会把它当脚本流量直接拦掉，403/429）。
+  - 新增 **`BRIDGE_USER_AGENT`** 可从外部覆盖（例如需要伪装成浏览器 UA 时）。
+  - 通过一个 `RoundTripper` 统一注入：**未显式设置 UA 的请求自动补，已设置的保留**
+    （附件下载故意用的浏览器式 UA 不受影响）。
+
+---
+
 ## [v0.3.12] - 2026-10-06
 
 ### 变更

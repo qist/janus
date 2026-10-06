@@ -95,7 +95,7 @@ func fromDataURI(raw string) (OCFileAttach, error) {
 // fetchURL 下载远程图片并转成 data URI。
 func fetchURL(ctx context.Context, u string, hc *http.Client) (OCFileAttach, error) {
 	if hc == nil {
-		hc = &http.Client{Timeout: 20 * time.Second}
+		hc = &http.Client{Timeout: 20 * time.Second, Transport: withUserAgent(nil)}
 	}
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -104,7 +104,8 @@ func fetchURL(ctx context.Context, u string, hc *http.Client) (OCFileAttach, err
 	if err != nil {
 		return OCFileAttach{}, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Janus/1.0)")
+	// 图片来自用户给的任意 URL，用浏览器式 UA 兼容只放行浏览器的站点。
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; janus/"+Version+")")
 
 	resp, err := hc.Do(req)
 	if err != nil {

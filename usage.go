@@ -231,7 +231,7 @@ func NewUsageClient(cfg Config, log *Logger) *UsageClient {
 		dbPath: cfg.OpencodeDB,
 		log:    log,
 		ttl:    cfg.UsageTTL,
-		hc:     &http.Client{Timeout: 15 * time.Second},
+		hc:     &http.Client{Timeout: 15 * time.Second, Transport: withUserAgent(nil)},
 	}
 }
 

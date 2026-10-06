@@ -184,10 +184,10 @@ func NewServer(cfg Config, log *Logger) *Server {
 		globalLimit: NewRateLimiter(cfg.RateLimitGlobalRPM, 0),
 		httpc: &http.Client{
 			Timeout: 20 * time.Second,
-			Transport: &http.Transport{
+			Transport: withUserAgent(&http.Transport{
 				MaxIdleConnsPerHost: 8,
 				IdleConnTimeout:     30 * time.Second,
-			},
+			}),
 		},
 		known: map[string]struct{}{},
 		owned: map[string]time.Time{},

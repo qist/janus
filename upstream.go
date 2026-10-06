@@ -33,11 +33,11 @@ func NewUpstream(cfg Config, log *Logger) *Upstream {
 		client: &http.Client{
 			// 不设整体 Timeout：prompt / wait 可能长时间挂起，
 			// 超时由调用方的 context 控制。
-			Transport: &http.Transport{
+			Transport: withUserAgent(&http.Transport{
 				MaxIdleConns:        64,
 				MaxIdleConnsPerHost: 64,
 				IdleConnTimeout:     90 * time.Second,
-			},
+			}),
 		},
 		log: log,
 	}

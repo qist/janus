@@ -227,6 +227,6 @@ func (s *Server) WatchUpstream(ctx context.Context, allowDiscover bool) {
 // probeEndpoint 用给定凭据探一次 /api/info，只做连通性判断。
 func probeEndpoint(ctx context.Context, base, user, pass string) error {
 	u := NewUpstream(Config{Upstream: base, Username: user, Password: pass}, NewLogger("error"))
-	u.client = &http.Client{Timeout: 4 * time.Second}
+	u.client = &http.Client{Timeout: 4 * time.Second, Transport: withUserAgent(nil)}
 	return u.do(ctx, http.MethodGet, "/api/info", nil, nil, nil)
 }

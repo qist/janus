@@ -4,6 +4,28 @@
 
 ---
 
+## [v0.3.8] - 2026-10-06
+
+### 新增
+- **项目级隔离 + 跨设备共享（scope）**：没有客户端会话 id 时，按 `scope = IDE + 项目` 定位会话。
+  - `BRIDGE_SCOPE_KEY=true` 开启：**同 IDE + 同项目 → 同一会话（跨设备共享）**；不同项目 / 不同 IDE → 隔离。
+  - 项目识别取自各客户端 firstUser 里的**权威字段**：
+    | 客户端 | 来源 |
+    |---|---|
+    | Trae | `Primary working directory: <path>` |
+    | CodeBuddy | `Workspace Folder: <path>` |
+    | GitHub Copilot Chat | `following folders: - <path>` |
+    | 兜底 | 消息里最频繁的路径前缀（已排除 `/usr`、`/etc`、`/root/.trae*`、`/root/.vscode*`、`/tmp` 等系统目录） |
+  - `BRIDGE_PROJECT`（显式项目名）/ `BRIDGE_PROJECT_MAP`（设备路径→项目名）可覆盖。
+  - IDE 从 `User-Agent` 归一（`trae` / `codebuddy` / `githubcopilotchat`，**剥掉版本号**，避免升级产生新 scope）。
+- **远程 per-scope 中性工作目录**：客户端项目路径在 janus 主机上**不存在**时（远程 + mode B），会话目录用 `BRIDGE_WORKSPACES_DIR/<scope>`（janus 创建的空目录），而不是回落到 `BRIDGE_DIRECTORY` —— 既避免 agent 误认成那个项目，也避免上游对不存在目录注册 MCP 报 500。
+- **客户端诊断日志**：`client:` 行打印 `ip= / xff= / ua= / dir= / scope= / key= / firstUser=` 等（按签名去重）；`client headers:` 打印全部请求头；Trae 的 `Acl-Token` JWT payload 也解码。
+
+### 变更
+- `BRIDGE_ADDR` 可用 `0.0.0.0:2810` 让其它设备访问（内网自用；公网请加 TLS 反代 + 强 `BRIDGE_API_KEY`）。
+
+---
+
 ## [v0.3.7] - 2026-10-06
 
 ### 修复

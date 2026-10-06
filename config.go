@@ -328,7 +328,7 @@ func LoadConfig() (Config, error) {
 		Project:       loader.str("BRIDGE_PROJECT", ""),
 		ProjectMap:    parseProjectMap(loader.str("BRIDGE_PROJECT_MAP", "")),
 		ScopeKey:      loader.boolean("BRIDGE_SCOPE_KEY", false),
-		WorkspacesDir: loader.str("BRIDGE_WORKSPACES_DIR", "/var/lib/janus/workspaces"),
+		WorkspacesDir: loader.str("BRIDGE_WORKSPACES_DIR", defaultWorkspacesDir()),
 
 		SessionTTL:        loader.dur("BRIDGE_SESSION_TTL", 30*time.Minute),
 		RequestTimeout:    loader.dur("BRIDGE_REQUEST_TIMEOUT", 600*time.Second),
@@ -382,17 +382,7 @@ func LoadConfig() (Config, error) {
 	return cfg, nil
 }
 
-// defaultOpencodeDB 按 XDG 规则定位 OpenCode 的 SQLite 库。
-func defaultOpencodeDB() string {
-	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
-		return filepath.Join(v, "opencode", "opencode.db")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
-}
+// defaultOpencodeDB 见 paths.go（跨平台）。
 
 // defaultProjectDir 未配置 BRIDGE_DIRECTORY 时用桥启动时的当前工作目录，
 // 避免把某个固定路径写死进默认值。

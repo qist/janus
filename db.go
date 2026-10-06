@@ -194,14 +194,4 @@ func (d *dbStore) setSetting(key, value string) {
 	d.db.Save(&dbSetting{Key: key, Value: value, UpdatedAt: time.Now().Unix()})
 }
 
-// defaultDBPath 按 XDG 规则给出默认库路径。
-func defaultDBPath() string {
-	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
-		return filepath.Join(v, "janus", "janus.db")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".local", "share", "janus", "janus.db")
-}
+// defaultDBPath 见 paths.go（跨平台）。

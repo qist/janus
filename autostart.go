@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"time"
 )
 
@@ -96,7 +95,7 @@ func SpawnOpenCode(ctx context.Context, log *Logger, cfg *Config) (*Endpoint, er
 	cmd.Env = env
 	cmd.Stdout = nil // /dev/null
 	cmd.Stderr = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	detachProcess(cmd)
 
 	log.Infof("starting opencode: %s serve --hostname 127.0.0.1 --port %d", filepath.Base(path), port)
 	if err := cmd.Start(); err != nil {

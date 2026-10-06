@@ -63,13 +63,30 @@ make test           # 单元测试
 make test-race      # 竞态检测（需本机 C 工具链）
 make vet            # go vet
 make dist-linux     # Linux 全架构发布包：amd64 / arm64 / arm / 386
+make dist-darwin    # macOS：amd64（Intel）/ arm64（Apple Silicon）
+make dist-windows   # Windows：amd64 / arm64（zip）
+make dist           # 全部平台（linux + darwin + windows）
 ```
 
 - 版本号来源：`make VERSION=...` > `git describe --tags` > `VERSION` 文件 > `dev`
-- Linux 发布包为**纯静态**二进制（`CGO_ENABLED=0`），产物在 `dist/janus_<version>_linux_<arch>.tar.gz`
-- 推 `v*` tag 会触发 GitHub Actions（`.github/workflows/release.yml`）自动出 Release + 全架构附件；
+- 发布包为**纯静态**二进制（`CGO_ENABLED=0`），产物在 `dist/janus_<version>_<os>_<arch>.tar.gz`
+  （Windows 为 `.zip`）；包里除二进制外还附带 **`janus.env.example`**（配置模板）与 **`README.md`**
+- 推 `v*` tag 会触发 GitHub Actions（`.github/workflows/release.yml`）自动出 Release + 全平台附件；
   普通 push / PR 走 `.github/workflows/ci.yml`（vet + test + **test-race** + build + `--version`）
 - **Docker / systemd 部署**：见 `deploy/`（`Dockerfile` 基于 distroless 非 root 静态镜像；`deploy/janus.service` 为加固后的 systemd 单元）
+
+### 跨平台说明（Linux / macOS / Windows）
+
+| 平台 | 产物 | 默认数据目录（DB / workspaces） |
+|---|---|---|
+| Linux | `janus_<v>_linux_<arch>.tar.gz` | `$XDG_DATA_HOME/janus` 或 `~/.local/share/janus`；workspaces 默认 `/var/lib/janus/workspaces` |
+| macOS | `janus_<v>_darwin_<arch>.tar.gz` | 同上（XDG 约定） |
+| Windows | `janus_<v>_windows_<arch>.zip` | `%LOCALAPPDATA%\janus`（workspaces 在其下） |
+
+- 以上默认值只在**未显式配置**时生效；设了 `BRIDGE_DB` / `BRIDGE_WORKSPACES_DIR` / `OPENCODE_DB` 一律以配置为准。
+- 上游 OpenCode 需要单独安装（`opencode` 在 PATH 上即可，Windows 会按 `opencode.exe` 查找）。
+- Windows 无 systemd：直接运行 `janus.exe`，配置文件用 `JANUS_CONFIG=C:\path\janus.env` 指定（或放 `janus.env` 到工作目录）。
+- `/v1/usage` 依赖 `sqlite3` 命令行（可选功能，没装则该端点不可用）。
 
 ### 客户端配置
 

@@ -19,11 +19,13 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build linux (amd64/arm64/arm/386)
-        run: make dist-linux VERSION="${GITHUB_REF_NAME}"
+      - name: Build linux + darwin + windows
+        run: make dist VERSION="${GITHUB_REF_NAME}"
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
           generate_release_notes: true

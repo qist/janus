@@ -4,6 +4,23 @@
 
 ---
 
+## [v0.3.11] - 2026-10-06
+
+### 新增
+- **跨平台发布**：新增 **macOS**（`darwin/amd64` + `darwin/arm64`）与 **Windows**（`windows/amd64` + `windows/arm64`）构建。
+  - 新增 `make dist-darwin` / `make dist-windows` / `make dist`（全部平台）；CI 随 `v*` tag 自动出全平台附件。
+  - 发布包除二进制外仍附带 `janus.env.example`（配置模板）与 `README.md`；Windows 用 `.zip`。
+
+### 修复
+- **Windows 无法编译**：`autostart.go` 里的 `syscall.SysProcAttr{Setsid: true}` 是 Unix-only，改为 build tag 拆分
+  （`procattr_unix.go` / `procattr_windows.go`；Windows 用 `CREATE_NEW_PROCESS_GROUP` 达到同样的"脱离"效果）。
+
+### 变更
+- **跨平台默认路径**：Windows 默认数据目录改为 `%LOCALAPPDATA%\janus`（`BRIDGE_DB`/`BRIDGE_WORKSPACES_DIR`/`OPENCODE_DB`
+  未配置时），Linux/macOS 保持原有 XDG 约定不变；显式配置一律优先。
+
+---
+
 ## [v0.3.10] - 2026-10-06
 
 ### 新增

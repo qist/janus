@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +88,21 @@ func (s *Server) logClientInfo(r *http.Request, user, dir, key string, msgs []Ch
 		r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"),
 		r.Header.Get("X-OpenCode-Directory"), r.Header.Get("X-OpenCode-Agent"), ccSession,
 		truncate(firstUserTitle(msgs, 60), 80), key, scopeReadable)
+
+	// 把所有请求头也打一遍，便于找 workspace / 会话 id 藏在哪个头里。
+	keys := make([]string, 0, len(r.Header))
+	for k := range r.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var hb strings.Builder
+	for _, k := range keys {
+		hb.WriteString(k)
+		hb.WriteByte('=')
+		hb.WriteString(truncate(r.Header.Get(k), 80))
+		hb.WriteByte(' ')
+	}
+	s.log.Infof("client headers: %s", truncate(hb.String(), 1200))
 }
 
 // conversationKey 计算会话键：显式会话头 > scope(开启时) > 指纹(system+user+dir)。

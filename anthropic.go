@@ -439,6 +439,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		r.Header.Get("x-claude-code-session-id"), r.Header.Get("X-Claude-Code-Session-Id"))
 
 	key := ConversationKey(explicit, systemText, "", dir)
+	s.logClientInfo(r, "", dir, key, inputMsgs)
 	conv := s.store.Acquire(key, inputMsgs)
 	defer s.store.Release(conv)
 

@@ -57,6 +57,35 @@ type Server struct {
 	// 非空时优先于 cfg.DefaultModel；空则回落 cfg.DefaultModel / 上游默认。
 	defaultMu    sync.RWMutex
 	defaultModel string
+
+	// clientSeen 用于「客户端诊断日志」去重：每个不同的客户端签名只打一次，
+	// 方便看不同 IDE / 设备到底发了什么（user / 头 / 目录 / 首条 user）。
+	clientMu   sync.Mutex
+	clientSeen map[string]bool
+}
+
+// logClientInfo 打印一次客户端信息（按签名去重）。用于排查跨设备/跨 IDE 的
+// 会话定位（user、workspace 头、首条 user、计算出的 key）。
+func (s *Server) logClientInfo(r *http.Request, user, dir, key string, msgs []ChatMessage) {
+	ccSession := firstNonEmpty(r.Header.Get("x-claude-code-session-id"), r.Header.Get("X-Claude-Code-Session-Id"))
+	sig := user + "\x00" + dir + "\x00" + r.UserAgent() + "\x00" +
+		r.Header.Get("X-Session-ID") + "\x00" + r.Header.Get("X-OpenCode-Session") + "\x00" + ccSession
+
+	s.clientMu.Lock()
+	if s.clientSeen == nil {
+		s.clientSeen = map[string]bool{}
+	}
+	seen := s.clientSeen[sig]
+	s.clientSeen[sig] = true
+	s.clientMu.Unlock()
+	if seen {
+		return
+	}
+	s.log.Infof("client: user=%q dir=%q ua=%q x-session=%q x-oc-session=%q x-oc-dir=%q x-oc-agent=%q cc-session=%q firstUser=%q key=%s",
+		user, dir, r.UserAgent(),
+		r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"),
+		r.Header.Get("X-OpenCode-Directory"), r.Header.Get("X-OpenCode-Agent"), ccSession,
+		truncate(firstUserTitle(msgs, 60), 80), key)
 }
 
 // runtimeDefaultModel 返回 web 里选定的默认模型（可能为空）。

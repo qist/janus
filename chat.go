@@ -728,6 +728,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
 
 	key := ConversationKey(explicit, firstSystem(req.Messages), req.User, dir)
+	s.logClientInfo(r, req.User, dir, key, req.Messages)
 	conv := s.store.Acquire(key, req.Messages)
 	defer s.store.Release(conv)
 

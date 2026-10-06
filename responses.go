@@ -624,6 +624,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conv := s.store.AcquireKey(convKey)
+	s.logClientInfo(r, "", dir, convKey, nil)
 	defer s.store.Release(conv)
 
 	// 上一轮被中止过：重开干净会话。

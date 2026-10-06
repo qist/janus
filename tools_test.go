@@ -649,17 +649,24 @@ func funcSpec(name, desc string) ToolFunction {
 	return ToolFunction{Name: name, Description: desc}
 }
 
-// 客户端回填的结果要能按顺序带出工具名（供 id 对不上时按名字兜底）。
+// 客户端回填的结果要能按顺序带出工具名（供 id 对不上时按名字兜底）；
+// 且只应包含「当前这一轮」的结果，不能命中历史里的旧结果。
 func TestOrderedToolResults(t *testing.T) {
 	msgs := []ChatMessage{
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_a", Function: &FunctionCall{Name: "RunCommand"}}}},
+		// 旧的一轮（同名 RunCommand，绝不能被匹配到）
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "old_1", Function: &FunctionCall{Name: "RunCommand"}}}},
+		{Role: "tool", ToolCallID: "old_1", Content: MessageContent{Text: "OLD"}},
+		// 当前这一轮
+		{Role: "assistant", ToolCalls: []ToolCall{
+			{ID: "call_a", Function: &FunctionCall{Name: "RunCommand"}},
+			{ID: "call_b", Function: &FunctionCall{Name: "Grep"}},
+		}},
 		{Role: "tool", ToolCallID: "call_a", Content: MessageContent{Text: "ok-a"}},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_b", Function: &FunctionCall{Name: "Grep"}}}},
 		{Role: "tool", ToolCallID: "call_b", Content: MessageContent{Text: "ok-b"}},
 	}
 	items := orderedToolResults(msgs)
 	if len(items) != 2 {
-		t.Fatalf("len=%d", len(items))
+		t.Fatalf("len=%d（应只含当前一轮）", len(items))
 	}
 	if items[0].Name != "RunCommand" || items[0].Result.Content != "ok-a" {
 		t.Fatalf("item0=%+v", items[0])

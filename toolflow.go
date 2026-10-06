@@ -167,22 +167,29 @@ type toolResultItem struct {
 	Result ToolResult
 }
 
-// orderedToolResults 按请求里的出现顺序列出客户端回填的工具结果，并带上工具名。
-// 用于「客户端 tool_call_id 与 janus 下发的对不上」时按名字+顺序兜底匹配。
+// orderedToolResults 列出「当前这一轮」客户端回填的工具结果（带工具名）。
+//
+// 只取最后一条带 tool_calls 的 assistant 之后的结果 —— 否则整段历史里的旧结果
+// 会被同名匹配命中，返回上一轮的缓存内容。用于客户端 tool_call_id 与 janus 对不上
+// 时按「工具名 + 顺序」兜底。
 func orderedToolResults(msgs []ChatMessage) []toolResultItem {
-	nameOf := map[string]string{}
-	for _, m := range msgs {
-		if m.Role != "assistant" {
-			continue
+	last := -1
+	for i, m := range msgs {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			last = i
 		}
-		for _, tc := range m.ToolCalls {
-			if tc.ID != "" && tc.Function != nil {
-				nameOf[tc.ID] = tc.Function.Name
-			}
+	}
+	if last < 0 {
+		return nil
+	}
+	nameOf := map[string]string{}
+	for _, tc := range msgs[last].ToolCalls {
+		if tc.ID != "" && tc.Function != nil {
+			nameOf[tc.ID] = tc.Function.Name
 		}
 	}
 	var out []toolResultItem
-	for _, m := range msgs {
+	for _, m := range msgs[last+1:] {
 		if m.Role != "tool" || m.ToolCallID == "" {
 			continue
 		}

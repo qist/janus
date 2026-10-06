@@ -608,7 +608,7 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	logs, err := s.usage.RequestLogs(ctx, since, limit)

@@ -214,11 +214,14 @@ type UsageClient struct {
 	cached   *UsageReport
 	cachedAt time.Time
 
-	// request-logs 短缓存：UI 自动刷新/重复调用时避免每次都打 console（可能被限速）。
-	reqMu       sync.Mutex
-	reqItems    []RequestLog
-	reqLimit    int
-	reqCachedAt time.Time
+	// request-logs 短缓存 + 失败负缓存：UI 自动刷新/重复调用时避免每次都打
+	// console（该接口可能被限速或超时，连不上时更要避免每次卡满超时）。
+	reqMu    sync.Mutex
+	reqItems []RequestLog
+	reqLimit int
+	reqAt    time.Time // 上次成功时间
+	reqErr   error     // 上次失败原因
+	reqErrAt time.Time // 上次失败时间（负缓存窗口内不再重试）
 }
 
 func NewUsageClient(cfg Config, log *Logger) *UsageClient {
@@ -525,10 +528,14 @@ type requestLogRaw struct {
 	} `json:"finish"`
 }
 
-// requestLogsTTL 是 /v1/requests 的短缓存时长：避免 UI 自动刷新或重复调用
-// 每次都打 console（该接口可能被上游限速）。窗口参数变化很快也不影响，
-// 因为只按 limit 命中，最多返回 TTL 内的旧数据。
-const requestLogsTTL = 5 * time.Second
+// request-logs 的两级缓存：
+//   - 成功：requestLogsTTL 内复用，不打上游（窗口参数变化很快也命中，只按 limit 缓存）；
+//   - 失败：requestLogsErrTTL 内不重试——该接口超时/被限速时，避免 UI 每次刷新都卡满超时；
+//     若已有旧数据就返回旧数据（宁旧不卡）。
+const (
+	requestLogsTTL    = 5 * time.Second
+	requestLogsErrTTL = 60 * time.Second
+)
 
 // RequestLogs 拉取最近的上游请求日志。sinceMs<=0 时默认看最近 6 小时；limit 上限 100。
 func (c *UsageClient) RequestLogs(ctx context.Context, sinceMs int64, limit int) ([]RequestLog, error) {
@@ -538,18 +545,37 @@ func (c *UsageClient) RequestLogs(ctx context.Context, sinceMs int64, limit int)
 	if limit > 100 {
 		limit = 100
 	}
-	// 短缓存命中：直接复用，不打上游。
+
 	c.reqMu.Lock()
-	if c.reqItems != nil && c.reqLimit == limit && time.Since(c.reqCachedAt) < requestLogsTTL {
+	// 成功缓存
+	if c.reqItems != nil && c.reqLimit == limit && time.Since(c.reqAt) < requestLogsTTL {
 		items := c.reqItems
 		c.reqMu.Unlock()
 		return items, nil
 	}
+	// 失败负缓存：窗口内不重试；有旧数据就给旧的，没有就快速返回上次错误。
+	if !c.reqErrAt.IsZero() && time.Since(c.reqErrAt) < requestLogsErrTTL {
+		if c.reqItems != nil && c.reqLimit == limit {
+			items := c.reqItems
+			c.reqMu.Unlock()
+			return items, nil
+		}
+		err := c.reqErr
+		c.reqMu.Unlock()
+		return nil, err
+	}
 	c.reqMu.Unlock()
+
+	fail := func(err error) ([]RequestLog, error) {
+		c.reqMu.Lock()
+		c.reqErr, c.reqErrAt = err, time.Now()
+		c.reqMu.Unlock()
+		return nil, err
+	}
 
 	cred, err := readCredential(c.dbPath)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	if sinceMs <= 0 {
 		sinceMs = time.Now().Add(-6 * time.Hour).UnixMilli()
@@ -560,7 +586,7 @@ func (c *UsageClient) RequestLogs(ctx context.Context, sinceMs int64, limit int)
 		Items []requestLogRaw `json:"items"`
 	}
 	if err := c.get(ctx, cred, path, &wrap); err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	out := make([]RequestLog, 0, len(wrap.Items))
@@ -569,7 +595,8 @@ func (c *UsageClient) RequestLogs(ctx context.Context, sinceMs int64, limit int)
 	}
 
 	c.reqMu.Lock()
-	c.reqItems, c.reqLimit, c.reqCachedAt = out, limit, time.Now()
+	c.reqItems, c.reqLimit, c.reqAt = out, limit, time.Now()
+	c.reqErr, c.reqErrAt = nil, time.Time{}
 	c.reqMu.Unlock()
 	return out, nil
 }

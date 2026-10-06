@@ -529,6 +529,29 @@ curl -s http://127.0.0.1:2810/v1/models/opencode/claude-sonnet-5-5 -H "Authoriza
 > 想看上游原始数据：`GET <upstream>/api/model?directory=<dir>`（需上游 Basic 认证）。
 > 桥的详情接口是它的 OpenAI 化视图。
 
+### 虚拟模型与默认模型选择（`janus`）
+
+`/v1/models` 里有两个**虚拟模型**，客户端下拉框里可直接选：
+
+| 虚拟模型 | 含义 |
+|---|---|
+| **`janus`** | **面板里选定的默认模型**（`/ui` →「模型」→ 设为 janus）。**推荐 IDE 填这个** |
+| `default` | 上游 / `BRIDGE_DEFAULT_MODEL` 的默认（旧语义） |
+
+**换模型不用改 env、不用改客户端**：
+
+1. 打开 `/ui` →「模型」标签页；
+2. 找到目标模型行，点「**设为 janus**」（或直接在该行「思考档位」点一个档位）；
+3. IDE 里模型名**固定填 `janus`**。
+
+解析优先级：**面板选择（存 DB） > `BRIDGE_DEFAULT_MODEL` > 上游默认**。
+
+- **透传仍保留**：IDE 填真实 `provider/id`（如 `opencode-go/glm-5.3-flash`）就原样使用，不受面板设置影响。
+- **档位**：面板「思考档位」按钮组选的档位会随默认模型一起下发（存成 `default_model` 的 `:variant` 后缀，如 `opencode-go/glm-5.3-flash:high`）——适合**无法传 `reasoning_effort` 的自定义模型客户端**。
+- **切换时机**：面板改完，**下一条请求**就原地切换（`POST /api/session/{id}/model`），**不重开会话、上下文保留**，无需等会话结束。
+
+接口：`GET /v1/settings` 读；`POST /v1/settings {"default_model":"provider/id[:variant]"}` 写（空字符串=清除，回落配置）。
+
 ## 核心机制
 
 ### Responses API（`/v1/responses`）

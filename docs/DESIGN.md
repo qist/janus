@@ -833,6 +833,22 @@ session**，残留的旧 server 会被 agent 调用并得到
 `bridge: this tool server is stale (session was reset); no tools available`。
 以前只靠 janitor 周期兜底，中间有空窗；现在重置即删，janitor 仍兜底。
 
+### 5.18 运行时默认模型与虚拟模型 `janus`
+
+`/v1/models` 暴露两个虚拟模型，客户端可直接选：
+
+| 虚拟模型 | 解析 |
+|---|---|
+| **`janus`** | 面板里选定的默认模型 → 回落 `BRIDGE_DEFAULT_MODEL` → 上游默认 |
+| `default` | 上游 / `BRIDGE_DEFAULT_MODEL` 默认（旧语义） |
+
+- **存储**：运行时选择存在 SQLite 的 `settings` 表（key=`default_model`，值 `provider/id[:variant]`）；`Server` 内存里也持一份（`runtimeDefaultModel`）。
+- **接口**：`GET /v1/settings` 读（附带只读的 `configured_default_model`）；`POST /v1/settings {"default_model":"…"}` 写（空=清除；写前用 `ResolveModel` 校验存在）。
+- **解析**：`resolveModel` 里 `janus` → `resolveJanusModel`（运行时 → 配置 → 上游）；`default`/`auto`/空 → `resolveDefaultModel`（配置 → 上游）。真实 `provider/id` 走透传。
+- **档位**：面板选的思考档位拼进 `default_model` 的 `:variant` 后缀（`ResolveModel` 已支持），随默认模型一起生效——让无法传 `reasoning_effort` 的客户端也能固定档位。
+- **切换时机**：`ensureSession` 每次请求比较解析出的 `ref` 与 `conv.model`，不同即 `POST /api/session/{id}/model` **原地切换**（不重开会话、上下文保留）。所以面板改完，**下一条请求**即生效，无需新会话。
+- **面板**：`/ui`「模型」页每行「设为 janus」+「思考档位」按钮组（点选即设、高亮当前）；当前默认行不显示「设为 janus」。
+
 ## 6. 配置
 
 配置来源优先级：**真实环境变量 > 配置文件 > 内置默认值**。

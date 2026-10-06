@@ -160,14 +160,24 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		// 防串会话：OpenCode 会把同 location 下所有 MCP server 暴露给每个
 		// session，模型可能引用到别的会话的 server。目标会话没有在飞请求时
 		// 立即报错，别挂到 ToolCallWait（5 分钟）超时。
-		if !sess.waitForWaiter(3 * time.Second) {
-			// 限流：同一会话的 idle 拒绝最多每 60s 打一条（否则孤儿 agent 会刷屏）。
+		if !sess.waitForWaiter(s.cfg.ToolOrphanWait) {
+			// 目标会话没有在飞请求：等够 ToolOrphanWait 还没人接手 → 判孤儿
+			// （客户端在两轮之间离开时就是这样：agent 还在调工具，但没人会回结果）。
+			// 拒绝 + 中断该会话上游，从源头掐掉；会话本就没在跑时中断是无害的。
 			if ok, suppressed := sess.shouldLogReject(60 * time.Second); ok {
 				if suppressed > 0 {
 					s.log.Warnf("mcp tool call for idle conversation: %s (%s); rejecting (suppressed %d)",
 						original, sess.key, suppressed)
 				} else {
 					s.log.Warnf("mcp tool call for idle conversation: %s (%s); rejecting", original, sess.key)
+				}
+				if sid := sess.getSessionID(); sid != "" {
+					s.log.Warnf("idle conversation tool call: interrupting upstream %s (%s) to stop orphaned agent", sid, sess.key)
+					go func() {
+						iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+						defer c()
+						_ = s.up.Interrupt(iCtx, sid)
+					}()
 				}
 			}
 			mcpReply(w, req.ID, map[string]any{

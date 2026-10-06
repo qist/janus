@@ -384,6 +384,9 @@ func (c *Config) applyDefaults() {
 	if c.ToolCallWaitFast <= 0 || c.ToolCallWaitFast >= c.ToolCallWait {
 		c.ToolCallWaitFast = 0
 	}
+	if c.ToolOrphanWait <= 0 {
+		c.ToolOrphanWait = 30 * time.Second
+	}
 	if c.PermissionReply == "" {
 		c.PermissionReply = "once"
 	}

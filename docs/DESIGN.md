@@ -552,6 +552,8 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 （实测约 40 分钟 600+ 条）。两道兜底：
 
 - 工具调用**超时**（客户端在 `BRIDGE_TOOL_CALL_WAIT` 内没回结果）→ **中断该会话的上游 agent**；
+- 守卫宽限 `BRIDGE_TOOL_ORPHAN_WAIT`（默认 `30s`）：idle 会话等这么久仍无人接手 → 判孤儿 →
+  拒绝 + **中断该会话上游**（从源头结束，不再让 agent 一直重试）；
 - 守卫的 idle 拒绝日志**限流**（同一会话每 60s 最多一条，附被抑制条数）。
 
 **等待时长分两档**（`ToolBridge.waitFor`）：只读/编辑类工具（`Grep`/`Read`/`Glob`/`LS`/
@@ -955,6 +957,7 @@ $EDITOR janus.env
 | `BRIDGE_TOOL_CALLING` | `true` | 是否把客户端 `tools` 经内置 MCP 暴露给 agent（§5.7） |
 | `BRIDGE_TOOL_CALL_WAIT` | `5m` | **执行类**工具挂起等待上限 |
 | `BRIDGE_TOOL_CALL_WAIT_FAST` | `90s` | **只读/编辑类**工具短等待（§5.7） |
+| `BRIDGE_TOOL_ORPHAN_WAIT` | `30s` | idle 会话的守卫宽限；超时判孤儿 → 拒绝 + 中断该会话上游 |
 | `BRIDGE_TOOL_ANNOTATIONS` | `true` | 是否注入 `<opencode-tool>` 注释 |
 | `BRIDGE_PERMISSION_REPLY` | `once` | 自动应答 OpenCode 权限请求：`once|always|reject|off` |
 | `BRIDGE_MAX_CONVERSATIONS` | `256` | 全局会话上限 |

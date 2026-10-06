@@ -120,7 +120,10 @@ type Config struct {
 	// ToolFastTools 是走短等待的工具名集合（小写，来自 BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS）。
 	// 只列已知的只读/编辑类；未知工具默认走长等待，避免误杀长任务。
 	ToolFastTools map[string]bool
-	MCPPublicURL  string // 注册给 OpenCode 的 MCP 基址；空=自动用本机回环
+	// ToolOrphanWait 是「目标会话没有在飞请求」时的宽限：等这么久还没人接手，
+	// 就判定为孤儿 agent（客户端已离开、agent 还在调工具）→ 拒绝并中断其上游会话。
+	ToolOrphanWait time.Duration
+	MCPPublicURL   string // 注册给 OpenCode 的 MCP 基址；空=自动用本机回环
 
 	// PermissionReply 自动应答 OpenCode 的权限请求（agent 访问会话目录之外时
 	// OpenCode 会先 ask；headless 桥无人应答就会一直挂住，直到客户端超时）。
@@ -401,6 +404,7 @@ func LoadConfig() (Config, error) {
 		ToolCallWait:     loader.dur("BRIDGE_TOOL_CALL_WAIT", 5*time.Minute),
 		ToolCallWaitFast: loader.dur("BRIDGE_TOOL_CALL_WAIT_FAST", 90*time.Second),
 		ToolFastTools:    parseToolSet(loader.str("BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS", defaultFastTools)),
+		ToolOrphanWait:   loader.dur("BRIDGE_TOOL_ORPHAN_WAIT", 30*time.Second),
 		MCPPublicURL:     strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),

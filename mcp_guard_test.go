@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// 目标会话没有在飞请求时，MCP tools/call 必须立刻被拒，而不是挂到 ToolCallWait。
+// 目标会话没有在飞请求时，MCP tools/call 必须在 BRIDGE_TOOL_ORPHAN_WAIT 后被拒，
+// 而不是挂到 ToolCallWait（5 分钟）。
 func TestHandleMCPRejectsIdleConversation(t *testing.T) {
-	s := NewServer(Config{APIKey: "x"}, NewLogger("error"))
+	s := NewServer(Config{APIKey: "x", ToolOrphanWait: 50 * time.Millisecond}, NewLogger("error"))
 	sess := s.tools.Register("f:idle", []ToolSpec{{Type: "function", Function: ToolFunction{Name: "read_file"}}})
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` +

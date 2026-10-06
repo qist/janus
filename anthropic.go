@@ -432,8 +432,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	s.log.Debugf("anthropic request: client model=%q → resolved=%s (anthropic-version=%q)",
 		req.Model, ref.String(), r.Header.Get("anthropic-version"))
 
-	// 客户端不给项目目录时（如 Trae），从消息里抽项目根，避免所有项目共用 BRIDGE_DIRECTORY。
-	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), extractProjectRoot(inputMsgs), s.cfg.Directory)
+	// 远程部署时客户端项目路径在 janus 主机上不存在，会话目录回落到 BRIDGE_DIRECTORY。
+	dir := s.sessionDir(r.Header.Get("X-OpenCode-Directory"), inputMsgs)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
 	// Claude Code 会带 x-claude-code-session-id：直接当会话锚点，天然隔离不同 CC 会话
 	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"),

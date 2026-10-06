@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -212,4 +213,22 @@ func (s *Server) scopeOf(r *http.Request, clientDir string, msgs []ChatMessage) 
 	ide := normalizeIDE(r.UserAgent())
 	project := s.projectIdentity(clientDir, msgs)
 	return scopeKey(ide, project), ide + "/" + project
+}
+
+// sessionDir 决定上游 OpenCode 会话的工作目录：
+// 客户端 header > 从消息抽的项目根（**仅当该目录在 janus 主机上真实存在**）> BRIDGE_DIRECTORY。
+//
+// 为什么要存在性校验：Trae/Copilot 的项目路径是「客户端侧」的；远程 + mode B 时
+// janus 主机上未必有该目录，上游对不存在的目录注册 MCP 会 500，整轮直接失败。
+// 会话目录回落到 BRIDGE_DIRECTORY 后，隔离仍由 scope（key）保证。
+func (s *Server) sessionDir(headerDir string, msgs []ChatMessage) string {
+	if d := strings.TrimSpace(headerDir); d != "" {
+		return d
+	}
+	if p := extractProjectRoot(msgs); p != "" {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			return p
+		}
+	}
+	return s.cfg.Directory
 }

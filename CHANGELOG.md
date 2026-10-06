@@ -4,6 +4,19 @@
 
 ---
 
+## [v0.3.12] - 2026-10-06
+
+### 变更
+- **macOS 默认数据目录**改为 `~/Library/Application Support/janus`（DB 与 workspaces 都在其下），更符合 macOS 惯例；
+  Linux 保持 XDG（`~/.local/share/janus`）不变，Windows 保持 `%LOCALAPPDATA%\janus`。
+  `OPENCODE_DB`（上游 OpenCode 的库）仍按 OpenCode 自身的 XDG 约定定位，不套用 macOS 目录。
+
+### 文档
+- README 新增「在 Windows 上运行」：解压/装 OpenCode/配置 `janus.env`/两种启动方式（含配置查找顺序）、
+  开机自启用「任务计划程序」或 `nssm`。
+
+---
+
 ## [v0.3.11] - 2026-10-06
 
 ### 新增

@@ -80,13 +80,36 @@ make dist           # 全部平台（linux + darwin + windows）
 | 平台 | 产物 | 默认数据目录（DB / workspaces） |
 |---|---|---|
 | Linux | `janus_<v>_linux_<arch>.tar.gz` | `$XDG_DATA_HOME/janus` 或 `~/.local/share/janus`；workspaces 默认 `/var/lib/janus/workspaces` |
-| macOS | `janus_<v>_darwin_<arch>.tar.gz` | 同上（XDG 约定） |
+| macOS | `janus_<v>_darwin_<arch>.tar.gz` | `~/Library/Application Support/janus`（workspaces 在其下） |
 | Windows | `janus_<v>_windows_<arch>.zip` | `%LOCALAPPDATA%\janus`（workspaces 在其下） |
 
 - 以上默认值只在**未显式配置**时生效；设了 `BRIDGE_DB` / `BRIDGE_WORKSPACES_DIR` / `OPENCODE_DB` 一律以配置为准。
+- `OPENCODE_DB`（上游 OpenCode 的库）仍按 OpenCode 自己的 XDG 约定找（macOS 上也是 `~/.local/share/opencode`），未配置 `sqlite3` 时 `/v1/usage` 不可用（可选功能）。
 - 上游 OpenCode 需要单独安装（`opencode` 在 PATH 上即可，Windows 会按 `opencode.exe` 查找）。
-- Windows 无 systemd：直接运行 `janus.exe`，配置文件用 `JANUS_CONFIG=C:\path\janus.env` 指定（或放 `janus.env` 到工作目录）。
-- `/v1/usage` 依赖 `sqlite3` 命令行（可选功能，没装则该端点不可用）。
+
+### 在 Windows 上运行
+
+1. 解压 `janus_v<版本>_windows_<arch>.zip`（得到 `janus_windows_<arch>.exe`）。
+2. 装上游 OpenCode（`opencode.exe` 放进 PATH 即可；janus 会自动发现/拉起它）。
+3. 把 `janus.env.example` 复制成 `janus.env`，至少设：
+   ```ini
+   BRIDGE_ADDR=127.0.0.1:2810
+   BRIDGE_API_KEY=sk-change-me
+   ```
+4. 运行（两种任选）：
+   ```bat
+   :: A) 配置文件放在 exe 同目录或当前目录，直接运行即可
+   janus_windows_amd64.exe
+
+   :: B) 显式指定配置文件
+   set JANUS_CONFIG=C:\path\to\janus.env
+   janus_windows_amd64.exe
+   ```
+   配置查找顺序：`JANUS_CONFIG` / `BRIDGE_CONFIG` > exe 同目录 `janus.env` > 当前目录 `janus.env`。
+5. 客户端 Base URL 填 `http://127.0.0.1:2810/v1`，Key 填 `BRIDGE_API_KEY`。
+
+> Windows 无 systemd；要开机自启可用「任务计划程序」或 `nssm`。
+> `/v1/usage` 需要 `sqlite3.exe` 在 PATH（可选）。
 
 ### 客户端配置
 

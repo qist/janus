@@ -1013,12 +1013,20 @@ func isJanusAlias(raw string) bool {
 // resolveJanusModel 解析 janus 虚拟模型：
 // web 运行时选择 > BRIDGE_DEFAULT_MODEL > 上游默认。
 func (s *Server) resolveJanusModel(ctx context.Context, list []OCModel) (OCModelRef, error) {
-	if runtime := strings.TrimSpace(s.runtimeDefaultModel()); runtime != "" {
-		if ref, err := ResolveModel(runtime, list); err == nil {
+	runtime := strings.TrimSpace(s.runtimeDefaultModel())
+	if runtime != "" {
+		ref, err := ResolveModel(runtime, list)
+		if err == nil {
 			return ref, nil
-		} else {
-			s.log.Warnf("janus default model %q unresolvable, falling back: %v", runtime, err)
 		}
+		// 启动瞬间模型列表可能为空/不完整：强制刷新一次再试，避免落到上游默认
+		//（常是免费档模型，经 API 会 403 "free tier"）。
+		if fresh, ferr := s.models.Get(ctx, s.up, s.cfg.Directory, true); ferr == nil {
+			if ref2, err2 := ResolveModel(runtime, fresh); err2 == nil {
+				return ref2, nil
+			}
+		}
+		s.log.Warnf("janus default model %q unresolvable, falling back: %v", runtime, err)
 	}
 	return s.resolveDefaultModel(ctx, list)
 }

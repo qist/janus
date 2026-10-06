@@ -210,31 +210,64 @@ func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *
 	pending []*pendingCall, results map[string]ToolResult,
 	dir string, sub *subscription, promptAt int64) {
 
-	// 先订阅，再唤醒 agent
-	// 客户端回填的结果按 tool_call_id 索引；但有些客户端（实测）会用它自己生成的
-	// id，而不是 janus 下发的 call_xxx，按 id 会对不上 —— 兜底按「工具名 + 顺序」匹配。
+	// 先订阅，再唤醒 agent。
+	// 客户端回填的结果按 tool_call_id 索引；但有些客户端（实测）会用它自己生成的 id，
+	// 而不是 janus 下发的 call_xxx —— 按「① 精确 id → ② 工具名 → ③ 顺序」三级对齐，
+	// 建立 pending ↔ 客户端结果的对应关系。
 	items := orderedToolResults(req.Messages)
-	used := map[string]bool{}
-	answered := 0
+	taken := make([]bool, len(items))
+	assigned := map[string]ToolResult{} // bridgeID -> 结果
+
+	// ① 精确 id
 	for _, p := range pending {
-		res, ok := results[p.CallID]
-		if ok {
-			used[p.CallID] = true
-		} else {
-			for _, it := range items {
-				if used[it.ID] || it.Name != p.ToolName {
-					continue
+		if r, ok := results[p.CallID]; ok {
+			assigned[p.CallID] = r
+			for i := range items {
+				if !taken[i] && items[i].ID == p.CallID {
+					taken[i] = true
+					break
 				}
-				res, ok = it.Result, true
-				used[it.ID] = true
-				s.log.Infof("tool result matched by name (id mismatch): pending=%s tool=%s client_id=%s",
-					p.CallID, p.ToolName, it.ID)
-				break
 			}
 		}
+	}
+	// ② 工具名
+	for _, p := range pending {
+		if _, ok := assigned[p.CallID]; ok {
+			continue
+		}
+		for i := range items {
+			if taken[i] || items[i].Name != p.ToolName {
+				continue
+			}
+			assigned[p.CallID] = items[i].Result
+			taken[i] = true
+			s.log.Infof("tool result matched by name (id mismatch): pending=%s tool=%s client_id=%s",
+				p.CallID, p.ToolName, items[i].ID)
+			break
+		}
+	}
+	// ③ 顺序兜底（名字也拿不到时）
+	for _, p := range pending {
+		if _, ok := assigned[p.CallID]; ok {
+			continue
+		}
+		for i := range items {
+			if taken[i] {
+				continue
+			}
+			assigned[p.CallID] = items[i].Result
+			taken[i] = true
+			s.log.Infof("tool result matched by order (id+name mismatch): pending=%s tool=%s client_id=%s",
+				p.CallID, p.ToolName, items[i].ID)
+			break
+		}
+	}
+
+	answered := 0
+	for _, p := range pending {
+		res, ok := assigned[p.CallID]
 		if !ok {
 			// 客户端没给这一条的结果：以错误收尾，避免 agent 永久挂住。
-			// 打日志把两边 id 都列出来，方便排查 id 对不上。
 			s.log.Warnf("tool result missing: pending=%s tool=%s; client supplied=%v",
 				p.CallID, p.ToolName, resultIDs(results))
 			res = ToolResult{

@@ -32,20 +32,24 @@ func TestScopeKeyStableAndDistinct(t *testing.T) {
 }
 
 func TestExtractProjectRoot(t *testing.T) {
+	// Trae：Primary working directory 优先，忽略系统/Trae 自身路径
+	trae := []ChatMessage{
+		{Role: "user", Content: MessageContent{Text: "<system-reminder>\n# Environment\n- Primary working directory: /opt/tvgate\n"}},
+		{Role: "tool", Content: MessageContent{Text: "read /usr/local/x /root/.trae-cn/y"}},
+	}
+	if got := extractProjectRoot(trae); got != "/opt/tvgate" {
+		t.Fatalf("trae got %q want /opt/tvgate", got)
+	}
+	// 兜底：最频繁路径（排除系统目录）
 	msgs := []ChatMessage{
-		{Role: "tool", Content: MessageContent{Text: "read /opt/tvfusion/tvfusion-core/local/ads.go and /opt/tvfusion/scripts/dev-server.sh"}},
-		{Role: "assistant", Content: MessageContent{Text: "cd /opt/tvfusion/tvfusion-core"}},
+		{Role: "tool", Content: MessageContent{Text: "read /opt/tvfusion/a.go and /opt/tvfusion/b.go"}},
+		{Role: "assistant", Content: MessageContent{Text: "cd /opt/tvfusion/x"}},
 	}
 	if got := extractProjectRoot(msgs); got != "/opt/tvfusion" {
 		t.Fatalf("got %q want /opt/tvfusion", got)
 	}
 	if got := extractProjectRoot(nil); got != "" {
 		t.Fatalf("empty got %q", got)
-	}
-	// 只出现一次不认（避免误判）
-	one := []ChatMessage{{Role: "tool", Content: MessageContent{Text: "cat /etc/hosts"}}}
-	if got := extractProjectRoot(one); got != "" {
-		t.Fatalf("single got %q", got)
 	}
 }
 

@@ -20,14 +20,49 @@ import (
 
 var reWorkspaceFolder = regexp.MustCompile(`(?i)workspace folder:\s*([^\r\n]+)`)
 
+// reWorkingDir 匹配 Trae 环境提醒里的 "Primary working directory: <path>"（权威项目根）。
+var reWorkingDir = regexp.MustCompile(`(?i)primary working directory:\s*([^\r\n]+)`)
+
 // reAbsPath 匹配消息里的绝对路径（Unix 或 Windows）。
 var reAbsPath = regexp.MustCompile(`(?:^|[\s"'=(,\[:])((?:/[A-Za-z0-9_.@+\-]+)+|[A-Za-z]:\\[^\s"']+)`)
 
-// extractProjectRoot 从客户端消息里抽「项目根目录」——取出现最多的前 3 段路径前缀
-// （如 /opt/tvfusion、D:/project/tvgate）。用于 Trae 这类「不给项目路径」的客户端：
-// 让 janus 用客户端自己的项目当会话目录，从而隔离不同项目。
-// 至少出现 2 次才认，避免误判。
+// systemPathPrefixes 归一项目时排除的系统 / 工具自身目录，避免抽错。
+var systemPathPrefixes = []string{
+	"/usr", "/etc", "/var", "/proc", "/sys", "/dev", "/run", "/boot", "/lib", "/sbin", "/bin",
+	"/tmp", "/root/.trae", "/root/.cache", "/root/.config", "/root/.local", "/root/.vscode",
+}
+
+func isSystemPath(p string) bool {
+	for _, pre := range systemPathPrefixes {
+		if p == pre || strings.HasPrefix(p, pre+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// extractProjectRoot 抽「项目根目录」：
+//  1. Trae 环境提醒 "Primary working directory: <path>"（最权威）
+//  2. CodeBuddy "Workspace Folder: <path>"
+//  3. 兜底：消息里出现最多的 3 段路径前缀（排除系统/Trae 自身目录）
+//
+// 用于 Trae 这类「不给项目 header」的客户端：让 janus 用客户端自己的项目当会话
+// 目录，从而隔离不同项目。
 func extractProjectRoot(msgs []ChatMessage) string {
+	for _, m := range msgs {
+		s := m.Content.Text
+		if s == "" {
+			continue
+		}
+		if mm := reWorkingDir.FindStringSubmatch(s); mm != nil {
+			if v := normalizeDir(strings.TrimSpace(mm[1])); v != "" {
+				return v
+			}
+		}
+	}
+	if wf := extractWorkspaceFolder(msgs); wf != "" {
+		return normalizeDir(wf)
+	}
 	counts := map[string]int{}
 	for _, m := range msgs {
 		s := m.Content.Text
@@ -36,6 +71,9 @@ func extractProjectRoot(msgs []ChatMessage) string {
 		}
 		for _, mm := range reAbsPath.FindAllStringSubmatch(s, -1) {
 			p := normalizeDir(mm[1])
+			if isSystemPath(p) {
+				continue
+			}
 			parts := strings.Split(p, "/")
 			n := 3
 			if len(parts) < n {

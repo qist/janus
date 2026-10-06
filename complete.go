@@ -13,9 +13,9 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	req ChatRequest, ref OCModelRef, conv *Conversation,
 	sub *subscription, promptAt int64, planText string) {
 
-	// 本轮结束若不需要再等客户端回填工具结果，就注销本会话的 MCP server，
-	// 避免空闲 server 被同 location 的其它会话看到（串会话）。
-	defer s.releaseToolsIfIdle(conv)
+	// 注：不再在本轮结束注销 MCP server。OpenCode 的 agent 会话不会在重新注册后
+	// 刷新工具目录，导致下一轮「Code Mode 目录为空」。server 改为在会话存活期内
+	// 保持注册，注销只留给会话重置 / janitor(TTL)。
 
 	model := s.echoModel(ref, req.Model)
 	sw, err := newSSE(w, model)
@@ -220,8 +220,7 @@ func (s *Server) blockingCompletion(ctx context.Context, w http.ResponseWriter,
 	req ChatRequest, ref OCModelRef, conv *Conversation,
 	sub *subscription, promptAt int64) {
 
-	// 同 streamCompletion：本轮不需要回填工具结果时注销 MCP server。
-	defer s.releaseToolsIfIdle(conv)
+	// 同 streamCompletion：不再本轮结束注销 MCP server（见上）。
 
 	model := s.echoModel(ref, req.Model)
 	t, err := s.runBlocking(ctx, conv, model, sub, promptAt,

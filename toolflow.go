@@ -54,29 +54,6 @@ func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string
 	return nil
 }
 
-// releaseToolsIfIdle 在本轮不再需要等客户端回填工具结果时，主动注销本会话的
-// MCP server。
-//
-// 原因：OpenCode 会把同一 location 下注册的所有 MCP server 暴露给每个 session。
-// 空闲会话的 server 若长期挂着（默认到 SessionTTL 30m），它的工具会被别的会话的
-// 模型看到甚至调用（串会话）。所以一轮结束且没有 pending 调用时立即注销，下一轮
-// 用到时再注册（指纹名不变时是同一名字，不会让模型看到过期工具）。
-func (s *Server) releaseToolsIfIdle(conv *Conversation) {
-	if conv == nil || !s.cfg.ToolCalling {
-		return
-	}
-	if len(conv.pendingToolCalls()) > 0 || conv.mcpName == "" {
-		return
-	}
-	dir := conv.directory
-	if dir == "" {
-		dir = s.cfg.Directory
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	s.removeTools(ctx, conv, dir)
-}
-
 // removeTools 注销当前会话的 MCP server（客户端不再声明 tools 时调用）。
 func (s *Server) removeTools(ctx context.Context, conv *Conversation, dir string) {
 	name := conv.mcpName

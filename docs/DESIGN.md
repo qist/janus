@@ -547,6 +547,13 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 先 `waitForWaiter(3s)`：目标会话没有在飞请求（没有 executor 注册 watch）就直接返回
 `isError`，立即失败而不是挂死。
 
+**孤儿 agent（客户端在两轮之间离开）**：如果 IDE 在 agent 挂在工具调用上时关闭，janus
+没有在飞请求可感知断连，上游 agent 会继续调工具 → 被守卫拒绝 → 重试，形成刷屏循环
+（实测约 40 分钟 600+ 条）。两道兜底：
+
+- 工具调用**超时**（客户端在 `BRIDGE_TOOL_CALL_WAIT` 内没回结果）→ **中断该会话的上游 agent**；
+- 守卫的 idle 拒绝日志**限流**（同一会话每 60s 最多一条，附被抑制条数）。
+
 **等待时长分两档**（`ToolBridge.waitFor`）：只读/编辑类工具（`Grep`/`Read`/`Glob`/`LS`/
 `WebFetch`/`Write`/`SearchReplace`/`DeleteFile`）正常秒回，卡住基本是客户端卡死，用
 `BRIDGE_TOOL_CALL_WAIT_FAST`（默认 `90s`）快速判失败、把工具错误还给模型继续；执行类

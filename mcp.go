@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -160,7 +161,15 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		// session，模型可能引用到别的会话的 server。目标会话没有在飞请求时
 		// 立即报错，别挂到 ToolCallWait（5 分钟）超时。
 		if !sess.waitForWaiter(3 * time.Second) {
-			s.log.Warnf("mcp tool call for idle conversation: %s (%s); rejecting", original, sess.key)
+			// 限流：同一会话的 idle 拒绝最多每 60s 打一条（否则孤儿 agent 会刷屏）。
+			if ok, suppressed := sess.shouldLogReject(60 * time.Second); ok {
+				if suppressed > 0 {
+					s.log.Warnf("mcp tool call for idle conversation: %s (%s); rejecting (suppressed %d)",
+						original, sess.key, suppressed)
+				} else {
+					s.log.Warnf("mcp tool call for idle conversation: %s (%s); rejecting", original, sess.key)
+				}
+			}
 			mcpReply(w, req.ID, map[string]any{
 				"content": []map[string]any{{
 					"type": "text",
@@ -175,6 +184,19 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		pend := sess.park(callID, original, p.Name, args)
 		s.log.Debugf("mcp tool call parked: %s (%s) args=%s", original, callID, truncate(args, 200))
 		res := s.tools.waitResult(r.Context(), pend)
+
+		// 客户端在 ToolCallWait 内没回结果：多半已经离开（IDE 关闭/断网）。
+		// 中断该会话的上游 agent，否则它会继续调工具 → 被拒 → 重试，形成孤儿循环。
+		if res.TimedOut {
+			if sid := sess.getSessionID(); sid != "" {
+				s.log.Warnf("tool result timeout: interrupting upstream %s (%s) to stop orphaned agent", sid, sess.key)
+				go func() {
+					iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+					defer c()
+					_ = s.up.Interrupt(iCtx, sid)
+				}()
+			}
+		}
 
 		mcpReply(w, req.ID, map[string]any{
 			"content": []map[string]any{{"type": "text", "text": res.Content}},

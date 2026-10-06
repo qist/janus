@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,8 +45,9 @@ const (
 
 // ToolResult 是客户端回填的工具执行结果。
 type ToolResult struct {
-	Content string
-	IsError bool
+	Content  string
+	IsError  bool
+	TimedOut bool // 客户端在 ToolCallWait 内没回结果（通常意味着客户端已离开）
 }
 
 // serverToolFunc 是"由桥自己执行"的工具（如 Claude Code 的 web_search 服务端工具）。
@@ -81,6 +83,14 @@ type toolSession struct {
 	ordSeq  int64                   // 到达序号
 	waiters []chan struct{}         // 有新 pending 时通知执行器
 	closed  bool
+
+	// sessionID 是当前会话对应的上游 session id（会话重建会更新）。
+	// 用于「客户端走了」时中断上游，避免孤儿 agent 一直调工具。
+	sessionID string
+
+	// idle 拒绝日志限流（防刷屏）
+	lastRejectLog atomic.Int64 // 上次打印时间（毫秒）
+	rejectCount   atomic.Int64 // 距上次日志以来被抑制的拒绝次数
 
 	// serverTools 由桥自己执行的工具（如 Claude Code 的 web_search），不甩给客户端。
 	serverTools map[string]serverToolFunc
@@ -386,6 +396,33 @@ func (s *toolSession) hasWaiter() bool {
 	return len(s.waiters) > 0
 }
 
+// setSessionID 记录当前会话对应的上游 session id（会话重建时更新）。
+func (s *toolSession) setSessionID(id string) {
+	s.mu.Lock()
+	s.sessionID = id
+	s.mu.Unlock()
+}
+
+// getSessionID 返回当前会话对应的上游 session id。
+func (s *toolSession) getSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionID
+}
+
+// shouldLogReject 给"idle 会话被拒"的日志做限流：每个会话最多每 interval 打一条。
+// 返回 (是否该打印, 自上次打印以来被抑制的条数)。
+func (s *toolSession) shouldLogReject(interval time.Duration) (bool, int64) {
+	now := time.Now().UnixMilli()
+	last := s.lastRejectLog.Load()
+	if last != 0 && now-last < interval.Milliseconds() {
+		s.rejectCount.Add(1)
+		return false, 0
+	}
+	s.lastRejectLog.Store(now)
+	return true, s.rejectCount.Swap(0)
+}
+
 // waitForWaiter 最多等 d，等执行器注册 watch。返回期间是否出现过等待者。
 //
 // 用途：OpenCode 会把同一 location 下所有 MCP server 暴露给每个 session，
@@ -481,8 +518,9 @@ func (b *ToolBridge) waitResult(ctx context.Context, p *pendingCall) ToolResult 
 				wait, p.ToolName, p.ConvKey)
 		}
 		return ToolResult{
-			Content: fmt.Sprintf("bridge: client did not return a tool result within %s", wait),
-			IsError: true,
+			Content:  fmt.Sprintf("bridge: client did not return a tool result within %s", wait),
+			IsError:  true,
+			TimedOut: true,
 		}
 	}
 }

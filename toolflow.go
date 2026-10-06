@@ -19,6 +19,8 @@ import (
 //     所以超过 ToolReregister 就主动续注册一次，代价只是一次 PUT。
 func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string, tools []ToolSpec) error {
 	sess := s.tools.Register(conv.Key, tools)
+	// 记录当前上游 session id：parked 工具调用超时时用它中断上游，避免孤儿 agent。
+	sess.setSessionID(conv.snapshotSessionID())
 	fp := toolsFingerprint(tools)
 
 	// 注册名带工具集指纹：OpenCode 对"已存在的 MCP server 重新 PUT"不会重拉

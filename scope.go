@@ -23,13 +23,16 @@ var reWorkspaceFolder = regexp.MustCompile(`(?i)workspace folder:\s*([^\r\n]+)`)
 // reWorkingDir 匹配 Trae 环境提醒里的 "Primary working directory: <path>"（权威项目根）。
 var reWorkingDir = regexp.MustCompile(`(?i)primary working directory:\s*([^\r\n]+)`)
 
+// reCopilotWorkspace 匹配 Copilot Chat 的 "following folders: - /path"。
+var reCopilotWorkspace = regexp.MustCompile(`(?i)following folders:\s*-\s*([^\s]+)`)
+
 // reAbsPath 匹配消息里的绝对路径（Unix 或 Windows）。
 var reAbsPath = regexp.MustCompile(`(?:^|[\s"'=(,\[:])((?:/[A-Za-z0-9_.@+\-]+)+|[A-Za-z]:\\[^\s"']+)`)
 
 // systemPathPrefixes 归一项目时排除的系统 / 工具自身目录，避免抽错。
 var systemPathPrefixes = []string{
 	"/usr", "/etc", "/var", "/proc", "/sys", "/dev", "/run", "/boot", "/lib", "/sbin", "/bin",
-	"/tmp", "/root/.trae", "/root/.cache", "/root/.config", "/root/.local", "/root/.vscode",
+	"/tmp", "/root/.trae", "/root/.cache", "/root/.config", "/root/.local", "/root/.vscode", "/root/.vscode-server",
 }
 
 func isSystemPath(p string) bool {
@@ -55,6 +58,11 @@ func extractProjectRoot(msgs []ChatMessage) string {
 			continue
 		}
 		if mm := reWorkingDir.FindStringSubmatch(s); mm != nil {
+			if v := normalizeDir(strings.TrimSpace(mm[1])); v != "" {
+				return v
+			}
+		}
+		if mm := reCopilotWorkspace.FindStringSubmatch(s); mm != nil {
 			if v := normalizeDir(strings.TrimSpace(mm[1])); v != "" {
 				return v
 			}

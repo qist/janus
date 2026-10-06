@@ -40,6 +40,13 @@ func TestExtractProjectRoot(t *testing.T) {
 	if got := extractProjectRoot(trae); got != "/opt/tvgate" {
 		t.Fatalf("trae got %q want /opt/tvgate", got)
 	}
+	// Copilot Chat：workspace folders
+	cop := []ChatMessage{
+		{Role: "user", Content: MessageContent{Text: "<workspace_info> I am working in a workspace with the following folders: - /opt/sqlite I am working in a workspace that has the following structure:"}},
+	}
+	if got := extractProjectRoot(cop); got != "/opt/sqlite" {
+		t.Fatalf("copilot got %q want /opt/sqlite", got)
+	}
 	// 兜底：最频繁路径（排除系统目录）
 	msgs := []ChatMessage{
 		{Role: "tool", Content: MessageContent{Text: "read /opt/tvfusion/a.go and /opt/tvfusion/b.go"}},

@@ -166,8 +166,15 @@ func (s *Server) projectIdentity(clientDir string, msgs []ChatMessage) string {
 		return p
 	}
 	dir := normalizeDir(clientDir)
+	if dir == "" {
+		// 客户端没给目录 header（如 Trae/Copilot）：从消息里抽项目根。
+		dir = normalizeDir(extractProjectRoot(msgs))
+	}
 	if dir != "" && len(s.cfg.ProjectMap) > 0 {
 		if p, ok := s.cfg.ProjectMap[clientDir]; ok {
+			return p
+		}
+		if p, ok := s.cfg.ProjectMap[dir]; ok {
 			return p
 		}
 		bestLen, best := -1, ""
@@ -185,9 +192,6 @@ func (s *Server) projectIdentity(clientDir string, msgs []ChatMessage) string {
 		if best != "" {
 			return best
 		}
-	}
-	if wf := extractWorkspaceFolder(msgs); wf != "" {
-		return wf
 	}
 	if dir != "" {
 		if b := baseName(dir); b != "" {

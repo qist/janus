@@ -71,10 +71,10 @@ func TestProjectIdentityPriority(t *testing.T) {
 	if got := s.projectIdentity("/whatever", nil); got != "explicit" {
 		t.Errorf("explicit: got %q", got)
 	}
-	// Workspace Folder 兜底
+	// Workspace Folder 兜底 → 取 basename
 	s.cfg.Project = ""
 	msgs := []ChatMessage{{Role: "user", Content: MessageContent{Text: "<user_info> Workspace Folder: /home/u/tvfusion\nOS: linux"}}}
-	if got := s.projectIdentity("", msgs); got != "/home/u/tvfusion" {
+	if got := s.projectIdentity("", msgs); got != "tvfusion" {
 		t.Errorf("workspace folder: got %q", got)
 	}
 	// 都没有 → default

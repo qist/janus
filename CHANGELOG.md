@@ -4,6 +4,14 @@
 
 ---
 
+## [v0.3.9] - 2026-10-06
+
+### 变更
+- **发布包附带配置模板**：`make dist-linux` 产出的 tar.gz 里，除二进制外现在也含 **`janus.env.example`**（配置模板）与 **`README.md`**。
+- 配置模板 / README 补齐 scope 相关新增项（`BRIDGE_SCOPE_KEY` / `BRIDGE_PROJECT` / `BRIDGE_PROJECT_MAP` / `BRIDGE_WORKSPACES_DIR`）；**模板配置项与 `config.go` 全量对齐**。
+
+---
+
 ## [v0.3.8] - 2026-10-06
 
 ### 新增

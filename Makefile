@@ -53,13 +53,16 @@ smoke:
 		BRIDGE_MODEL="$(BRIDGE_MODEL)" python3 tests/claude_smoke.py
 
 # Linux 全架构静态二进制 + tar.gz（CGO 关闭，纯静态）
+# 包里除二进制外，附带 janus.env.example（配置模板）与 README.md。
 dist-linux:
 	@mkdir -p $(DIST)
 	@for arch in $(LINUX_ARCHES); do \
 		echo ">> linux/$$arch  ($(VERSION))"; \
 		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath -ldflags "$(LDFLAGS)" \
 			-o $(DIST)/$(BINARY)_linux_$$arch . ; \
-		tar -C $(DIST) -czf $(DIST)/$(BINARY)_$(VERSION)_linux_$$arch.tar.gz $(BINARY)_linux_$$arch ; \
+		tar -czf $(DIST)/$(BINARY)_$(VERSION)_linux_$$arch.tar.gz \
+			-C $(DIST) $(BINARY)_linux_$$arch \
+			-C $(CURDIR) janus.env.example README.md ; \
 		rm -f $(DIST)/$(BINARY)_linux_$$arch ; \
 	done
 	@echo "==> $(DIST)/"; ls -lh $(DIST)

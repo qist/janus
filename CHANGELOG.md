@@ -4,6 +4,21 @@
 
 ---
 
+## [v0.3.10] - 2026-10-06
+
+### 新增
+- **工具调用等待分两档**：`BRIDGE_TOOL_CALL_WAIT`（长等待，执行类工具，默认 `5m`）+ 新增
+  `BRIDGE_TOOL_CALL_WAIT_FAST`（短等待，只读/编辑类工具，默认 `90s`）与
+  `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS`（短等待工具名列表，默认
+  `Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile`）。
+  - 只读/编辑类工具正常秒回，卡住基本是客户端卡死；短等待让 janus 快速判失败、把工具错误
+    还给模型继续，而不是干等 5m 撞上 IDE 自身请求超时（表现为 `Connection timeout (HTTP Status: 500)`）。
+  - **未列出的工具（含未知新工具）一律走长等待**，避免误杀 `RunCommand`/build 等长任务。
+  - `BRIDGE_TOOL_CALL_WAIT_FAST <= 0` 或 `>= BRIDGE_TOOL_CALL_WAIT` 时不启用；列表设成
+    `none`/`off`/`-` 表示禁用短等待。
+
+---
+
 ## [v0.3.9] - 2026-10-06
 
 ### 变更

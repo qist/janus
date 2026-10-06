@@ -348,7 +348,9 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 | `BRIDGE_TOOL_CALLING` | `true` | 是否启用内置 MCP server 透传客户端 `tools` |
 | `BRIDGE_TOOL_SOFT_FAIL` | `false` | 工具注册失败时：`true`=降级为无工具继续；`false`=直接报错 |
 | `BRIDGE_TOOL_REREGISTER` | `10m` | 多久主动续注册一次 MCP（上游重启会丢注册） |
-| `BRIDGE_TOOL_CALL_WAIT` | `5m` | 工具调用挂起、等客户端回填结果的最长时间 |
+| `BRIDGE_TOOL_CALL_WAIT` | `5m` | 工具调用挂起、等客户端回填结果的最长时间（**执行类**工具：`RunCommand`/`execute_command` 等） |
+| `BRIDGE_TOOL_CALL_WAIT_FAST` | `90s` | **只读/编辑类**工具的短等待。这类工具正常秒回，卡住基本是客户端卡死，快速判失败能让模型继续，而不是干等 5m 撞上 IDE 自身超时。`<=0` 或 `>= BRIDGE_TOOL_CALL_WAIT` 时不启用 |
+| `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` | `Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile` | 走短等待的工具名（逗号分隔，不区分大小写）。**未列出的工具（含未知新工具）一律走长等待**，避免误杀长任务。设成 `none`/`off`/`-` 表示禁用短等待 |
 | `BRIDGE_MCP_URL` | 空 | 注册给 OpenCode 的 MCP 基址（空=本机回环） |
 | `BRIDGE_MCP_ALLOW` | 空 | 限制内置 MCP 端点 `/mcp/{token}` 的来源（逗号分隔 IP/CIDR）。空=不限制；对外暴露或上游在别机时建议设为上游网段 |
 | `BRIDGE_PERMISSION_REPLY` | `once` | 自动应答权限请求：`once`（仅本次）/ `always`（记住）/ `reject`（拒绝）/ `off`（不干预） |

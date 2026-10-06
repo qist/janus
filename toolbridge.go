@@ -88,25 +88,40 @@ type toolSession struct {
 
 // ToolBridge 管理所有会话的 MCP 工具上下文。
 type ToolBridge struct {
-	mu      sync.RWMutex
-	byToken map[string]*toolSession
-	byKey   map[string]*toolSession
-	byName  map[string]*toolSession
-	wait    time.Duration
-	log     *Logger
+	mu        sync.RWMutex
+	byToken   map[string]*toolSession
+	byKey     map[string]*toolSession
+	byName    map[string]*toolSession
+	wait      time.Duration // 长等待（执行类工具，或未列出的工具）
+	waitFast  time.Duration // 短等待（只读/编辑类工具）；0=不启用
+	fastTools map[string]bool
+	log       *Logger
 }
 
-func NewToolBridge(log *Logger, wait time.Duration) *ToolBridge {
+func NewToolBridge(log *Logger, wait, waitFast time.Duration, fastTools map[string]bool) *ToolBridge {
 	if wait <= 0 {
 		wait = defaultToolWait
 	}
-	return &ToolBridge{
-		byToken: map[string]*toolSession{},
-		byKey:   map[string]*toolSession{},
-		byName:  map[string]*toolSession{},
-		wait:    wait,
-		log:     log,
+	if waitFast <= 0 || waitFast >= wait {
+		waitFast = 0
 	}
+	return &ToolBridge{
+		byToken:   map[string]*toolSession{},
+		byKey:     map[string]*toolSession{},
+		byName:    map[string]*toolSession{},
+		wait:      wait,
+		waitFast:  waitFast,
+		fastTools: fastTools,
+		log:       log,
+	}
+}
+
+// waitFor 按工具类型选等待时长：已知的只读/编辑类走短等待，其余（含未知）走长等待。
+func (b *ToolBridge) waitFor(p *pendingCall) time.Duration {
+	if b.waitFast > 0 && b.fastTools[strings.ToLower(p.ToolName)] {
+		return b.waitFast
+	}
+	return b.wait
 }
 
 // mcpServerName 把会话 key 变成合法的 MCP server 名。
@@ -452,7 +467,8 @@ func randomToken() string {
 
 // waitResult 等待客户端回填结果（或超时/上下文取消）。
 func (b *ToolBridge) waitResult(ctx context.Context, p *pendingCall) ToolResult {
-	t := time.NewTimer(b.wait)
+	wait := b.waitFor(p)
+	t := time.NewTimer(wait)
 	defer t.Stop()
 	select {
 	case r := <-p.result:
@@ -462,10 +478,10 @@ func (b *ToolBridge) waitResult(ctx context.Context, p *pendingCall) ToolResult 
 	case <-t.C:
 		if b.log != nil {
 			b.log.Warnf("tool call timed out: client did not return a result within %s (tool=%s conv=%s); releasing agent",
-				b.wait, p.ToolName, p.ConvKey)
+				wait, p.ToolName, p.ConvKey)
 		}
 		return ToolResult{
-			Content: fmt.Sprintf("bridge: client did not return a tool result within %s", b.wait),
+			Content: fmt.Sprintf("bridge: client did not return a tool result within %s", wait),
 			IsError: true,
 		}
 	}

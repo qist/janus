@@ -19,7 +19,7 @@ func TestMCPRegName(t *testing.T) {
 }
 
 func TestToolBridgeAliasAndUnregister(t *testing.T) {
-	b := NewToolBridge(NewLogger("error"), 0)
+	b := NewToolBridge(NewLogger("error"), 0, 0, nil)
 	sess := b.Register("f:abc", []ToolSpec{{Type: "function", Function: ToolFunction{Name: "read_file"}}})
 	base := sess.mcpName
 	alias := mcpRegName(base, "deadbeef")
@@ -42,7 +42,7 @@ func TestToolBridgeAliasAndUnregister(t *testing.T) {
 }
 
 func TestWaitForWaiter(t *testing.T) {
-	b := NewToolBridge(NewLogger("error"), 0)
+	b := NewToolBridge(NewLogger("error"), 0, 0, nil)
 	sess := b.Register("f:x", nil)
 
 	if sess.waitForWaiter(150 * time.Millisecond) {
@@ -61,7 +61,7 @@ func TestWaitForWaiter(t *testing.T) {
 
 // parallel_tool_calls=false 时按到达顺序逐个取出；takePending 也保持到达顺序。
 func TestToolSessionTakeOldestOrder(t *testing.T) {
-	b := NewToolBridge(NewLogger("error"), 0)
+	b := NewToolBridge(NewLogger("error"), 0, 0, nil)
 
 	sess := b.Register("f:ord", nil)
 	c1 := sess.park("call_1", "a", "m_a", "{}")

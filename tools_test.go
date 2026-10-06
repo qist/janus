@@ -54,7 +54,7 @@ func TestToolSessionNameRoundTrip(t *testing.T) {
 }
 
 func TestToolBridgeRegisterLookupUnregister(t *testing.T) {
-	b := NewToolBridge(NewLogger("error"), time.Minute)
+	b := NewToolBridge(NewLogger("error"), time.Minute, 0, nil)
 	tools := []ToolSpec{{Type: "function", Function: funcSpec("a", "desc")}}
 
 	s1 := b.Register("k1", tools)
@@ -148,11 +148,52 @@ func TestToolSessionCloseFailsPending(t *testing.T) {
 }
 
 func TestWaitResultTimeout(t *testing.T) {
-	b := NewToolBridge(NewLogger("error"), 50*time.Millisecond)
+	b := NewToolBridge(NewLogger("error"), 50*time.Millisecond, 0, nil)
 	p := &pendingCall{CallID: "c", result: make(chan ToolResult, 1)}
 	r := b.waitResult(context.Background(), p)
 	if !r.IsError || !strings.Contains(r.Content, "did not return") {
 		t.Fatalf("超时应报错: %+v", r)
+	}
+}
+
+func TestWaitForTwoTier(t *testing.T) {
+	b := NewToolBridge(NewLogger("error"), 5*time.Minute, 90*time.Second,
+		map[string]bool{"grep": true, "read": true})
+
+	// 只读/编辑类 → 短等待（大小写不敏感）
+	for _, name := range []string{"Grep", "READ"} {
+		if got := b.waitFor(&pendingCall{ToolName: name}); got != 90*time.Second {
+			t.Fatalf("%s wait = %s, want 90s", name, got)
+		}
+	}
+	// 执行类 / 未知工具 → 长等待（避免误杀长任务）
+	for _, name := range []string{"RunCommand", "SomeNewTool"} {
+		if got := b.waitFor(&pendingCall{ToolName: name}); got != 5*time.Minute {
+			t.Fatalf("%s wait = %s, want 5m", name, got)
+		}
+	}
+}
+
+func TestWaitForFastDisabled(t *testing.T) {
+	// waitFast >= wait → 不启用短等待，全部走长等待
+	b := NewToolBridge(NewLogger("error"), time.Minute, time.Minute, map[string]bool{"grep": true})
+	if got := b.waitFor(&pendingCall{ToolName: "Grep"}); got != time.Minute {
+		t.Fatalf("禁用短等待后 Grep wait = %s, want 1m", got)
+	}
+}
+
+func TestParseToolSet(t *testing.T) {
+	got := parseToolSet("Grep, Read ,grep,,RunCommand")
+	if !got["grep"] || !got["read"] || !got["runcommand"] {
+		t.Fatalf("解析结果缺项: %+v", got)
+	}
+	if len(got) != 3 {
+		t.Fatalf("去重/去空失败: %+v", got)
+	}
+	for _, off := range []string{"", "none", "off", "-"} {
+		if s := parseToolSet(off); len(s) != 0 {
+			t.Fatalf("parseToolSet(%q) 应为空: %+v", off, s)
+		}
 	}
 }
 

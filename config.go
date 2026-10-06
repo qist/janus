@@ -110,8 +110,15 @@ type Config struct {
 	ToolCalling    bool          // 是否启用
 	ToolSoftFail   bool          // true=注册失败时降级为无工具继续；false=直接报错
 	ToolReregister time.Duration // 注册多久后主动续注册（上游重启会丢注册）
-	ToolCallWait   time.Duration // 挂起等客户端回填结果的最长时间
-	MCPPublicURL   string        // 注册给 OpenCode 的 MCP 基址；空=自动用本机回环
+	ToolCallWait   time.Duration // 挂起等客户端回填结果的最长时间（执行类工具）
+	// ToolCallWaitFast 是只读/编辑类工具的短等待：这类工具正常秒回，卡住基本是客户端卡死，
+	// 快速判失败能让模型继续，而不是干等到 ToolCallWait 撞上 IDE 自身超时。
+	// <=0 或 >= ToolCallWait 时不启用（全部走 ToolCallWait）。
+	ToolCallWaitFast time.Duration
+	// ToolFastTools 是走短等待的工具名集合（小写，来自 BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS）。
+	// 只列已知的只读/编辑类；未知工具默认走长等待，避免误杀长任务。
+	ToolFastTools map[string]bool
+	MCPPublicURL  string // 注册给 OpenCode 的 MCP 基址；空=自动用本机回环
 
 	// PermissionReply 自动应答 OpenCode 的权限请求（agent 访问会话目录之外时
 	// OpenCode 会先 ask；headless 桥无人应答就会一直挂住，直到客户端超时）。
@@ -356,11 +363,13 @@ func LoadConfig() (Config, error) {
 		WebSearchEnabled: loader.boolean("BRIDGE_WEBSEARCH_ENABLED", true),
 		ModelEcho:        normalizeModelEcho(loader.str("BRIDGE_MODEL_ECHO", "real")),
 
-		ToolCalling:    loader.boolean("BRIDGE_TOOL_CALLING", true),
-		ToolSoftFail:   loader.boolean("BRIDGE_TOOL_SOFT_FAIL", false),
-		ToolReregister: loader.dur("BRIDGE_TOOL_REREGISTER", 10*time.Minute),
-		ToolCallWait:   loader.dur("BRIDGE_TOOL_CALL_WAIT", 5*time.Minute),
-		MCPPublicURL:   strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
+		ToolCalling:      loader.boolean("BRIDGE_TOOL_CALLING", true),
+		ToolSoftFail:     loader.boolean("BRIDGE_TOOL_SOFT_FAIL", false),
+		ToolReregister:   loader.dur("BRIDGE_TOOL_REREGISTER", 10*time.Minute),
+		ToolCallWait:     loader.dur("BRIDGE_TOOL_CALL_WAIT", 5*time.Minute),
+		ToolCallWaitFast: loader.dur("BRIDGE_TOOL_CALL_WAIT_FAST", 90*time.Second),
+		ToolFastTools:    parseToolSet(loader.str("BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS", defaultFastTools)),
+		MCPPublicURL:     strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),
@@ -434,6 +443,24 @@ func parseProjectMap(s string) map[string]string {
 		if k != "" && v != "" {
 			out[k] = v
 		}
+	}
+	return out
+}
+
+// defaultFastTools 是默认走「短等待」的工具（只读/编辑类，正常秒回）。
+// 命令执行类（RunCommand/execute_command…）不在此列，保持 BRIDGE_TOOL_CALL_WAIT 长等待。
+const defaultFastTools = "Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile"
+
+// parseToolSet 解析逗号分隔的工具名集合（转小写）。设成 none/off/- 表示空集（禁用短等待）。
+func parseToolSet(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, part := range strings.Split(s, ",") {
+		name := strings.ToLower(strings.TrimSpace(part))
+		switch name {
+		case "", "none", "off", "-":
+			continue
+		}
+		out[name] = true
 	}
 	return out
 }

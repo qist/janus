@@ -178,7 +178,7 @@ func NewServer(cfg Config, log *Logger) *Server {
 		store:       NewStore(log, cfg.SessionTTL, cfg.MaxConversations),
 		models:      NewModelCache(60 * time.Second),
 		usage:       NewUsageClient(cfg, log),
-		tools:       NewToolBridge(log, cfg.ToolCallWait),
+		tools:       NewToolBridge(log, cfg.ToolCallWait, cfg.ToolCallWaitFast, cfg.ToolFastTools),
 		responses:   NewResponseStore(cfg.ResponseTTL),
 		perKeyLimit: NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitBurst),
 		globalLimit: NewRateLimiter(cfg.RateLimitGlobalRPM, 0),
@@ -375,6 +375,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ToolCallWait <= 0 {
 		c.ToolCallWait = 5 * time.Minute
+	}
+	// 短等待必须比长等待小，否则没意义（全部走长等待）。
+	if c.ToolCallWaitFast <= 0 || c.ToolCallWaitFast >= c.ToolCallWait {
+		c.ToolCallWaitFast = 0
 	}
 	if c.PermissionReply == "" {
 		c.PermissionReply = "once"

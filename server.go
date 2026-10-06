@@ -70,7 +70,8 @@ type Server struct {
 // 会话定位（user、workspace 头、首条 user、计算出的 key）。
 func (s *Server) logClientInfo(r *http.Request, user, dir, key string, msgs []ChatMessage) {
 	ccSession := firstNonEmpty(r.Header.Get("x-claude-code-session-id"), r.Header.Get("X-Claude-Code-Session-Id"))
-	sig := user + "\x00" + dir + "\x00" + r.UserAgent() + "\x00" +
+	ip := clientIP(r)
+	sig := ip + "\x00" + user + "\x00" + dir + "\x00" + r.UserAgent() + "\x00" +
 		r.Header.Get("X-Session-ID") + "\x00" + r.Header.Get("X-OpenCode-Session") + "\x00" + ccSession
 
 	s.clientMu.Lock()
@@ -84,8 +85,9 @@ func (s *Server) logClientInfo(r *http.Request, user, dir, key string, msgs []Ch
 		return
 	}
 	_, scopeReadable := s.scopeOf(r, r.Header.Get("X-OpenCode-Directory"), msgs)
-	s.log.Infof("client: user=%q dir=%q ua=%q x-session=%q x-oc-session=%q x-oc-dir=%q x-oc-agent=%q cc-session=%q firstUser=%q key=%s scope=%s",
-		user, dir, r.UserAgent(),
+	xff := r.Header.Get("X-Forwarded-For")
+	s.log.Infof("client: ip=%q xff=%q user=%q dir=%q ua=%q x-session=%q x-oc-session=%q x-oc-dir=%q x-oc-agent=%q cc-session=%q firstUser=%q key=%s scope=%s",
+		ip, xff, user, dir, r.UserAgent(),
 		r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"),
 		r.Header.Get("X-OpenCode-Directory"), r.Header.Get("X-OpenCode-Agent"), ccSession,
 		truncate(firstUserTitle(msgs, 60), 80), key, scopeReadable)
@@ -124,6 +126,14 @@ func jwtPayload(tok string) string {
 		return ""
 	}
 	return string(b)
+}
+
+// clientIP 取客户端连接 IP（RemoteAddr 的 host 部分）。
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // conversationKey 计算会话键：显式会话头 > scope(开启时) > 指纹(system+user+dir)。

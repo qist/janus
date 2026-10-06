@@ -314,13 +314,13 @@ func LoadConfig() (Config, error) {
 
 		APIKey: loader.str("BRIDGE_API_KEY", ""),
 
-		Directory:    loader.str("BRIDGE_DIRECTORY", defaultProjectDir()),
-		Agent:        loader.str("BRIDGE_AGENT", "build"),
-		DefaultModel: loader.str("BRIDGE_DEFAULT_MODEL", ""),
-		ModelMap:     parseModelMap(loader.str("BRIDGE_MODEL_MAP", "")),
-		Project:      loader.str("BRIDGE_PROJECT", ""),
-		ProjectMap:   parseProjectMap(loader.str("BRIDGE_PROJECT_MAP", "")),
-		ScopeKey:     loader.boolean("BRIDGE_SCOPE_KEY", false),
+		Directory:     loader.str("BRIDGE_DIRECTORY", defaultProjectDir()),
+		Agent:         loader.str("BRIDGE_AGENT", "build"),
+		DefaultModel:  loader.str("BRIDGE_DEFAULT_MODEL", ""),
+		ModelMap:      parseModelMap(loader.str("BRIDGE_MODEL_MAP", "")),
+		Project:       loader.str("BRIDGE_PROJECT", ""),
+		ProjectMap:    parseProjectMap(loader.str("BRIDGE_PROJECT_MAP", "")),
+		ScopeKey:      loader.boolean("BRIDGE_SCOPE_KEY", false),
 		WorkspacesDir: loader.str("BRIDGE_WORKSPACES_DIR", "/var/lib/janus/workspaces"),
 
 		SessionTTL:        loader.dur("BRIDGE_SESSION_TTL", 30*time.Minute),

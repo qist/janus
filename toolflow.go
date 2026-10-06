@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -149,6 +150,16 @@ func hasToolResults(msgs []ChatMessage) bool {
 	return false
 }
 
+// resultIDs 列出客户端回填的所有 tool_call_id（诊断用，排序后稳定输出）。
+func resultIDs(m map[string]ToolResult) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // resumeToolCalls 处理「客户端回填工具结果」的后续请求。
 //
 // 关键点：
@@ -166,7 +177,10 @@ func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *
 	for _, p := range pending {
 		res, ok := results[p.CallID]
 		if !ok {
-			// 客户端没给这一条的结果：以错误收尾，避免 agent 永久挂住
+			// 客户端没给这一条的结果：以错误收尾，避免 agent 永久挂住。
+			// 打日志把两边 id 都列出来，方便排查 id 对不上。
+			s.log.Warnf("tool result missing: pending=%s tool=%s; client supplied=%v",
+				p.CallID, p.ToolName, resultIDs(results))
 			res = ToolResult{
 				Content: "bridge: client did not supply a result for tool call " + p.CallID,
 				IsError: true,

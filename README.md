@@ -242,7 +242,11 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `BRIDGE_DIRECTORY` | 桥启动时的工作目录 | 会话默认工作目录（OpenCode 项目路径） |
+| `BRIDGE_DIRECTORY` | 桥启动时的工作目录 | 会话默认工作目录（OpenCode 项目路径）。远程 + mode B 时客户端项目路径在 janus 上不存在，会自动改用 `BRIDGE_WORKSPACES_DIR/<scope>` |
+| `BRIDGE_SCOPE_KEY` | `false` | 客户端不给会话 id 时，按 `scope = IDE + 项目` 定位会话：**同 IDE + 同项目（跨设备）共享**、不同项目/IDE 隔离。见「跨设备共享」 |
+| `BRIDGE_PROJECT` | 空 | 显式项目名（优先于自动识别）。适合「一台 janus 只服务一个项目」 |
+| `BRIDGE_PROJECT_MAP` | 空 | 设备路径→项目名映射（逗号分隔，如 `/opt/tvfusion=tvfusion,D:\project\tvfusion=tvfusion`）；跨设备路径不同时用 |
+| `BRIDGE_WORKSPACES_DIR` | `/var/lib/janus/workspaces` | 远程时 per-scope 的中性工作目录根（客户端项目路径在 janus 上不存在时用它，避免误认项目 / 上游 500） |
 | `BRIDGE_DEFAULT_MODEL` | 空 | `default`/`auto`/空别名使用的模型（如 `opencode-go/gpt-6-luna`）；**留空=跟随上游默认**。客户端显式传的 `model` 始终透传，不受此影响。注意：上游默认若是 `opencode/*` 免费模型，经 API 调用会 403（免费额度只能在 OpenCode 内用），需要支持"不带 model"的请求就显式填一个可用的 |
 | `BRIDGE_MODEL_MAP` | 空 | 模型别名映射（逗号分隔 `from=to`，键不区分大小写，键以 `*` 结尾为前缀通配）。主要给 Claude Code：**只需映射 opus/sonnet/haiku 三个档位**，如 `claude-opus*=opencode-go/deepseek-v4-pro,claude-haiku*=opencode-go/glm-5.3-flash`。想省事就用 `BRIDGE_DEFAULT_MODEL` 一个开关；用 `janus models` 查当前映射 |
 | `BRIDGE_WEBSEARCH_ENABLED` | `true` | 是否支持 Claude Code 的 `web_search` 服务端工具（由 Janus 内部调用上游 `/api/websearch` 执行） |
@@ -554,6 +558,32 @@ curl -s http://127.0.0.1:2810/v1/models/opencode/claude-sonnet-5-5 -H "Authoriza
 - **切换时机**：面板改完，**下一条请求**就原地切换（`POST /api/session/{id}/model`），**不重开会话、上下文保留**，无需等会话结束。
 
 接口：`GET /v1/settings` 读；`POST /v1/settings {"default_model":"provider/id[:variant]"}` 写（空字符串=清除，回落配置）。
+
+## 跨设备共享（scope）
+
+客户端大多不给「会话 id」（Trae / Copilot / CodeBuddy 都不给），Janus 就退化为按 **`scope = IDE + 项目`** 定位会话。开启：
+
+```ini
+BRIDGE_SCOPE_KEY=true
+```
+
+- **同 IDE + 同项目（跨设备）→ 同一会话**（共享）；**不同项目 / 不同 IDE → 隔离**。
+- **项目识别**取自各客户端 firstUser 的权威字段：
+
+  | 客户端 | 来源 |
+  |---|---|
+  | Trae | `Primary working directory: <path>` |
+  | CodeBuddy | `Workspace Folder: <path>` |
+  | GitHub Copilot Chat | `following folders: - <path>` |
+  | 兜底 | 消息里最频繁的路径前缀（排除系统目录） |
+
+  可用 `BRIDGE_PROJECT`（固定项目名）或 `BRIDGE_PROJECT_MAP`（设备路径→项目名）覆盖。
+- **IDE** 从 `User-Agent` 归一（`trae` / `codebuddy` / `githubcopilotchat`），**剥掉版本号**，升级不换 scope。
+- **会话工作目录**：远程 + mode B 时客户端项目路径在 janus 主机上不存在，用 `BRIDGE_WORKSPACES_DIR/<scope>`（janus 创建的空目录），避免 agent 误认成 `BRIDGE_DIRECTORY` 那个项目、也避免上游对不存在目录注册 MCP 报 500。
+
+> 这不是「可靠的会话识别」，而是**没有会话 id 时的明确退化**：宁可退化到「IDE+项目」级上下文，也不做隐式猜测。未来某 IDE 开放真实 session id，第一优先级会自动用它。
+
+远程部署时把 `BRIDGE_ADDR` 设为 `0.0.0.0:2810`，其它设备把 IDE 的 Base URL 指到 `http://<janus-ip>:2810/v1`（Key 填 `BRIDGE_API_KEY`）。
 
 ## 核心机制
 

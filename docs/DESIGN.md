@@ -521,10 +521,18 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 先 `waitForWaiter(3s)`：目标会话没有在飞请求（没有 executor 注册 watch）就直接返回
 `isError`，立即失败而不是挂死。
 
-**一轮结束即释放**：为从源头减少"别的会话看到本会话工具"，一轮请求结束、且没有
-待回填的工具结果时，`releaseToolsIfIdle` 立即 `RemoveMCP` 注销本会话的 server；
-下一轮用到时再注册（工具集不变则指纹名相同）。否则空闲 server 会一直挂到
-`BRIDGE_SESSION_TTL`（默认 30m），期间被同 location 的其它会话的模型看到甚至调用。
+**结果回填的 id 对齐**：客户端回填的工具结果按 `tool_call_id` 索引，但部分客户端
+（实测 Trae）会用**它自己生成的** id，而不是 janus 下发的 `call_`+hex。因此
+`resumeToolCalls` 按「① 精确 id → ② 工具名 → ③ 顺序」三级对齐 `pending ↔ 结果`，
+并且只取**当前这一轮**（最后一条带 `tool_calls` 的 assistant 之后）的结果，避免命中
+历史里的旧结果造成「回放旧结果」。
+
+**会话存活期内保持注册（不再每轮释放）**：早期实现是「一轮结束即 `RemoveMCP`」，
+但实测 **OpenCode 的 agent 会话不会在 MCP server 重新注册后刷新工具目录** ——
+每轮注销会让下一轮 agent 看到「Code Mode 目录为空」、一个工具都调不了。因此现在
+server 在**会话存活期内一直保持注册**；注销只发生在：会话重置（§5.17）、客户端
+不再声明 tools、以及 janitor 按 TTL 回收。代价是空闲会话的 server 会短暂被同
+location 的其它会话看到——由上面的「防串会话」守卫（`waitForWaiter`）兜住。
 
 ### 5.7.1 权限请求自动应答（`BRIDGE_PERMISSION_REPLY`）
 
@@ -819,10 +827,12 @@ Store + executor + ToolBridge**，`anthropic.go` / `anthropic_stream.go` 只做�
 `prompt = input + cache_read`；命中率 = `cache_read / prompt`）。`/ui` 有一页
 「最近请求」，默认 30s 自动刷新。
 
-- **短缓存**：同一 `limit` 在 **5s** 内复用上次结果，避免 UI 自动刷新/重复调用每次
-  都打上游（该接口可能被限速）。窗口参数变化很快也命中（只按 `limit` 缓存）。
+- **成功短缓存**：同一 `limit` 在 **5s** 内复用上次结果（只按 `limit` 缓存，窗口参数
+  变化很快也命中）。
+- **失败负缓存**：拉取失败后 **60s** 内不再重试；有旧数据就返回旧数据，没有则快速
+  返回上次错误。console 的 `/request-logs` 超时/连不上时，避免 UI 每轮刷新都卡满超时。
 - **取消不算错**：调用方（浏览器）断开导致的 `context.Canceled` 降为 Debug，不再刷
-  WARN；真超时是 `context deadline exceeded`（handler 超时 20s）。
+  WARN；真超时是 `context deadline exceeded`（handler 超时 **10s**）。
 - 开关 `BRIDGE_USAGE_ENABLED`。
 
 ### 5.17 会话重置时清理 MCP 注册
@@ -845,6 +855,7 @@ session**，残留的旧 server 会被 agent 调用并得到
 - **存储**：运行时选择存在 SQLite 的 `settings` 表（key=`default_model`，值 `provider/id[:variant]`）；`Server` 内存里也持一份（`runtimeDefaultModel`）。
 - **接口**：`GET /v1/settings` 读（附带只读的 `configured_default_model`）；`POST /v1/settings {"default_model":"…"}` 写（空=清除；写前用 `ResolveModel` 校验存在）。
 - **解析**：`resolveModel` 里 `janus` → `resolveJanusModel`（运行时 → 配置 → 上游）；`default`/`auto`/空 → `resolveDefaultModel`（配置 → 上游）。真实 `provider/id` 走透传。
+- **启动竞态**：启动瞬间模型列表可能为空/不完整，`janus` 解析不到会**强制刷新一次列表再试**，避免回落到上游默认（常是免费档模型，经 API 会 403）。
 - **档位**：面板选的思考档位拼进 `default_model` 的 `:variant` 后缀（`ResolveModel` 已支持），随默认模型一起生效——让无法传 `reasoning_effort` 的客户端也能固定档位。
 - **切换时机**：`ensureSession` 每次请求比较解析出的 `ref` 与 `conv.model`，不同即 `POST /api/session/{id}/model` **原地切换**（不重开会话、上下文保留）。所以面板改完，**下一条请求**即生效，无需新会话。
 - **面板**：`/ui`「模型」页每行「设为 janus」+「思考档位」按钮组（点选即设、高亮当前）；当前默认行不显示「设为 janus」。

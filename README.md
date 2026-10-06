@@ -349,6 +349,9 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 | `BRIDGE_MCP_ALLOW` | 空 | 限制内置 MCP 端点 `/mcp/{token}` 的来源（逗号分隔 IP/CIDR）。空=不限制；对外暴露或上游在别机时建议设为上游网段 |
 | `BRIDGE_PERMISSION_REPLY` | `once` | 自动应答权限请求：`once`（仅本次）/ `always`（记住）/ `reject`（拒绝）/ `off`（不干预） |
 
+> **结果回填**：客户端用 `role:"tool"` 消息回填结果，按 `tool_call_id` 对应。部分客户端（实测 Trae）会用**自己生成的** id（而非 janus 下发的 `call_`+hex），桥会按「**精确 id → 工具名 → 顺序**」三级对齐，并且只匹配**当前这一轮**的结果（不回放旧结果）。
+> **注册生命周期**：MCP server 在**会话存活期内保持注册**（注销发生在：会话重置 / 客户端不再声明 tools / TTL）。不每轮注销，是因为 OpenCode 的 agent 会话**不会在重新注册后刷新工具目录**，会导致下一轮「Code Mode 目录为空」。
+
 ### Responses API / 用量
 
 | 变量 | 默认 | 说明 |
@@ -838,7 +841,7 @@ Janus 背后是一个**能执行 shell、读写文件**的 agent（默认以启�
 - **默认只监听回环**（`BRIDGE_ADDR=127.0.0.1:2810`）。要远程访问，优先走 SSH 隧道 / VPN / Tailscale，而不是直接 `0.0.0.0`。
 - **必须设 `BRIDGE_API_KEY`**；绑定非回环且 key 为空时任何人都能消耗你的额度。
 - 桥自身**不做 TLS**，公网/不可信网络务必套反向代理（Caddy/nginx）加 HTTPS。
-- **内置 MCP 端点** `/mcp/{token}` 用 128 位随机 token 鉴权，且随会话（一轮结束即注销）短命；仍可用 `BRIDGE_MCP_ALLOW` 按来源 IP/CIDR 再收一层。防串会话：空闲会话的工具调用会被立即拒绝。
+- **内置 MCP 端点** `/mcp/{token}` 用 128 位随机 token 鉴权，随会话短命（**会话重置 / 客户端不再声明 tools / TTL** 时注销，不再每轮注销）；仍可用 `BRIDGE_MCP_ALLOW` 按来源 IP/CIDR 再收一层。防串会话：空闲会话的工具调用会被立即拒绝。
 - **权限自动应答** `BRIDGE_PERMISSION_REPLY`：`once`（默认）只放行单次，`always` 会写入 OpenCode 的持久权限，`reject` 更保守。
 - 想要"agent 不碰本机、工具在客户端执行"，用 `orchestrator` agent（由 janus 自动生成并注入，见「工具执行模式」方式 B）。
 

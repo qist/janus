@@ -383,7 +383,7 @@ var KEY='bridge.usage.key', AUTOKEY='bridge.usage.auto';
 var state={report:null,metrics:null,requests:null,key:localStorage.getItem(KEY)||'',timer:null,
   metric:'cost_usd',days:30,sortKey:'cost_usd',sortDir:-1,
   reqQuery:'',reqSortKey:'time',reqSortDir:-1,reqGroup:'list',
-  catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1,defModel:''};
+  catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1,defModel:'',defVar:''};
 
 function $(s){return document.querySelector(s);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
@@ -704,7 +704,7 @@ function catalogRows(){
       modalities:m.input_modalities||[],
       efforts:m.supported_reasoning_efforts||[],
       isDefault:id==='default',
-      isCurDefault:!!state.defModel&&id===state.defModel,
+      isCurDefault:!!state.defModel&&id===state.defModel.split(':')[0],
       used:!!(used[id]||used[prov+'/'+id])});
   }
   var k=state.catSortKey,d=state.catSortDir;
@@ -810,6 +810,8 @@ function loadRequests(){
 function loadSettings(){
   return api('/v1/settings').then(function(o){
     state.defModel=(o&&o.default_model)||'';
+    var i=state.defModel.indexOf(':');
+    state.defVar=i>=0?state.defModel.slice(i+1):'';
     renderCatalog();
   }).catch(function(){ /* 设置不可用不影响模型目录 */ });
 }
@@ -828,9 +830,22 @@ function renderCatalog(){
   el('catalogEmpty').style.display=rows.length?'none':'block';
   el('catalogBody').innerHTML=rows.map(function(r){
     var tags=(r.id==='default'?'<span class="pill def">默认别名</span>':'')+(r.id==='janus'?'<span class="pill def">janus 别名</span>':'')+(r.isCurDefault?'<span class="pill def">janus 当前</span>':'')+(r.free?'<span class="pill free">免费</span>':'')+(r.used?'<span class="pill used">已用</span>':'');
-    var defBtn=(r.id==='default'||r.id==='auto'||r.id==='janus')?'':'<button class="copybtn setdefbtn" data-setdef="'+esc(r.id)+'" title="设为 janus 默认：客户端模型名填 janus 时用它">设为 janus</button>';
+    var defBtn;
+    if(r.id==='default'||r.id==='auto'||r.id==='janus'||r.isCurDefault){
+      defBtn='';
+    }else{
+      defBtn='<button class="copybtn setdefbtn" data-setdef="'+esc(r.id)+'" title="设为 janus 默认：客户端模型名填 janus 时用它">设为 janus</button>';
+    }
     var mods=r.modalities.length?r.modalities.join(' / '):'–';
-    var effs=r.efforts.length?r.efforts.join(' / '):'–';
+    var effCell;
+    if(r.efforts.length){
+      // 思考档位直接可选：选中即把 janus 默认设为 <模型>:<档位>（选「默认」则不带档位）
+      var eo=['<option value="">默认</option>'];
+      r.efforts.forEach(function(e){ eo.push('<option value="'+esc(e)+'"'+((r.isCurDefault&&e===state.defVar)?' selected':'')+'>'+esc(e)+'</option>'); });
+      effCell='<select class="varSel" data-model="'+esc(r.id)+'" title="选择思考档位（设为 janus 时生效）">'+eo.join('')+'</select>';
+    }else{
+      effCell='<span class="muted">–</span>';
+    }
     return '<tr>'+
       '<td><div class="mname">'+esc(r.id)+tags+
         '<button class="copybtn" data-copy="'+esc(r.id)+'" title="复制模型名（粘到 CC 的 ANTHROPIC_MODEL 或客户端 model 字段）">⧉ 复制</button>'+
@@ -840,7 +855,7 @@ function renderCatalog(){
       '<td class="num"'+(r.context?(' title="'+r.context+' tokens"'):'')+'>'+(r.context?fmtCompact(r.context):'–')+'</td>'+
       '<td class="num"'+(r.output?(' title="'+r.output+' tokens"'):'')+'>'+(r.output?fmtCompact(r.output):'–')+'</td>'+
       '<td class="muted">'+esc(mods)+'</td>'+
-      '<td class="muted">'+esc(effs)+'</td>'+
+      '<td>'+effCell+'</td>'+
       '</tr>';
   }).join('');
 
@@ -1016,14 +1031,27 @@ function bind(){
     if(!n||n===this) return;
     if(n.getAttribute('data-setdef')){
       var mid=n.getAttribute('data-setdef');
-      apiJSON('POST','/v1/settings',{default_model:mid}).then(function(){
-        state.defModel=mid; renderCatalog();
-        toast('已设为 janus 默认：'+mid+'（客户端模型名填 janus 即用它）');
+      var tr=n.closest('tr'), sel=tr?tr.querySelector('.varSel'):null;
+      var v=sel?sel.value:'';
+      var full=v?(mid+':'+v):mid;
+      apiJSON('POST','/v1/settings',{default_model:full}).then(function(){
+        state.defModel=full; state.defVar=v; renderCatalog();
+        toast('已设为 janus 默认：'+full+'（客户端模型名填 janus 即用它）');
       }).catch(function(err){ toast('设置失败：'+((err&&err.message)||err)); });
       return;
     }
     var v=n.getAttribute('data-copy');
     copyText(v).then(function(ok){ toast(ok?('已复制模型名：'+v):'复制失败，请手动选择'); });
+  });
+  el('catalogBody').addEventListener('change',function(e){
+    var s=e.target;
+    if(!s||!s.classList||!s.classList.contains('varSel')) return;
+    var mid=s.getAttribute('data-model'), v=s.value;
+    var full=v?(mid+':'+v):mid;
+    apiJSON('POST','/v1/settings',{default_model:full}).then(function(){
+      state.defModel=full; state.defVar=v; renderCatalog();
+      toast('janus 默认：'+full+'（档位 '+(v||'默认')+'）');
+    }).catch(function(err){ toast('设置失败：'+((err&&err.message)||err)); });
   });
   var cths=document.querySelectorAll('th[data-ck]');
   for(var ci=0;ci<cths.length;ci++){

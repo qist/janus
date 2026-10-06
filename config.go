@@ -49,6 +49,15 @@ type Config struct {
 	// 形如 "claude-3-5-sonnet=opencode-go/gpt-6-luna,claude-3-5-haiku=opencode-go/glm-5.3-flash"。
 	ModelMap map[string]string
 
+	// Project 显式项目身份（BRIDGE_PROJECT）；空=自动归一（见 scope.go）。
+	Project string
+	// ProjectMap 客户端目录 → 项目名（BRIDGE_PROJECT_MAP），
+	// 如 "/opt/tvfusion=tvfusion,D:\\project\\tvfusion=tvfusion"。用于跨设备路径归一。
+	ProjectMap map[string]string
+	// ScopeKey=true 时按 scope(=hash(IDE+项目)) 定位会话（没有会话 id 时的兜底），
+	// 而不是按 (system+user+dir)。默认 false。
+	ScopeKey bool
+
 	SessionTTL        time.Duration // 会话空闲回收
 	RequestTimeout    time.Duration // 单次补全超时
 	ReconcileInterval time.Duration // 事件流对账间隔
@@ -306,6 +315,9 @@ func LoadConfig() (Config, error) {
 		Agent:        loader.str("BRIDGE_AGENT", "build"),
 		DefaultModel: loader.str("BRIDGE_DEFAULT_MODEL", ""),
 		ModelMap:     parseModelMap(loader.str("BRIDGE_MODEL_MAP", "")),
+		Project:      loader.str("BRIDGE_PROJECT", ""),
+		ProjectMap:   parseProjectMap(loader.str("BRIDGE_PROJECT_MAP", "")),
+		ScopeKey:     loader.boolean("BRIDGE_SCOPE_KEY", false),
 
 		SessionTTL:        loader.dur("BRIDGE_SESSION_TTL", 30*time.Minute),
 		RequestTimeout:    loader.dur("BRIDGE_REQUEST_TIMEOUT", 600*time.Second),
@@ -393,6 +405,27 @@ func parseModelMap(s string) map[string]string {
 			continue
 		}
 		k := strings.ToLower(strings.TrimSpace(part[:i]))
+		v := strings.TrimSpace(part[i+1:])
+		if k != "" && v != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// parseProjectMap 解析 "路径=项目名,路径2=项目名2"。键（路径）保留原样，忽略非法项。
+func parseProjectMap(s string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		i := strings.Index(part, "=")
+		if i <= 0 {
+			continue
+		}
+		k := strings.TrimSpace(part[:i])
 		v := strings.TrimSpace(part[i+1:])
 		if k != "" && v != "" {
 			out[k] = v

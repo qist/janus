@@ -438,9 +438,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"),
 		r.Header.Get("x-claude-code-session-id"), r.Header.Get("X-Claude-Code-Session-Id"))
 
-	key := ConversationKey(explicit, systemText, "", dir)
+	key := s.conversationKey(r, explicit, systemText, "", dir, inputMsgs)
 	s.logClientInfo(r, "", dir, key, inputMsgs)
-	conv := s.store.Acquire(key, inputMsgs)
+	var conv *Conversation
+	if s.cfg.ScopeKey && explicit == "" {
+		conv = s.store.AcquireKey(key)
+	} else {
+		conv = s.store.Acquire(key, inputMsgs)
+	}
 	defer s.store.Release(conv)
 
 	// 上一轮被中止过：重开干净会话，别把新任务续接到残缺会话上。
@@ -506,7 +511,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if mode == DiffReset && conv.snapshotSessionID() != "" {
-		if d, ok := TolerateReset(stored, inputMsgs); ok {
+		if s.cfg.ScopeKey && explicit == "" {
+			if d := lastUserTurn(inputMsgs); len(d) > 0 {
+				s.log.Infof("scope mode: appending last user turn to shared context (scope=%s)", conv.Key)
+				mode, delta = DiffAppend, d
+			} else {
+				s.resetSession(conv)
+			}
+		} else if d, ok := TolerateReset(stored, inputMsgs); ok {
 			s.log.Infof("history mismatch tolerated, appending last user turn (key=%s)", conv.Key)
 			mode, delta = DiffAppend, d
 		} else {

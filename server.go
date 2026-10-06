@@ -81,11 +81,25 @@ func (s *Server) logClientInfo(r *http.Request, user, dir, key string, msgs []Ch
 	if seen {
 		return
 	}
-	s.log.Infof("client: user=%q dir=%q ua=%q x-session=%q x-oc-session=%q x-oc-dir=%q x-oc-agent=%q cc-session=%q firstUser=%q key=%s",
+	_, scopeReadable := s.scopeOf(r, r.Header.Get("X-OpenCode-Directory"), msgs)
+	s.log.Infof("client: user=%q dir=%q ua=%q x-session=%q x-oc-session=%q x-oc-dir=%q x-oc-agent=%q cc-session=%q firstUser=%q key=%s scope=%s",
 		user, dir, r.UserAgent(),
 		r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"),
 		r.Header.Get("X-OpenCode-Directory"), r.Header.Get("X-OpenCode-Agent"), ccSession,
-		truncate(firstUserTitle(msgs, 60), 80), key)
+		truncate(firstUserTitle(msgs, 60), 80), key, scopeReadable)
+}
+
+// conversationKey 计算会话键：显式会话头 > scope(开启时) > 指纹(system+user+dir)。
+// scope 模式用于「没有会话 id」时退化到 IDE+项目 级归属（见 scope.go）。
+func (s *Server) conversationKey(r *http.Request, explicit, system, user, dir string, msgs []ChatMessage) string {
+	if explicit != "" {
+		return "x:" + explicit
+	}
+	if s.cfg.ScopeKey {
+		k, _ := s.scopeOf(r, r.Header.Get("X-OpenCode-Directory"), msgs)
+		return k
+	}
+	return ConversationKey(explicit, system, user, dir)
 }
 
 // runtimeDefaultModel 返回 web 里选定的默认模型（可能为空）。

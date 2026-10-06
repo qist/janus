@@ -727,9 +727,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), s.cfg.Directory)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
 
-	key := ConversationKey(explicit, firstSystem(req.Messages), req.User, dir)
+	key := s.conversationKey(r, explicit, firstSystem(req.Messages), req.User, dir, req.Messages)
 	s.logClientInfo(r, req.User, dir, key, req.Messages)
-	conv := s.store.Acquire(key, req.Messages)
+	// scope 模式（无会话 id 的兜底）：一个 scope 一个会话，不做历史前缀分桶。
+	var conv *Conversation
+	if s.cfg.ScopeKey && explicit == "" {
+		conv = s.store.AcquireKey(key)
+	} else {
+		conv = s.store.Acquire(key, req.Messages)
+	}
 	defer s.store.Release(conv)
 
 	// 上一轮被客户端中止过（用户点了终止 / 断连）：新内容不能再续接到那个
@@ -771,7 +777,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// DiffReset 必须先于「工具注册」处理：resetSession 会注销本会话的工具桥，
 	// 若先注册再重置，新会话就会没有工具（agent 只剩内置工具）。
 	if mode == DiffReset && conv.snapshotSessionID() != "" {
-		if d, ok := TolerateReset(stored, req.Messages); ok {
+		if s.cfg.ScopeKey && explicit == "" {
+			// scope 模式：明确退化为「一个 scope 一个上下文」——不重置，追加最后一条 user。
+			if d := lastUserTurn(req.Messages); len(d) > 0 {
+				s.log.Infof("scope mode: appending last user turn to shared context (scope=%s)", conv.Key)
+				mode, delta = DiffAppend, d
+			} else {
+				s.resetSession(conv)
+			}
+		} else if d, ok := TolerateReset(stored, req.Messages); ok {
 			s.log.Infof("history mismatch tolerated, appending last user turn (key=%s)", conv.Key)
 			mode, delta = DiffAppend, d
 		} else {

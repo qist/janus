@@ -291,7 +291,8 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `BRIDGE_MODEL_MAP` | 空 | 模型别名映射（逗号分隔 `from=to`，键不区分大小写，键以 `*` 结尾为前缀通配）。主要给 Claude Code：**只需映射 opus/sonnet/haiku 三个档位**，如 `claude-opus*=opencode-go/deepseek-v4-pro,claude-haiku*=opencode-go/glm-5.3-flash`。想省事就用 `BRIDGE_DEFAULT_MODEL` 一个开关；用 `janus models` 查当前映射 |
 | `BRIDGE_WEBSEARCH_ENABLED` | `true` | 是否支持 Claude Code 的 `web_search` 服务端工具（由 Janus 内部调用上游 `/api/websearch` 执行） |
 | `BRIDGE_AGENT` | `build` | 默认 agent，取值见下 |
-| `BRIDGE_SESSION_TTL` | `30m` | 会话空闲回收时间（同时删上游 session） |
+| `BRIDGE_SESSION_TTL` | `30m` | **普通**会话空闲回收时间（同时删上游 session）。支持 `never`/`off`/`none`/`0` = 永不按空闲回收 |
+| `BRIDGE_SHARED_SESSION_TTL` | `24h` | **共享（scope）会话**空闲回收时间，单独一档（跨设备共享希望保留更久）。同样支持 `never`/`off`/`none`/`0` = 永不 |
 | `BRIDGE_REQUEST_TIMEOUT` | `600s` | 单次补全总超时 |
 | `BRIDGE_MAX_CONVERSATIONS` | `256` | 内存中最大会话数（LRU） |
 
@@ -409,7 +410,7 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 | `BRIDGE_MODEL_ECHO` | `real` | 响应 `model` 字段回显什么：`real`=解析后的真实模型（如 `opencode-go/mimo-v2.5-pro`）；`request`=客户端请求里的原始名（如 `claude-sonnet-4-5`） |
 | `BRIDGE_DB` | 默认 `$XDG_DATA_HOME/janus/janus.db` | 持久化库路径（SQLite）。不设=默认路径；`memory`/`off`=纯内存。开启后**响应、会话映射与 Chat 历史快照**都落盘，Chat / Responses 均可跨进程重启续接 |
 | `BRIDGE_HISTORY_MAX_BYTES` | `1048576` | 落库的 Chat 历史快照上限（字节）；超过只存会话映射。0=不限 |
-| `BRIDGE_CONV_TTL` | `168h` | 持久化的会话映射/历史保留时长（janitor 清理） |
+| `BRIDGE_CONV_TTL` | `168h` | 持久化的会话映射/历史保留时长（janitor 清理）。支持 `never`/`off`/`none`/`0` = 永不清理 |
 | `BRIDGE_USAGE_ENABLED` | `true` | 是否开放 `/v1/usage` |
 | `BRIDGE_USAGE_TTL` | `30s` | 用量报告缓存时长（避免频繁打 console API） |
 
@@ -623,6 +624,7 @@ BRIDGE_SCOPE_KEY=true
   可用 `BRIDGE_PROJECT`（固定项目名）或 `BRIDGE_PROJECT_MAP`（设备路径→项目名）覆盖。
 - **IDE** 从 `User-Agent` 归一（`trae` / `codebuddy` / `githubcopilotchat`），**剥掉版本号**，升级不换 scope。
 - **会话工作目录**：远程 + mode B 时客户端项目路径在 janus 主机上不存在，用 `BRIDGE_WORKSPACES_DIR/<scope>`（janus 创建的空目录），避免 agent 误认成 `BRIDGE_DIRECTORY` 那个项目、也避免上游对不存在目录注册 MCP 报 500。
+- **保留时间**：共享会话按 **`BRIDGE_SHARED_SESSION_TTL`**（默认 **`24h`**）空闲回收——空闲超过就删上游 session、清映射；一直用则不回收。要永久保留设 `never`（或 `off`/`none`/`0`）。持久层映射/历史另由 `BRIDGE_CONV_TTL`（默认 `168h`）兜底。
 
 > 这不是「可靠的会话识别」，而是**没有会话 id 时的明确退化**：宁可退化到「IDE+项目」级上下文，也不做隐式猜测。未来某 IDE 开放真实 session id，第一优先级会自动用它。
 

@@ -124,9 +124,10 @@ type Store struct {
 	// 不相关的话题各占一格，互不干扰。
 	dir       map[string][]*Conversation
 	log       *Logger
-	ttl       time.Duration
-	max       int // 全局会话数上限
-	maxPerKey int // 单 key 候选数上限，防止滑动窗口客户端无限新建
+	ttl       time.Duration // 普通会话空闲回收；<0 = 永不
+	sharedTTL time.Duration // 共享（scope）会话空闲回收；<0 = 永不
+	max       int           // 全局会话数上限
+	maxPerKey int           // 单 key 候选数上限，防止滑动窗口客户端无限新建
 
 	// orphans 收集被挤出索引的上游 sessionID，由 janitor 异步删除。
 	// 带缓冲 + 满则丢，保证 evict 路径永不阻塞（它持着 s.mu）。
@@ -165,15 +166,31 @@ func (s *Store) restoreLocked(c *Conversation) {
 	}
 }
 
-func NewStore(log *Logger, ttl time.Duration, max int) *Store {
+func NewStore(log *Logger, ttl, sharedTTL time.Duration, max int) *Store {
+	if sharedTTL == 0 {
+		sharedTTL = ttl
+	}
 	return &Store{
 		dir:       map[string][]*Conversation{},
 		log:       log,
 		ttl:       ttl,
+		sharedTTL: sharedTTL,
 		max:       max,
 		maxPerKey: 8,
 		orphans:   make(chan string, 512),
 	}
+}
+
+// isScopeKey 判断是否为共享（scope = IDE+项目）会话键。
+// 这类会话跨设备共享，通常希望比单机会话保留更久（见 BRIDGE_SHARED_SESSION_TTL）。
+func isScopeKey(key string) bool { return strings.HasPrefix(key, scopeKeyPrefix) }
+
+// ttlFor 返回该会话按空闲回收的时长；<0 表示永不按空闲回收。
+func (s *Store) ttlFor(c *Conversation) time.Duration {
+	if isScopeKey(c.Key) {
+		return s.sharedTTL
+	}
+	return s.ttl
 }
 
 // ConversationKey 优先级：显式头 > 指纹。
@@ -368,7 +385,7 @@ func (s *Store) GC() []string {
 				rest = append(rest, c)
 				continue // 正在服务
 			}
-			if c.idle() > s.ttl {
+			if ttl := s.ttlFor(c); ttl >= 0 && c.idle() > ttl {
 				if id := c.snapshotSessionID(); id != "" {
 					dead = append(dead, id)
 				}

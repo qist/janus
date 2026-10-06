@@ -617,7 +617,7 @@ func TestExtFor(t *testing.T) {
 
 // ---------- 分桶 + 前缀匹配 ----------
 
-func newTestStore() *Store { return NewStore(NewLogger("error"), time.Minute, 64) }
+func newTestStore() *Store { return NewStore(NewLogger("error"), time.Minute, time.Minute, 64) }
 
 // 指纹 key 相同的两个不相关话题必须拿到不同会话，不能互相挤掉。
 func TestStoreSeparatesUnrelatedTopicsSameKey(t *testing.T) {
@@ -765,7 +765,7 @@ func TestStoreCapsPerKey(t *testing.T) {
 
 // 全局上限也要守住。
 func TestStoreCapsGlobal(t *testing.T) {
-	s := NewStore(NewLogger("error"), time.Minute, 4)
+	s := NewStore(NewLogger("error"), time.Minute, time.Minute, 4)
 	for i := 0; i < 30; i++ {
 		c := s.Acquire("k"+string(rune('a'+i)), []ChatMessage{m("user", "x")})
 		c.setLast([]ChatMessage{m("user", "never")})
@@ -784,7 +784,7 @@ func TestStoreCapsGlobal(t *testing.T) {
 
 // 被挤出的会话要进 orphans 通道，让 janitor 删上游 session。
 func TestStoreEvictedSessionsGoToOrphans(t *testing.T) {
-	s := NewStore(NewLogger("error"), time.Minute, 2)
+	s := NewStore(NewLogger("error"), time.Minute, time.Minute, 2)
 	for i := 0; i < 10; i++ {
 		c := s.Acquire("k"+string(rune('a'+i)), []ChatMessage{m("user", "x")})
 		c.setSessionID("ses_" + string(rune('a'+i)))
@@ -797,7 +797,7 @@ func TestStoreEvictedSessionsGoToOrphans(t *testing.T) {
 }
 
 func TestGCReturnsIdleSessions(t *testing.T) {
-	s := NewStore(NewLogger("error"), 0, 8) // ttl=0 → 立即过期
+	s := NewStore(NewLogger("error"), 0, 0, 8) // ttl=0 → 立即过期
 	c := s.Acquire("f:k", []ChatMessage{m("user", "x")})
 	c.setSessionID("ses_old")
 	c.setLast([]ChatMessage{m("user", "x")})
@@ -817,7 +817,7 @@ func TestGCReturnsIdleSessions(t *testing.T) {
 
 // 正在服务（mu 被持）的会话不能被 GC 掉。
 func TestGCSkipsBusyConversation(t *testing.T) {
-	s := NewStore(NewLogger("error"), 0, 8)
+	s := NewStore(NewLogger("error"), 0, 0, 8)
 	c := s.Acquire("f:k", []ChatMessage{m("user", "x")})
 	c.setSessionID("ses_busy")
 	c.setLast([]ChatMessage{m("user", "x")})

@@ -4,6 +4,17 @@
 
 ---
 
+## [v0.3.14] - 2026-10-06
+
+### 新增
+- **共享会话独立保留时间**：新增 **`BRIDGE_SHARED_SESSION_TTL`**（默认 **`24h`**），只作用于
+  scope（`s:`）共享会话；普通会话仍用 `BRIDGE_SESSION_TTL`（默认 `30m`）。
+  跨设备共享希望保留更久——空闲超过才回收，一直用则不回收。
+- **TTL 支持"永不回收"**：`BRIDGE_SESSION_TTL` / `BRIDGE_SHARED_SESSION_TTL` / `BRIDGE_CONV_TTL`
+  均支持 `never` / `off` / `none` / `0` = 永不按时间回收（会话仍受 `BRIDGE_MAX_CONVERSATIONS` 的 LRU 上限约束）。
+
+---
+
 ## [v0.3.13] - 2026-10-06
 
 ### 新增

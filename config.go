@@ -62,6 +62,7 @@ type Config struct {
 	WorkspacesDir string
 
 	SessionTTL        time.Duration // 会话空闲回收
+	SharedSessionTTL  time.Duration // 共享（scope）会话空闲回收；<0 = 永不回收
 	RequestTimeout    time.Duration // 单次补全超时
 	ReconcileInterval time.Duration // 事件流对账间隔
 	IdlePollInterval  time.Duration // 空闲轮询间隔（终端信号兜底）
@@ -141,7 +142,7 @@ type Config struct {
 	// HistoryMaxBytes 落库的 Chat 历史快照上限；超过则只存会话映射（不存历史）。
 	HistoryMaxBytes int
 
-	// ConvTTL 持久化的"会话键 → sessionID/历史"保留时长（janitor 清理）。
+	// ConvTTL 持久化的"会话键 → sessionID/历史"保留时长（janitor 清理）。<0 = 永不清理。
 	ConvTTL time.Duration
 
 	ConfigFile string // 实际加载的配置文件路径（空 = 没加载）
@@ -201,6 +202,29 @@ func (l *cfgLoader) dur(key string, def time.Duration) time.Duration {
 	v, ok := l.get(key)
 	if !ok {
 		return def
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return def
+}
+
+// ttlNever 表示"永不回收/清理"（给 durTTL 用）。
+const ttlNever = time.Duration(-1)
+
+// durTTL 与 dur 类似，但额外支持 never/off/none/0 = 永不回收（返回 ttlNever）。
+// 用于会话/映射的保留时长：设 0 或 never 就是不按时间回收。
+func (l *cfgLoader) durTTL(key string, def time.Duration) time.Duration {
+	v, ok := l.get(key)
+	if !ok {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "never", "off", "none", "no", "0":
+		return ttlNever
 	}
 	if d, err := time.ParseDuration(v); err == nil && d > 0 {
 		return d
@@ -335,7 +359,8 @@ func LoadConfig() (Config, error) {
 		ScopeKey:      loader.boolean("BRIDGE_SCOPE_KEY", false),
 		WorkspacesDir: loader.str("BRIDGE_WORKSPACES_DIR", defaultWorkspacesDir()),
 
-		SessionTTL:        loader.dur("BRIDGE_SESSION_TTL", 30*time.Minute),
+		SessionTTL:        loader.durTTL("BRIDGE_SESSION_TTL", 30*time.Minute),
+		SharedSessionTTL:  loader.durTTL("BRIDGE_SHARED_SESSION_TTL", 24*time.Hour),
 		RequestTimeout:    loader.dur("BRIDGE_REQUEST_TIMEOUT", 600*time.Second),
 		ReconcileInterval: loader.dur("BRIDGE_RECONCILE_INTERVAL", 3*time.Second),
 		IdlePollInterval:  loader.dur("BRIDGE_IDLE_POLL_INTERVAL", 1*time.Second),
@@ -381,7 +406,7 @@ func LoadConfig() (Config, error) {
 		UserAgent:       loader.str("BRIDGE_USER_AGENT", ""),
 		DBPath:          loader.str("BRIDGE_DB", defaultDBPath()),
 		HistoryMaxBytes: loader.integer("BRIDGE_HISTORY_MAX_BYTES", 1<<20),
-		ConvTTL:         loader.dur("BRIDGE_CONV_TTL", 7*24*time.Hour),
+		ConvTTL:         loader.durTTL("BRIDGE_CONV_TTL", 7*24*time.Hour),
 
 		ConfigFile: cfgPath,
 	}

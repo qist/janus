@@ -203,10 +203,13 @@ func (s *Server) projectIdentity(clientDir string, msgs []ChatMessage) string {
 	return "default"
 }
 
-// scopeKey 由 IDE + 项目算出 scope key（`s:<hex>`，与 x:/f: 键空间隔离）。
+// scopeKeyPrefix 是 scope（IDE+项目）会话键的前缀，与 x:/f: 键空间隔离。
+const scopeKeyPrefix = "s:"
+
+// scopeKey 由 IDE + 项目算出 scope key（`s:<hex>`）。
 func scopeKey(ide, project string) string {
 	h := sha256.Sum256([]byte(strings.ToLower(ide) + "\x00" + strings.ToLower(project)))
-	return "s:" + hex.EncodeToString(h[:8])
+	return scopeKeyPrefix + hex.EncodeToString(h[:8])
 }
 
 // scopeOf 返回 (scopeKey, 可读 scope)。
@@ -233,7 +236,7 @@ func (s *Server) sessionDir(headerDir string, msgs []ChatMessage, scopeKey strin
 			return p
 		}
 	}
-	name := strings.Trim(strings.TrimPrefix(scopeKey, "s:"), "/")
+	name := strings.Trim(strings.TrimPrefix(scopeKey, scopeKeyPrefix), "/")
 	if name == "" {
 		name = "default"
 	}

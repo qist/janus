@@ -174,12 +174,10 @@ func (s *Server) janitor(ctx context.Context) {
 			s.sweepTools(ctx)
 			s.responses.gc()
 			if s.db != nil {
-				// 会话映射 / 历史快照保留时长（默认 7 天）
-				ttl := s.cfg.ConvTTL
-				if ttl <= 0 {
-					ttl = 7 * 24 * time.Hour
+				// 会话映射 / 历史快照保留时长（默认 7 天）；<0 = 永不清理
+				if ttl := s.cfg.ConvTTL; ttl >= 0 {
+					s.db.gcConvs(time.Now().Add(-ttl).Unix())
 				}
-				s.db.gcConvs(time.Now().Add(-ttl).Unix())
 			}
 			s.perKeyLimit.GC()
 			s.globalLimit.GC()

@@ -175,7 +175,7 @@ func NewServer(cfg Config, log *Logger) *Server {
 		log:         log,
 		up:          up,
 		bus:         NewEventBus(up, log, cfg.PermissionReply),
-		store:       NewStore(log, cfg.SessionTTL, cfg.MaxConversations),
+		store:       NewStore(log, cfg.SessionTTL, cfg.SharedSessionTTL, cfg.MaxConversations),
 		models:      NewModelCache(60 * time.Second),
 		usage:       NewUsageClient(cfg, log),
 		tools:       NewToolBridge(log, cfg.ToolCallWait, cfg.ToolCallWaitFast, cfg.ToolFastTools),
@@ -389,8 +389,11 @@ func (c *Config) applyDefaults() {
 	if c.MaxConversations <= 0 {
 		c.MaxConversations = 256
 	}
-	if c.SessionTTL <= 0 {
+	if c.SessionTTL == 0 {
 		c.SessionTTL = 30 * time.Minute
+	}
+	if c.SharedSessionTTL == 0 {
+		c.SharedSessionTTL = 24 * time.Hour
 	}
 }
 

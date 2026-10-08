@@ -155,7 +155,7 @@ harness 自己管模型配置，Janus **注入配置**：
   **auth 不止 api-key**：
   - `api-key`：BYOK（openrouter / openai / anthropic / litellm / 各网关 / 本地）；
   - `oauth-subscription`：订阅制授权（Claude 订阅、Codex/ChatGPT 登录态、OpenCode Go）。
-    **按用户维度绑定**——每个用户自登自用，不做租户级共享（边界见 §11 #19）；
+    **按用户维度绑定**——每个用户自登自用，不做租户级共享（边界见 §12 #19）；
   - `free-tier`：免费档（如 OpenCode 免费额度，自带限流 / 地域限制）；
   - `none`：本地 / 无需鉴权。
 - **模型自由创建**：providers / models 落 sqlite，用户可经 API / UI 自行增删改
@@ -167,6 +167,22 @@ harness 自己管模型配置，Janus **注入配置**：
   按用户隔离——谁的 key 谁用、谁的订阅谁用。
 - **订阅式 OAuth** 由用户在自己账号下完成（`POST /v1/providers/{id}/login` 透出 URL / device code），
   不透传、不缓存到租户级。
+
+### 4.1 故障转移与降级（路由韧性）
+
+单模型 / provider 会 429 / 超时 / 上游中断（4054） / 余额不足，路由层必须有明确降级链：
+
+| 事件 | janus 行为 |
+|---|---|
+| 上游 429 / 配额 / 余额不足 | 配了 `fallback` → 切备用（同语义档位）；无 → 回标准 `429 rate_limit_error`（DESIGN 现有映射） |
+| 模型侧超时 / 上游中断（4054 类） | 幂等轮次重试 1 次；再失败 → fallback 或 `504 api_error` |
+| 工具等待超时（§toolbridge 长期等待） | 现有行为：桥中断 + 保命注释；不向客户端隐藏 |
+| 全部 fallback 耗尽 | 明确报错，`/v1/requests` 记完整链路（primary → 各 fallback 段） |
+
+- **每模型可配 `fallback: [modelA, modelB]`**（同 / 跨 provider），路由层顺序尝试；
+  与 §8.2 成本分层路由共用同一张模型表。
+- 故障转移是**路由层**职责，不是协议层——错误码语义由 DESIGN 现有映射兜住。
+- fallback 链记 `audit trail`（谁、何时、从哪个模型切到哪个、原因），进 `/v1/requests`。
 
 ---
 
@@ -192,6 +208,34 @@ role: backend
 
 **意义**：客户端只选 role，一次选择就定死 **模型 + 执行模式 + 权限 + 预算**。
 一个 role 也可绑定**多 Agent 团队**（内部按 §6 编排，客户端无感知）。
+
+### 5.1 角色注入：模型怎么知道自己是这个角色
+
+**角色不是从用户消息里猜的**——用户消息里的「你现在是 CEO」一律视为用户数据，不改变身份；
+身份由 Janus 在会话 / 任务创建时**单向注入**（写死后不可被模型改写）：
+
+| 通道 | 机制（现有 / 规划） | 内容 |
+|---|---|---|
+| ① harness agent 配置 | OpenCode `agents.*` **已能注入**（`opencodeInlineConfig`，现有 `orchestrator` 即第一个角色先例）；规划按 role 生成 | description / mode / permissions——OpenCode 把它当成 agent 的默认职责与工具边界 |
+| ② system / developer 消息 | 标准协议通道：OpenAI `developer`、Anthropic `system` block（**规划**，新会话首条注入） | 角色身份卡（见下） |
+| ③ 工具面 | mode 的 tools 白名单 / deny（§2） | 能力边界本身就在“教”模型角色，且模型改不掉 |
+| ④ 任务工作台 | DAG 流水线输入以 worktree 文件 + 引用清单交付（§6.4 / §8.2） | PRD / 设计稿 / 接口文档，不整段塞 prompt |
+
+**角色身份卡**（通道②的注入模板，固定前缀）：
+
+```
+<role id="security-reviewer">
+  你是谁：独立安全审计员，只读分析，不产出代码
+  边界：只读；不写文件；不执行修改性命令
+  输出：审计报告（固定格式…）
+  汇报：结论与交付物引用给主 agent，不转存整段上下文
+</role>
+```
+
+- 身份卡由 Janus 管理 API 生成、**只读注入**；模型在会话内自改身份视为**身份漂移**，
+  可作降权 / 审计事件（权限 deny 兜底）。
+- **三层注入时机**：新会话首条消息（协议层）＋ harness agent 配置（配置层）＋ 任务工作台（任务层），
+  缺一不可——只给配置不给身份卡，模型不知道“为什么这么干”。
 
 ---
 
@@ -271,7 +315,7 @@ Router 产出「谁参与」→ 派单引擎把 agents 摊成 **DAG 节点**（�
 DAG 的边 = **artifact 依赖 + 门禁**（沿用 §9 artifact-gated 规则：只读可并行、同一 artifact
 单 writer、门禁通过才推进）。
 
-### 6.7 交付顺序（与 §12 路线图对齐）
+### 6.7 交付顺序（与 §13 路线图对齐）
 
 1. **Agent Registry**：`agents` 表 + `janus/agent/*` 管理 API + 市场安装；
 2. **Intent Router**：默认走方案 2 意图路由，方案 1/4 作旁路；
@@ -313,6 +357,7 @@ DAG 的边 = **artifact 依赖 + 门禁**（沿用 §9 artifact-gated 规则：�
 | **成本分层路由** | 简单轮次便宜模型，难轮次强模型 |
 | **预算上限** | per-conversation / per-job，超限摘要或停 |
 | **子代理只回摘要** | 探索在子代理上下文，主线拿结论 |
+| **按模型窗口适配截断** | `models.context_window` 配在模型表（§10.4）；摘要/截断阈值按窗口比例（如 70% 触发摘要），避免小窗口模型被同一条策略卡死 |
 
 **最贵的两个动作：重发全量、重建会话。** 压住这俩，费用就下来。
 
@@ -360,17 +405,22 @@ Gate   门禁：人工 / 自动（测试、审计）
 ## 10. 平台层（多用户）
 
 ### 10.1 配置入库（SQLite，config-as-data）
-- **数据库 = SQLite**（延续现有 `BRIDGE_DB`：单文件嵌入式、WAL、零外部依赖）；不引 PostgreSQL 等外部服务。
+- **数据库 = SQLite**（单文件嵌入式、WAL、零外部依赖）；不引 PostgreSQL 等外部服务。
+  schema 以 §10.4 表清单为准，不做任何“沿用旧结构”的兼容设计。
 - **配置都是数据**：providers、models（§4）、roles、agents（§6）、users、api_keys、budgets、permissions
   全部落 sqlite，经 API / UI 管理——**运行配置不写进文档 / 配置文件**。
 - **文件 / env 只做 bootstrap**：监听地址、DB 路径、加密主密钥、初始 admin（启动前必需的最小集）。
+  旧 env 映射（`BRIDGE_PROJECT_MAP` / `BRIDGE_MODEL_MAP` 等）**不做兼容层**：数据库为准，
+  无回退分支、无双读逻辑；存量配置一次性导入，导入完旧 env 即废弃。
+- **部署形态**：默认单进程单机（SQLite 文件 + WAL）。多副本高可用不引外部服务，**本路线不做**；
+  备份 = 定期 `.backup` + WAL checkpoint。
 
 ### 10.2 身份与用户自建 key
 - **OIDC**（Janus 当 Relying Party；IdP 用 Authentik / Keycloak / Zitadel / Google / GitHub）。
 - **用户自助创建 API key**：Web / API 里生成 `sk-janus-…`，绑定用户 + 权限 + 预算；
   可随时吊销、可轮换；程序化客户端 / IDE 用它接入。
 - **订阅制授权**：用户可在自己账号下绑定订阅登录（Claude / Codex / OpenCode Go 等），
-  凭据加密归个人，组织不共享订阅（§11 #19 的边界）。
+  凭据加密归个人，组织不共享订阅（§12 #19 的边界）。
 - 两条腿都要：浏览器 OIDC + API key。
 
 ### 10.3 隔离
@@ -381,14 +431,86 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 **推荐后者**（扩展现有 autostart 能力）。
 
-### 10.4 provider 登录
+### 10.4 核心表清单（config-as-data 落库对齐）
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `users` | id, oidc_sub | 身份；`oidc_sub` 唯一 |
+| `api_keys` | id, user_id, hash, scopes | `sk-janus-…`；**只存 hash**（§15） |
+| `providers` | id, type, base_url, auth_ref | auth 指向加密凭据（§4） |
+| `models` | id, provider_id, name, context_window, pricing, fallback[] | §4 / §4.1 共用 |
+| `roles` | id, agent_ref, mode, permissions, budget | §5 客户端可选面 |
+| `agents` | id, skills, system_prompt, tools | §6 Registry |
+| `conversations` | id, user_id, scope, harness, session_id, summary | canonical 映射（§8.1） |
+| `budgets` | subject(user/org/project), limit, window | §11.5 |
+| `usage` | request_id, user_id, model, tokens(含 cache 分项), cost | §11 逐条落库 |
+| `requests` | id, user_id, org, model, status, cache_hit, fallback_chain | 审计（现有 `/v1/requests` 的库化） |
+
+### 10.5 provider 登录
 - **不要 Janus 自己实现各厂商 OAuth**。
 - 走 harness 自身登录（`opencode auth login`）或 **ACP `authenticate`**；Janus 只透出 URL / device code。
 - API：`POST /v1/providers/{id}/login` → `{url, user_code}`；`GET .../login/status`。
 
 ---
 
-## 11. 可行性与硬约束
+## 11. 观测与计量（用量 / 请求 / 缓存 / 多租户监控）
+
+> 结论先行：**上游（OpenAI / Anthropic / OpenCode）不会通过普通聊天接口透传累计用量、成本、
+> 缓存命中率**——每次响应只带**单请求**的 usage。累计与命中率必须 Janus 自己算：
+> **带内聚合为主，带外专查为辅**。
+
+### 11.1 数据来源三层
+
+| 层 | 来源 | 提供什么 |
+|---|---|---|
+| 带内（in-band） | 每次请求响应的 `usage`（非流式；流式配 `stream_options.include_usage`） | prompt / completion tokens；Anthropic `cache_read_input_tokens` / `cache_creation_input_tokens`；OpenAI 自动提示缓存分项 |
+| 带外（out-of-band） | 上游用量端点**专门查询**：OpenAI Usage、Anthropic Usage & Cost、**OpenCode Go `/usage`（代码已支持 `OPENCODE_GO_USAGE`）**、LiteLLM / new-api `/balance` `/usage` | 累计用量 / 成本 / 限额 / 余额（校正带内差额） |
+| Janus 自有 | 请求日志（`/v1/requests`）、响应缓存命中（§8.1 DiffNone→回放）、网关指标（`/metrics`） | 请求量、时延、错误率、**自身缓存命中率**、工具调用/超时 |
+
+### 11.2 聚合与口径
+
+- **单请求 usage 必须逐条落库**（含 cache 分项），累计才有依据；无 usage 的请求按模型单价（§4
+  模型表可配定价）估算或补查。
+- **缓存命中率两个口径**：
+  1. **上游 prompt 缓存命中**：`cache_read / (cache_read + cache_creation + no_cache)`——看供应商省钱效果；
+  2. **Janus 自身响应缓存命中**：`replyCached` / DiffNone 回放次数 ÷ 总请求——看桥省了多少上游调用。
+- **成本**：模型单价 × tokens（缓存价更低），按用户 / 租户 / 项目累计落库。
+
+### 11.3 多租户监控 API（对外）
+
+- **上游不按「IDE 组织」维度**：OpenAI / OpenCode 用量按账号算，没有多企业视角；
+  多租户维度只有 Janus 自己有。**因此对外监控 API 是 Janus 自己的**：
+  - `GET /v1/usage`（现有，扩展）：按 `user / org / project / date_range` 返回累计用量与成本；
+  - `GET /metrics`（现有）：按 `user / org / project` 打标，权限内可见；
+  - `GET /v1/requests`（现有，审计）：请求明细 + 缓存命中标记 + 用量，支持租户过滤；
+  - 管理 API：`GET /v1/admin/orgs/{id}/usage` 等，仅管理员。
+- **不透传上游单请求 usage 给普通客户端**：那是计费/审计数据，走管理员与统计维度，
+  不进标准聊天响应（标准协议无此通道）。
+
+### 11.4 落地顺序
+
+1. 单请求 usage 全量落 sqlite（含 cache 分项）→ 累计口径成立；
+2. `/v1/usage` 扩展租户维度 + `/metrics` 打标；
+3. 带外查上游用量端点（OpenCode Go 已有）校正差额；
+4. 缓存命中率两口径上线（上游 prompt 缓存 + 自身响应缓存）。
+
+### 11.5 配额与限流（计量 → 配额 → 限流 闭环）
+
+计量（§11.1-11.4）之后必须落到**执行**，否则只是报表：
+
+| 层级 | 配额 | 超限行为 |
+|---|---|---|
+| 每用户 / 每租户 | 月度 token / 金额（`budgets` 表） | 拒绝新请求（`402`/`429`）或降级到备用模型 |
+| 每 role / 每任务 | role 的 `budget`（§5） | **先摘要在途轮次、再停**（统一 §8.2 口径） |
+| 每模型 / provider | 上游 rate limit（分钟级） | 排队 / 退避 / 切 fallback（§4.1） |
+
+- **决策点都在 Janus**（网关层统一裁决），harness / 客户端不感知；
+- 配额与用量同表同库，`/v1/usage` 直接可查剩余额度；
+- 预算剩余 = 已批准额度 − 用量聚合（带内落库值），管理 API 与 `/ui` 可查。
+
+---
+
+## 12. 可行性与硬约束
 
 | # | 能力 | 可行性 | 依据 / 风险 |
 |---|---|---|---|
@@ -419,18 +541,27 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 25 | DAG Scheduler（agents 列表 → DAG） | 🔴 难 | 依赖异步 Job + 派单（#15/#16） |
 | 26 | 模型/供应商自由创建（DB + API/UI） | 🟡 中 | providers/models 表 + 管理 API（§4） |
 | 27 | 订阅制授权（用户维度 OAuth/登录态） | 🟡→🔴 中高 | 每用户自登自用；不透传/不共享（§4） |
-| 28 | 配置即数据（sqlite 全量，config-as-data） | 🟡 中 | 已有 `BRIDGE_DB` 基础，补管理 API/UI |
+| 28 | 配置即数据（sqlite 全量，config-as-data） | 🟡 中 | §10.4 表清单 + 管理 API/UI；无 env 兼容层 |
+| 29 | 用量/成本聚合（单请求 usage 全量落库，含 cache 分项） | 🟡 中 | 现有 `/v1/usage` + `/v1/requests` 基础 |
+| 30 | 缓存命中率两口径（上游 prompt 缓存 + 自身响应缓存） | 🟡 中 | 上游 usage 字段 + DiffNone 回放计数 |
+| 31 | 多租户监控 API（`/v1/usage` 扩展 + `/metrics` 打标） | 🟡 中 | 权限 + 租户标签维度 |
+| 32 | 角色注入（agent 配置 + system 身份卡 + 任务工作台） | 🟡 中 | §5.1；`orchestrator` 注入已有先例 |
+| 33 | 模型故障转移 / 降级（fallback 链 + audit trail） | 🟡 中 | 路由层职责（§4.1） |
+| 34 | 配额与限流执行（budgets 表 + 网关裁决） | 🟡 中 | 用量同库（§11.5） |
+| 35 | 核心表清单落库（users/api_keys/providers/models/roles/agents/usage…） | 🟡 中 | §10.4；不保留 env 兼容分支 |
+| 36 | 安全与合规（密钥轮换 / 日志脱敏 / 审计保留期 / 越权过滤） | 🟡 中 | §15；AUDIT.md 已有明细 |
 
 **三条硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）、订阅 OAuth 别做主干（#19）。
 
 ---
 
-## 12. 路线图
+## 13. 路线图
 
 | 阶段 | 内容 | 目标 |
 |---|---|---|
-| **P0** | Role 注册表 + `janus/<role>` 虚拟模型 + API key；配置「文件 + DB 覆盖」 | 让客户端只选 role；模型可集中配置 |
+| **P0** | Role 注册表 + `janus/<role>` 虚拟模型 + **角色注入（§5.1：agent 配置 + 身份卡 + 工作台）** + API key；配置「文件 + DB 覆盖」 | 让客户端只选 role；模型可集中配置 |
 | **P1** | 自建模型网关 + 目录（摆脱 Console）+ **模型/供应商自由创建（DB + API/UI）**；权限策略（服务端裁决 + 审计） | 模型访问层独立；权限可管 |
+| **P1.5** | **观测与计量**：单请求 usage 全量落库（含 cache 分项）、成本聚合、缓存命中率两口径、多租户监控 API（§11） | 平台的计费 / 审计 / 监控卖点 |
 | **P2** | **异步 Job**（durable、events / cancel / 续订） | 派单与 Multi-Agent 编排队列的地基 |
 | **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 + **用户自建 API key**；**订阅制授权（用户维度）**；sqlite 配置中心（config-as-data） | harness 可插拔；多用户 |
 | **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4），再逐步加 artifact 依赖图 | 产品研发流水线 / Multi-Agent |
@@ -439,19 +570,42 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 ---
 
-## 13. 现状对照
+## 14. 现状对照
 
-**已实现（见 DESIGN.md）**：OpenAI/Anthropic/Responses 三套协议、会话分桶与历史重放、**无会话 id 的 scope（IDE+项目）共享会话**（独立 TTL）、工具桥（MCP，等待分两档）、权限自动应答、上游自动发现与托管、`/v1/usage`、`/v1/requests` + `/ui`、持久化、工具结果注释、终止后重开会话、**跨平台（linux/darwin/windows）**、统一出站 `User-Agent`。
+**已实现（见 DESIGN.md）**：OpenAI/Anthropic/Responses 三套协议、会话分桶与历史重放、**无会话 id 的 scope（IDE+项目）共享会话**（独立 TTL）、工具桥（MCP，等待分两档）、权限自动应答、上游自动发现与托管、`/v1/usage`、`/v1/requests` + `/ui`、`/metrics`（opencode_bridge_* 指标）、持久化、工具结果注释、终止后重开会话、**跨平台（linux/darwin/windows）**、统一出站 `User-Agent`。
 
 **已实现（本路线的早期落点）**：
 - **harness 配置自动注入**：janus 通过 `OPENCODE_CONFIG_CONTENT` 注入自动生成的 `orchestrator` 白名单（§3.3），无需手写 `~/.config/opencode/opencode.jsonc`；
 - **janus 自管上游**：`OPENCODE_REUSE_EXTERNAL=false` 时 janus 总是自己拉起 OpenCode（注入的前提）。
 
-**本路线新增**：模型访问层、Role/虚拟模型、权限策略、异步 Job、ACP、平台层（DB/OIDC/多用户）、派单、**多 Agent 编排（Registry / Router / DAG，§6）**。
+**本路线新增**：模型访问层、Role/虚拟模型、**角色注入（§5.1）**、**故障转移（§4.1）**、权限策略、异步 Job、ACP、平台层（DB/OIDC/多用户，**§10.4 表清单**）、派单、**多 Agent 编排（Registry / Router / DAG，§6）**、**观测计量与配额（§11）**、**安全合规（§15）**。
 
 ---
 
-## 14. 非目标（明确排除）
+## 15. 安全与合规（密钥 / 审计 / 隐私）
+
+> 详细审计设计见 [`AUDIT.md`](./AUDIT.md)；本章只定架构级原则。
+
+### 15.1 密钥与凭据
+- **三层密钥**：主密钥（文件/env bootstrap，AES-GCM）→ 用户凭据（api-key / 订阅登录态，加密落库 §4）
+  → 访问密钥（`sk-janus-…`，**只存 hash**）。
+- **轮换**：主密钥轮换 = `rekey` 管理操作（重加密全部凭据）；`sk-janus-*` 随时吊销 / 再生（§10.2）。
+- **脱敏**：请求 / 审计日志对 api-key、provider auth、订阅 token 脱敏（只留尾 4 位或 hash）；
+  prompt / 回复正文默认不落库（除显式审计开关）。
+
+### 15.2 审计与合规
+- `/v1/requests`（§11.3）是审计主通道：谁、何时、哪个用户/租户、模型、用量、fallback 链、权限裁决事件。
+- **保留期**：请求明细与 usage 设保留窗口（如 90 天），到期归档 / 清理；用量聚合单独长存（§11）。
+- `/ui` 与日志只进运维侧，**不进客户端**（§7 观测原则）。
+
+### 15.3 越权防护（多租户）
+- 所有查询按 `user_id / org` 过滤（服务端强制，不是前端过滤）；管理 API 仅 admin 角色。
+- `agents` / `roles` 的资源引用在会话创建时**校验归属**，防跨租户引用。
+- 会话 scope（IDE+项目，§8.1）归属到 user，跨用户不可见。
+
+---
+
+## 16. 非目标（明确排除）
 
 - 不重写 agent / 工具 / MCP / 会话 runtime。
 - 不实现模型推理。

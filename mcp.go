@@ -211,6 +211,14 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// 配套状态查询工具失败时，给 agent 补一句"换名重试"提示：它列表里就有
+		// 另一个名字（CheckCommandStatus/check_command_status），不用再反复搜索卡住。
+		if res.IsError {
+			if h := companionErrorHint(pend.ToolName); h != "" {
+				res.Content += h
+			}
+		}
+
 		mcpReply(w, req.ID, map[string]any{
 			"content": []map[string]any{{"type": "text", "text": res.Content}},
 			"isError": res.IsError,

@@ -131,28 +131,35 @@ var companionToolSchema = json.RawMessage(`{"type":"object","properties":{"` +
 
 // augmentCompanionTools 给「异步命令」类工具补配套的状态查询工具。
 //
-// 实测（Trae）：RunCommand 对长任务立即返回 command_id、异步执行，但配套的
-// check_command_status 工具只在客户端本地有、不会写进发给桥的 tools[] 声明
-// （"在工具列表外"）。于是 agent 只看到 RunCommand：build 跑起来后既不知道
-// 结束、也拿不到输出，只能猜/干等 → 卡住。补上配套工具后，agent 正常闭环：
+// 实测（Trae）：RunCommand 对长任务立即返回 command_id、异步执行，但配套的状态
+// 查询工具只在客户端本地有、不会写进发给桥的 tools[] 声明（"在工具列表外"）。
+// 于是 agent 只看到 RunCommand：build 跑起来后既不知道结束、也拿不到输出，
+// 只能猜/干等 → 卡住。补上配套工具后，agent 正常闭环：
 //
-//	RunCommand → command_id → CheckCommandStatus/check_command_status → 结果
+//	RunCommand → command_id → 状态查询工具 → 结果
 //
-// 补的两个名字都透传给客户端（跟客户端本地名字大小写一致的那个会成功）。
-// 客户端若已在 tools[] 里声明过同名工具则不重复。
+// 配套工具叫什么，**优先从触发工具的描述里自动识别**（不同客户端文档里写的名字
+// 不同：CheckCommandStatus / check_command_status / GetCommandStatus… 描述里
+// 写了哪个就用哪个，不靠猜）；描述里没写才退回默认两个名字都试
+// （CheckCommandStatus 与 check_command_status，哪个跟客户端本地名字一致哪个成功）。
+// 名字原样透传给客户端本地执行；客户端已声明过同名工具则不重复。
 func augmentCompanionTools(tools []ToolSpec) []ToolSpec {
-	need := false
-	for _, t := range tools {
-		if companionTriggerTools[strings.ToLower(t.Function.Name)] {
-			need = true
+	var trigger *ToolSpec
+	for i := range tools {
+		if companionTriggerTools[strings.ToLower(tools[i].Function.Name)] {
+			trigger = &tools[i]
 			break
 		}
 	}
-	if !need {
+	if trigger == nil {
 		return tools
 	}
+	names := companionNamesFromDescription(trigger.Function.Description)
+	if len(names) == 0 {
+		names = []string{"CheckCommandStatus", "check_command_status"}
+	}
 	out := append([]ToolSpec(nil), tools...)
-	for _, name := range []string{"CheckCommandStatus", "check_command_status"} {
+	for _, name := range names {
 		if hasTool(out, name) {
 			continue // 客户端自己声明了，别重复
 		}
@@ -168,6 +175,60 @@ func augmentCompanionTools(tools []ToolSpec) []ToolSpec {
 		})
 	}
 	return normalizeTools(out)
+}
+
+// companionToolTokens 是从触发工具（RunCommand…）描述里识别配套状态查询工具名的
+// 候选标志（按出现顺序、原文大小写照抄，避免猜错客户端本地名字）。
+var companionToolTokens = []string{
+	"CheckCommandStatus",
+	"check_command_status",
+	"GetCommandStatus",
+	"get_command_status",
+	"CheckTerminalStatus",
+	"check_terminal_status",
+}
+
+// companionNamesFromDescription 从描述文本里提取配套状态查询工具名（出现即用）。
+func companionNamesFromDescription(desc string) []string {
+	var out []string
+	for _, tok := range companionToolTokens {
+		if !strings.Contains(desc, tok) {
+			continue
+		}
+		dup := false
+		for _, n := range out {
+			if n == tok {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, tok)
+		}
+	}
+	return out
+}
+
+// companionStatusFamily 是配套状态查询工具的已知名字集合（小写）。用于调它失败时
+// 给 agent 补一句"换名重试"提示，避免它在工具列表里反复搜索、卡住。
+var companionStatusFamily = map[string]bool{
+	"checkcommandstatus":    true,
+	"check_command_status":  true,
+	"getcommandstatus":      true,
+	"get_command_status":    true,
+	"checkterminalstatus":   true,
+	"check_terminal_status": true,
+}
+
+// companionErrorHint 返回配套状态查询工具失败时应附加给 agent 的提示；非配套工具返回空。
+func companionErrorHint(toolName string) string {
+	if !companionStatusFamily[strings.ToLower(toolName)] {
+		return ""
+	}
+	return "\n\nbridge hint: 若错误是\"工具名不存在/名称不对\"，说明客户端没认这个名字：" +
+		"请改用另一个状态查询工具名重试（CheckCommandStatus / check_command_status，" +
+		"command_id 不变）。两个都不行的话，需把状态查询工具加进客户端的工具声明，" +
+		"或改用上游原生命令工具执行。"
 }
 
 // hasTool 判断工具集里是否已存在指定名字（大小写敏感，与客户端声明一致）。

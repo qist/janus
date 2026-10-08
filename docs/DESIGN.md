@@ -574,8 +574,10 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 `RunCommand`/`run_command`/`execute_command` 等触发工具时，自动给 agent 补
 `CheckCommandStatus` 与 `check_command_status`（入参 `command_id`，取 RunCommand 返回值），
 与普通工具同链路：agent 调 → 桥回 `tool_calls` 给客户端（同名）→ 客户端本地执行并回填；
-客户端已声明同名工具则不重复。两者都补是兼容不同客户端对本地工具的大小写命名；
-状态查询秒回，默认走短等待。
+客户端已声明同名工具则不重复。名字优先从触发工具的描述里识别（描述写了
+`CheckCommandStatus`/`get_command_status` 等就用哪个，不靠猜），没写才两个默认都补；
+调用失败时桥把备选名字直接提示给 agent（`bridge hint: 换名重试，command_id 不变`），
+避免 agent 反复搜索工具名卡住。状态查询秒回，默认走短等待。
 
 **结果回填的 id 对齐**：客户端回填的工具结果按 `tool_call_id` 索引，但部分客户端
 （实测 Trae）会用**它自己生成的** id，而不是 janus 下发的 `call_`+hex。因此

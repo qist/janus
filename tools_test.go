@@ -889,3 +889,36 @@ func normSorted(ts []ToolSpec) bool {
 	}
 	return true
 }
+
+// 触发工具的描述里写明了配套状态查询工具名 → 原样识别，不靠猜也不补默认名。
+func TestAugmentCompanionToolsDerivesFromDescription(t *testing.T) {
+	base := []ToolSpec{{Function: ToolFunction{
+		Name:        "RunCommand",
+		Description: "运行命令。长任务请使用 get_command_status 工具轮询执行结果。",
+	}}}
+	out := augmentCompanionTools(base)
+	got := map[string]bool{}
+	for _, s := range out {
+		got[s.Function.Name] = true
+	}
+	if !got["get_command_status"] {
+		t.Fatalf("应从描述识别出 get_command_status，got %+v", got)
+	}
+	if got["CheckCommandStatus"] || got["check_command_status"] {
+		t.Fatalf("描述已给出明确名字时不应再补默认名: %+v", got)
+	}
+}
+
+// 配套状态查询工具失败时，桥要附上"换名重试"提示，agent 不用反复搜索卡住。
+func TestCompanionErrorHint(t *testing.T) {
+	if h := companionErrorHint("check_command_status"); h == "" || !strings.Contains(h, "CheckCommandStatus") {
+		t.Fatalf("配套名应返回换名提示: %q", h)
+	}
+	if h := companionErrorHint("Grep"); h != "" {
+		t.Fatalf("非配套名不应返回提示: %q", h)
+	}
+	// 大小写不敏感
+	if companionErrorHint("CHECK_COMMAND_STATUS") == "" {
+		t.Fatal("配套名判断应大小写不敏感")
+	}
+}

@@ -4,6 +4,22 @@
 
 ---
 
+## [v0.3.21] - 2026-10-08
+
+### 修复
+- **配套状态查询工具名不再靠猜**（承接 v0.3.20 的 RunCommand 配套工具）：上线实测客户端（Trae）
+  对小写 `check_command_status` 报"工具名不对"。现在：
+  - 优先从 `RunCommand` 等触发工具**自带的描述**里识别配套工具的真实名字
+    （`CheckCommandStatus` / `check_command_status` / `GetCommandStatus` / `get_command_status`…
+    描述里写了哪个就用哪个，不靠猜）；
+  - 描述没写才退回默认两个名字（`CheckCommandStatus` + `check_command_status`）都暴露；
+  - 配套工具调用**失败时，桥把另一个可用的名字直接附进错误提示**给 agent
+    （`bridge hint: 请改用 CheckCommandStatus…，command_id 不变`），agent 立即换名重试，
+    不再在工具列表里反复"搜索正确的工具名"卡住。
+  - **无需任何新配置**。
+
+---
+
 ## [v0.3.20] - 2026-10-08
 
 ### 修复

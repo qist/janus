@@ -149,13 +149,24 @@ harness 自己管模型配置，Janus **注入配置**：
 
 ## 4. 模型访问层
 
-**目标：不依赖 OpenCode Console。**
+**目标：不依赖 OpenCode Console；provider 与模型是「数据」，不是「文档/配置文件」。**
 
 - **provider 抽象**：`{type: openrouter|openai|anthropic|litellm|opencode|local, base_url, auth}`。
-- **模型目录**：聚合公开注册表（models.dev）+ 各 provider `/models`，落 DB。
-- **翻译网关**：LiteLLM / new-api / one-api / OpenRouter，同时暴露 Anthropic + OpenAI 协议；统一鉴权、限流、计量。
-- **用户自带 key**：加密存储（AES-GCM，主密钥来自文件/env）。
-- **订阅式 OAuth**（Codex/Claude）为**可选附加**，不作主干（见 §11 硬约束）。
+  **auth 不止 api-key**：
+  - `api-key`：BYOK（openrouter / openai / anthropic / litellm / 各网关 / 本地）；
+  - `oauth-subscription`：订阅制授权（Claude 订阅、Codex/ChatGPT 登录态、OpenCode Go）。
+    **按用户维度绑定**——每个用户自登自用，不做租户级共享（边界见 §11 #19）；
+  - `free-tier`：免费档（如 OpenCode 免费额度，自带限流 / 地域限制）；
+  - `none`：本地 / 无需鉴权。
+- **模型自由创建**：providers / models 落 sqlite，用户可经 API / UI 自行增删改
+  （base_url、auth 类型、模型列表、定价 / 限流），**不写死在配置文档里**。
+- **模型目录**：先用公开注册表（models.dev）+ 各 provider `/models` 初始化，之后全凭用户编辑。
+- **翻译网关**：LiteLLM / new-api / one-api / OpenRouter，同时暴露 Anthropic + OpenAI 协议；
+  统一鉴权、限流、计量。
+- **用户凭据中心**：api-key 与订阅登录态**统一加密存储**（AES-GCM，主密钥来自文件/env bootstrap），
+  按用户隔离——谁的 key 谁用、谁的订阅谁用。
+- **订阅式 OAuth** 由用户在自己账号下完成（`POST /v1/providers/{id}/login` 透出 URL / device code），
+  不透传、不缓存到租户级。
 
 ---
 
@@ -348,13 +359,18 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 ## 10. 平台层（多用户）
 
-### 10.1 配置入库
-- **文件 bootstrap**：监听地址、DB DSN、加密主密钥、初始 admin（启动前必需）。
-- **DB**：providers、roles（虚拟模型）、users、api_keys、budgets、permissions。
+### 10.1 配置入库（SQLite，config-as-data）
+- **数据库 = SQLite**（延续现有 `BRIDGE_DB`：单文件嵌入式、WAL、零外部依赖）；不引 PostgreSQL 等外部服务。
+- **配置都是数据**：providers、models（§4）、roles、agents（§6）、users、api_keys、budgets、permissions
+  全部落 sqlite，经 API / UI 管理——**运行配置不写进文档 / 配置文件**。
+- **文件 / env 只做 bootstrap**：监听地址、DB 路径、加密主密钥、初始 admin（启动前必需的最小集）。
 
-### 10.2 身份
+### 10.2 身份与用户自建 key
 - **OIDC**（Janus 当 Relying Party；IdP 用 Authentik / Keycloak / Zitadel / Google / GitHub）。
-- 程序化客户端：**Janus 签发 API key**（`sk-janus-…`，绑定用户）。
+- **用户自助创建 API key**：Web / API 里生成 `sk-janus-…`，绑定用户 + 权限 + 预算；
+  可随时吊销、可轮换；程序化客户端 / IDE 用它接入。
+- **订阅制授权**：用户可在自己账号下绑定订阅登录（Claude / Codex / OpenCode Go 等），
+  凭据加密归个人，组织不共享订阅（§11 #19 的边界）。
 - 两条腿都要：浏览器 OIDC + API key。
 
 ### 10.3 隔离
@@ -401,6 +417,9 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 23 | Agent Registry + 能力自描述匹配 | 🟡 中 | `agents` 表 + skills 契约 + 管理 API |
 | 24 | Intent Router（Router Agent） | 🟡 中 | 复用现有 Agent 通道；多一跳 |
 | 25 | DAG Scheduler（agents 列表 → DAG） | 🔴 难 | 依赖异步 Job + 派单（#15/#16） |
+| 26 | 模型/供应商自由创建（DB + API/UI） | 🟡 中 | providers/models 表 + 管理 API（§4） |
+| 27 | 订阅制授权（用户维度 OAuth/登录态） | 🟡→🔴 中高 | 每用户自登自用；不透传/不共享（§4） |
+| 28 | 配置即数据（sqlite 全量，config-as-data） | 🟡 中 | 已有 `BRIDGE_DB` 基础，补管理 API/UI |
 
 **三条硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）、订阅 OAuth 别做主干（#19）。
 
@@ -411,9 +430,9 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 阶段 | 内容 | 目标 |
 |---|---|---|
 | **P0** | Role 注册表 + `janus/<role>` 虚拟模型 + API key；配置「文件 + DB 覆盖」 | 让客户端只选 role；模型可集中配置 |
-| **P1** | 自建模型网关 + 目录（摆脱 Console）；权限策略（服务端裁决 + 审计） | 模型访问层独立；权限可管 |
+| **P1** | 自建模型网关 + 目录（摆脱 Console）+ **模型/供应商自由创建（DB + API/UI）**；权限策略（服务端裁决 + 审计） | 模型访问层独立；权限可管 |
 | **P2** | **异步 Job**（durable、events / cancel / 续订） | 派单与 Multi-Agent 编排队列的地基 |
-| **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 | harness 可插拔；多用户 |
+| **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 + **用户自建 API key**；**订阅制授权（用户维度）**；sqlite 配置中心（config-as-data） | harness 可插拔；多用户 |
 | **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4），再逐步加 artifact 依赖图 | 产品研发流水线 / Multi-Agent |
 
 每阶段独立可交付，且可回退。

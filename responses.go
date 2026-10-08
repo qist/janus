@@ -666,9 +666,12 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		conv.setPendingToolCalls(nil)
 		if len(pending) == 0 {
 			// 回填来得太晚：上轮工具调用已全部超时，agent 已被释放/中断。
-			// 续跑只会空转后报错，按新的一轮继续（结果平铺进 input）。
+			// 续跑只会空转后报错，按新的一轮继续。客户端可能一次回填整批积压
+			// 旧结果（含早已消费过的），必须剥掉，否则被 Flatten 进新 prompt、
+			// agent 把旧数据当新上下文用（数据回放）。
 			s.log.Warnf("responses tool results arrived after all pending calls timed out (conv=%s); treating as new turn",
 				conv.Key)
+			inputMsgs = stripStaleToolResults(inputMsgs)
 		} else {
 			// 先确保会话存在
 			if _, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs); err != nil {

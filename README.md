@@ -396,7 +396,7 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 | `BRIDGE_TOOL_CALLING` | `true` | 是否启用内置 MCP server 透传客户端 `tools` |
 | `BRIDGE_TOOL_SOFT_FAIL` | `false` | 工具注册失败时：`true`=降级为无工具继续；`false`=直接报错 |
 | `BRIDGE_TOOL_REREGISTER` | `10m` | 多久主动续注册一次 MCP（上游重启会丢注册） |
-| `BRIDGE_TOOL_CALL_WAIT` | `5m` | 工具调用挂起、等客户端回填结果的最长时间（**执行类**工具：`RunCommand`/`execute_command` 等） |
+| `BRIDGE_TOOL_CALL_WAIT` | `30m` | 工具调用挂起、等客户端回填结果的最长时间（**执行类**工具：`RunCommand`/`execute_command` 等）。长命令/发布流水线（触发推送+等节点+查版本）可能远超 5 分钟，默认给足 30m |
 | `BRIDGE_TOOL_CALL_WAIT_FAST` | `90s` | **只读/编辑类**工具的短等待。这类工具正常秒回，卡住基本是客户端卡死，快速判失败能让模型继续，而不是干等 5m 撞上 IDE 自身超时。`<=0` 或 `>= BRIDGE_TOOL_CALL_WAIT` 时不启用 |
 | `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` | `Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile,CheckCommandStatus,check_command_status` | 走短等待的工具名（逗号分隔，不区分大小写）。**未列出的工具（含未知新工具）一律走长等待**，避免误杀长任务。设成 `none`/`off`/`-` 表示禁用短等待 |
 | `BRIDGE_TOOL_COMPANIONS` | `true` | 客户端声明了「异步命令」类工具（`RunCommand`/`execute_command`…）时，自动给 agent 补配套的状态查询工具 `CheckCommandStatus` / `check_command_status`（入参 `command_id` 取 RunCommand 返回值），走同一透传链路由**客户端本地**执行。这类配套工具客户端只在本地有、**不会写进 `tools[]` 声明**；不补的话 agent 发起 build 等长命令后无法查结果、会卡住。设 `false` 关闭 |

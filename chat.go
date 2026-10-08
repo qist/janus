@@ -791,11 +791,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if len(pending) == 0 {
 			// 客户端回填来得太晚：上轮工具调用已全部超时并被释放（见 mcp.go）。
 			// 上游 agent 已中断，此时若续跑只会空转后报错，客户端会再多收一次
-			// "模型请求失败"。改为按普通新轮次继续：结果平铺进提示词（
-			// FlattenDelta 输出 [Tool: name]），agent 从结果里接着干。
+			// "模型请求失败"。改为按普通新轮次继续。
 			// 注意不能 setLast —— 否则下面 Diff 会算出 DiffNone 丢掉工具结果。
+			// 更要紧的是：客户端可能一次把积压的整批旧结果都塞回来（实测 18 条，
+			// 含早已消费过的），必须剥掉这些过期 tool 消息，否则会被平铺进新 prompt
+			// （FlattenDelta 输出 [Tool: name]），agent 把旧数据当新上下文用（数据回放）。
 			s.log.Warnf("tool results arrived after all pending calls timed out (conv=%s, results=%s); treating as new turn",
 				conv.Key, resultIDs(toolResultsFromMessages(req.Messages)))
+			req.Messages = stripStaleToolResults(req.Messages)
 		} else {
 			conv.setLast(cloneMessages(req.Messages))
 			s.persistConv(conv)

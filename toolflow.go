@@ -269,6 +269,47 @@ func hasToolResults(msgs []ChatMessage) bool {
 	return false
 }
 
+// stripStaleToolResults 在「全部工具调用均已超时、客户端才把结果补回来」的场景下，
+// 从消息里去掉这些过期结果与纯 tool_calls 的中间轮。
+//
+// 为什么必须剥：客户端可能把积压的一整批旧结果一起回填（实测一次 18 条，含早已
+// 消费过的），若照旧平铺进新 prompt，agent 会把过期数据当新上下文用——"数据回放"。
+// 剥离后只留真正的对话内容；若一条 user 都没有（客户端只回填了结果、没带新指令），
+// 退回原列表的最后一条 user，让 agent 至少有内容可回应。
+func stripStaleToolResults(msgs []ChatMessage) []ChatMessage {
+	out := make([]ChatMessage, 0, len(msgs))
+	for _, m := range msgs {
+		switch m.Role {
+		case "tool":
+			continue // 过期结果：不进 prompt
+		case "assistant":
+			// 纯"调用工具"的中间轮没有内容，整条丢弃；带文字（推理/结论）的保留但清掉
+			// tool_calls —— 它们的对应结果已被丢弃，留着只会引诱模型去"消费"旧结果。
+			if m.Content.Text == "" {
+				continue
+			}
+			m.ToolCalls = nil
+		}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return msgs // 极端退化：全部剥光，回退旧行为
+	}
+	hasUser := false
+	for _, m := range out {
+		if m.Role == "user" {
+			hasUser = true
+			break
+		}
+	}
+	if !hasUser {
+		if u := lastUserTurn(msgs); len(u) > 0 {
+			out = append(out, u...)
+		}
+	}
+	return out
+}
+
 // livePending 过滤掉已超时（stale）的挂起调用，保留仍在等客户端回填的。
 //
 // 客户端在等待期内没回结果时，桥会按超时释放并中断上游 agent（见 mcp.go）。

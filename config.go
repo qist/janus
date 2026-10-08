@@ -412,7 +412,7 @@ func LoadConfig() (Config, error) {
 		ToolCalling:      loader.boolean("BRIDGE_TOOL_CALLING", true),
 		ToolSoftFail:     loader.boolean("BRIDGE_TOOL_SOFT_FAIL", false),
 		ToolReregister:   loader.dur("BRIDGE_TOOL_REREGISTER", 10*time.Minute),
-		ToolCallWait:     loader.dur("BRIDGE_TOOL_CALL_WAIT", 5*time.Minute),
+		ToolCallWait:     loader.dur("BRIDGE_TOOL_CALL_WAIT", 30*time.Minute),
 		ToolCallWaitFast: loader.dur("BRIDGE_TOOL_CALL_WAIT_FAST", 90*time.Second),
 		ToolFastTools:    parseToolSet(loader.str("BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS", defaultFastTools)),
 		ToolCompanions:   loader.boolean("BRIDGE_TOOL_COMPANIONS", true),

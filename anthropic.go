@@ -466,10 +466,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		conv.setPendingToolCalls(nil)
 		if len(pending) == 0 {
 			// 回填来得太晚：上轮工具调用已全部超时，agent 已被释放/中断。
-			// 此时续跑只会空转后报错，改为按普通新轮次继续（结果平铺进提示词）。
+			// 此时续跑只会空转后报错，改为按普通新轮次继续。
 			// 注意不能 setLast —— 否则下面 Diff 会算出 DiffNone 丢掉工具结果。
+			// 客户端可能一次回填整批积压旧结果（含早已消费过的），必须剥掉，
+			// 否则会被平铺进新 prompt、agent 把旧数据当新上下文用（数据回放）。
 			s.log.Warnf("anthropic tool results arrived after all pending calls timed out (conv=%s, results=%s); treating as new turn",
 				conv.Key, resultIDs(toolResults))
+			inputMsgs = stripStaleToolResults(inputMsgs)
 		} else {
 			conv.setLast(cloneMessages(inputMsgs))
 			s.persistConv(conv)

@@ -383,7 +383,7 @@ func (c *Config) applyDefaults() {
 		c.StreamIdleTimeout = 0
 	}
 	if c.ToolCallWait <= 0 {
-		c.ToolCallWait = 5 * time.Minute
+		c.ToolCallWait = 30 * time.Minute
 	}
 	// 短等待必须比长等待小，否则没意义（全部走长等待）。
 	if c.ToolCallWaitFast <= 0 || c.ToolCallWaitFast >= c.ToolCallWait {

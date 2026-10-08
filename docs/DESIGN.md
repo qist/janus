@@ -553,8 +553,9 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 
 - 工具调用**超时**（客户端在 `BRIDGE_TOOL_CALL_WAIT` 内没回结果）→ **中断该会话的上游 agent**；
   超时的调用打 stale 标记，客户端**晚到**的回填（用户审批 diff 超时后点重试等）不再触发
-  resume —— 三条路径都先 `livePending` 过滤，全部超时则按普通新轮次处理（结果平铺进提示词），
-  避免在已中断的会话上空转、客户端再多收一次"模型请求失败"；
+  resume —— 三条路径都先 `livePending` 过滤，全部超时则按普通新轮次处理（先
+  `stripStaleToolResults` 剥掉整批过期结果与纯 tool_calls 中间轮，再把真实对话内容平铺进
+  提示词），避免在已中断的会话上空转、客户端再多收一次"模型请求失败"，也避免旧数据被回放；
 - 守卫宽限 `BRIDGE_TOOL_ORPHAN_WAIT`（默认 `30s`）：idle 会话等这么久仍无人接手 → 判孤儿 →
   拒绝 + **中断该会话上游**（从源头结束，不再让 agent 一直重试）；
 - 守卫的 idle 拒绝日志**限流**（同一会话每 60s 最多一条，附被抑制条数）。
@@ -563,7 +564,7 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 `WebFetch`/`Write`/`SearchReplace`/`DeleteFile`）正常秒回，卡住基本是客户端卡死，用
 `BRIDGE_TOOL_CALL_WAIT_FAST`（默认 `90s`）快速判失败、把工具错误还给模型继续；执行类
 （`RunCommand`/`execute_command`…）和**未列出的工具（含未知新工具）**用
-`BRIDGE_TOOL_CALL_WAIT`（默认 `5m`），避免误杀 build / 长命令。列表用
+`BRIDGE_TOOL_CALL_WAIT`（默认 `30m`），避免误杀 build / 长命令。列表用
 `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` 调，设 `none`/`off`/`-` 即禁用短等待。
 
 **配套工具补全（异步命令闭环）**：`RunCommand` 这类「异步命令」工具对长任务（build/编译）
@@ -977,7 +978,7 @@ $EDITOR janus.env
 | `BRIDGE_STREAM_HEARTBEAT` | `15s` | SSE 心跳间隔 |
 | `BRIDGE_STREAM_IDLE_TIMEOUT` | `120s` | 流式空闲超时（无真实数据即判卡死；心跳不算）；`0`/`never` 关闭 |
 | `BRIDGE_TOOL_CALLING` | `true` | 是否把客户端 `tools` 经内置 MCP 暴露给 agent（§5.7） |
-| `BRIDGE_TOOL_CALL_WAIT` | `5m` | **执行类**工具挂起等待上限 |
+| `BRIDGE_TOOL_CALL_WAIT` | `30m` | **执行类**工具挂起等待上限 |
 | `BRIDGE_TOOL_CALL_WAIT_FAST` | `90s` | **只读/编辑类**工具短等待（§5.7） |
 | `BRIDGE_TOOL_ORPHAN_WAIT` | `30s` | idle 会话的守卫宽限；超时判孤儿 → 拒绝 + 中断该会话上游 |
 | `BRIDGE_TOOL_ANNOTATIONS` | `true` | 是否注入 `<opencode-tool>` 注释 |

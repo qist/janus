@@ -37,7 +37,9 @@ const (
 	mcpToolPrefix = "ob_"
 
 	// defaultToolWait 是工具调用挂起的最长时间（等客户端回填结果）。
-	defaultToolWait = 5 * time.Minute
+	// 执行类工具（RunCommand 等）要跑真长命令/发布流水线（如触发推送+等节点+查版本），
+	// 5 分钟太短会掐掉还在跑的命令；默认 30m，可按部署调 BRIDGE_TOOL_CALL_WAIT。
+	defaultToolWait = 30 * time.Minute
 
 	// toolCallIDPrefix OpenAI 风格的 tool_call id 前缀。
 	toolCallIDPrefix = "call_"

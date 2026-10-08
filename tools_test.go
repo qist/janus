@@ -922,3 +922,49 @@ func TestCompanionErrorHint(t *testing.T) {
 		t.Fatal("配套名判断应大小写不敏感")
 	}
 }
+
+// 全部工具调用超时后，客户端把积压的整批旧结果回填（实测 18 条、含早已消费过的）。
+// 必须剥掉 tool 消息与纯 tool_calls 中间轮，否则被平铺进新 prompt、旧数据回放。
+func TestStripStaleToolResults(t *testing.T) {
+	in := []ChatMessage{
+		{Role: "user", Content: MessageContent{Text: "开始"}},
+		{Role: "assistant", Content: MessageContent{Text: "好的，先跑命令"},
+			ToolCalls: []ToolCall{{ID: "call_1", Function: &FunctionCall{Name: "RunCommand"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: MessageContent{Text: "PANEL_OK"}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_2", Function: &FunctionCall{Name: "CheckCommandStatus"}}}},
+		{Role: "tool", ToolCallID: "call_2", Content: MessageContent{Text: "panel_http=200"}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_3", Function: &FunctionCall{Name: "RunCommand"}}}},
+		{Role: "tool", ToolCallID: "call_3", Content: MessageContent{Text: "AGENT_OK"}},
+		{Role: "user", Content: MessageContent{Text: "查一下推到哪了"}},
+	}
+	out := stripStaleToolResults(in)
+	for _, m := range out {
+		if m.Role == "tool" {
+			t.Fatalf("过期 tool 结果应被剥掉: %+v", m)
+		}
+		if m.Role == "assistant" && m.ToolCalls != nil {
+			t.Fatalf("assistant 的 tool_calls 应被清掉: %+v", m)
+		}
+	}
+	got := map[string]bool{}
+	for _, m := range out {
+		got[m.Role+"|"+m.Content.Text] = true
+	}
+	if !got["user|开始"] || !got["assistant|好的，先跑命令"] || !got["user|查一下推到哪了"] {
+		t.Fatalf("真实内容被误删: %+v", out)
+	}
+	if got["assistant|"] {
+		t.Fatalf("纯 tool_calls 中间轮应被剥掉: %+v", out)
+	}
+
+	// 只剩 tool 回填、没有 user 新指令：保留最后一条 user 供 agent 回应
+	only := []ChatMessage{
+		{Role: "user", Content: MessageContent{Text: "上一问"}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1"}}},
+		{Role: "tool", ToolCallID: "call_1", Content: MessageContent{Text: "x"}},
+	}
+	out = stripStaleToolResults(only)
+	if len(out) != 1 || out[0].Role != "user" || out[0].Content.Text != "上一问" {
+		t.Fatalf("无新指令时应保留最后一条 user: %+v", out)
+	}
+}

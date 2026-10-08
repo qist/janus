@@ -73,11 +73,18 @@ func randomPassword() string {
 //
 // 进程用 Setsid 独立会话启动，stdout/stderr 丢弃；但 systemd 下它仍在
 // janus.service 的 cgroup 内，服务重启时会一起被回收（随后本桥会再拉起）。
+// 本桥拉起的实例带 JANUS_MANAGED_UPSTREAM 标记，退出时由 janus 负责收掉。
 func SpawnOpenCode(ctx context.Context, log *Logger, cfg *Config) (*Endpoint, error) {
 	path, err := findOpenCodeBinary(cfg.OpencodeBin)
 	if err != nil {
 		return nil, err
 	}
+
+	// 先清扫上一轮 kill -9/崩溃留下的孤儿（免积压），再拉新的。
+	if cfg.UpstreamCleanup {
+		sweepManagedOrphans(log)
+	}
+
 	port, err := freePort()
 	if err != nil {
 		return nil, fmt.Errorf("no free port: %w", err)
@@ -87,10 +94,12 @@ func SpawnOpenCode(ctx context.Context, log *Logger, cfg *Config) (*Endpoint, er
 
 	cmd := exec.Command(path, "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port))
 	env := append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+pass)
+	// 托管标记：退出清理、孤儿识别都靠它（详见 discover.go）。
+	env = append(env, managedUpstreamEnv+"="+managedUpstreamEnvValue)
 	// 自动注入 janus 需要的 agent 定义（内联配置，优先级高于全局/项目配置），
 	// 不再依赖手写 ~/.config/opencode/opencode.jsonc。
 	if content := opencodeInlineConfig(cfg); content != "" {
-		env = append(env, "OPENCODE_CONFIG_CONTENT="+content)
+		env = append(env, opencodeConfigContentEnv+"="+content)
 	}
 	cmd.Env = env
 	cmd.Stdout = nil // /dev/null
@@ -110,7 +119,7 @@ func SpawnOpenCode(ctx context.Context, log *Logger, cfg *Config) (*Endpoint, er
 		perr := probeEndpoint(pctx, base, "opencode", pass)
 		cancel()
 		if perr == nil {
-			return &Endpoint{Base: base, User: "opencode", Pass: pass, PID: pid}, nil
+			return &Endpoint{Base: base, User: "opencode", Pass: pass, PID: pid, Spawned: true, Managed: true}, nil
 		}
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()

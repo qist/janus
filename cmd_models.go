@@ -49,6 +49,10 @@ func runModels(args []string) {
 			os.Exit(1)
 		}
 		cfg.Upstream, cfg.Username, cfg.Password = ep.Base, ep.User, ep.Pass
+		if ep.Spawned {
+			// CLI 自己拉起的实例用完即收，避免 `janus models` 成为孤儿制造机。
+			defer func() { terminateUpstream(ep.PID, log) }()
+		}
 	}
 
 	up := NewUpstream(cfg, log)

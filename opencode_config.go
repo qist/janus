@@ -2,6 +2,12 @@ package main
 
 import "encoding/json"
 
+// opencodeConfigContentEnv 是注入 OpenCode 内联配置的环境变量名。
+// 同时也是「janus 托管 opencode」的识别标记之一（见 discover.go 的
+// isManagedOpenCode）：旧版本拉起的实例没有 JANUS_MANAGED_UPSTREAM，
+// 但都会带上这个 env。
+const opencodeConfigContentEnv = "OPENCODE_CONFIG_CONTENT"
+
 // ---------- 为 OpenCode 自动生成配置（内联注入） ----------
 //
 // janus 通过环境变量 OPENCODE_CONFIG_CONTENT 把「自己需要的 agent 定义」

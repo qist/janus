@@ -135,11 +135,16 @@ OpenCode 桌面端/Hub **每次重启都会换随机端口和随机密码**，�
 1. 启动时先扫 `/proc/*/cmdline` 找已在跑的 `opencode ... serve --port N` 进程
 2. 从 `/proc/<pid>/environ` 读 `OPENCODE_SERVER_PASSWORD`，Basic 探活 `/api/info`
 3. **没找到在跑的**：检查 `opencode` 是否安装——
-   - 已安装 → 由本桥以随机端口拉起
-     `opencode serve --hostname 127.0.0.1 --port <随机>`，密码由本桥生成并直接使用
-     （`OPENCODE_AUTOSTART=false` 可关闭自动拉起）
-   - 没安装 → 打日志提示安装：`curl -fsSL https://opencode.ai/v2/install | bash`
+- 已安装 → 由本桥以随机端口拉起
+`opencode serve --hostname 127.0.0.1 --port <随机>`，密码由本桥生成并直接使用
+（`OPENCODE_AUTOSTART=false` 可关闭自动拉起）
+- 没安装 → 打日志提示安装：`curl -fsSL https://opencode.ai/v2/install | bash`
 4. 断连时后台每 30s 重试一次（同样是「先发现、没有就拉起」），探到新端点就热替换（含 SSE 重连）
+
+> **进程生命周期**：本桥拉起的 opencode 带 `JANUS_MANAGED_UPSTREAM` 标记。优雅退出
+> （`kill <janus_pid>` / Ctrl+C）时，janus 会先 SIGTERM、超时再 SIGKILL 收掉它；
+> `kill -9`/崩溃留下的孤儿（标记还在、父进程已死）会在下次拉起前自动清扫 ——
+> nohup/裸进程部署不用担心 opencode 越积越多。`BRIDGE_UPSTREAM_CLEANUP=false` 可还原旧行为。
 
 所以桌面端开不开都行：开着就复用它，没开本桥自己拉一个。模型授权（OAuth）仍由 OpenCode
 自己存在库里，本桥不参与。
@@ -269,6 +274,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `OPENCODE_URL` | `auto` | `auto`=自动发现/自动拉起（推荐）；或固定 `http://host:port`（此时必须配密码） |
 | `OPENCODE_AUTOSTART` | `true` | `auto` 且没找到在跑的 OpenCode 时，由本桥以随机端口拉起一个；`false`=只发现不拉起 |
 | `OPENCODE_REUSE_EXTERNAL` | `true` | 是否复用已在跑的外部 OpenCode。`false`=总是自己拉起（这样才能注入 janus 自动生成的 agent 配置） |
+| `BRIDGE_UPSTREAM_CLEANUP` | `true` | janus 退出（SIGTERM/SIGINT）时收掉「自己拉起的」OpenCode，并在拉起前清扫上一轮 `kill -9`/崩溃留下的孤儿。`false`=留着不清理（老行为）。外部实例（如桌面端）不受影响 |
 | `OPENCODE_BIN` | 空 | 显式指定 `opencode` 可执行文件；空=自动查找（PATH、`~/.opencode/bin/opencode`） |
 | `OPENCODE_USERNAME` | `opencode` | 上游 Basic 用户名 |
 | `OPENCODE_PASSWORD` | 空 | 上游密码（优先） |
@@ -392,7 +398,8 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 | `BRIDGE_TOOL_REREGISTER` | `10m` | 多久主动续注册一次 MCP（上游重启会丢注册） |
 | `BRIDGE_TOOL_CALL_WAIT` | `5m` | 工具调用挂起、等客户端回填结果的最长时间（**执行类**工具：`RunCommand`/`execute_command` 等） |
 | `BRIDGE_TOOL_CALL_WAIT_FAST` | `90s` | **只读/编辑类**工具的短等待。这类工具正常秒回，卡住基本是客户端卡死，快速判失败能让模型继续，而不是干等 5m 撞上 IDE 自身超时。`<=0` 或 `>= BRIDGE_TOOL_CALL_WAIT` 时不启用 |
-| `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` | `Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile` | 走短等待的工具名（逗号分隔，不区分大小写）。**未列出的工具（含未知新工具）一律走长等待**，避免误杀长任务。设成 `none`/`off`/`-` 表示禁用短等待 |
+| `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` | `Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile,CheckCommandStatus,check_command_status` | 走短等待的工具名（逗号分隔，不区分大小写）。**未列出的工具（含未知新工具）一律走长等待**，避免误杀长任务。设成 `none`/`off`/`-` 表示禁用短等待 |
+| `BRIDGE_TOOL_COMPANIONS` | `true` | 客户端声明了「异步命令」类工具（`RunCommand`/`execute_command`…）时，自动给 agent 补配套的状态查询工具 `CheckCommandStatus` / `check_command_status`（入参 `command_id` 取 RunCommand 返回值），走同一透传链路由**客户端本地**执行。这类配套工具客户端只在本地有、**不会写进 `tools[]` 声明**；不补的话 agent 发起 build 等长命令后无法查结果、会卡住。设 `false` 关闭 |
 | `BRIDGE_TOOL_ORPHAN_WAIT` | `30s` | 「目标会话没有在飞请求」时的宽限：等这么久还没人接手就判**孤儿 agent**（客户端两轮之间关闭、agent 还在调工具）→ 拒绝并**中断该会话上游**。客户端正常在跑时不受影响 |
 | `BRIDGE_MCP_URL` | 空 | 注册给 OpenCode 的 MCP 基址（空=本机回环） |
 | `BRIDGE_MCP_ALLOW` | 空 | 限制内置 MCP 端点 `/mcp/{token}` 的来源（逗号分隔 IP/CIDR）。空=不限制；对外暴露或上游在别机时建议设为上游网段 |
@@ -402,6 +409,7 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 > **结果回填**：客户端用 `role:"tool"` 消息回填结果，按 `tool_call_id` 对应。部分客户端（实测 Trae）会用**自己生成的** id（而非 janus 下发的 `call_`+hex），桥会按「**精确 id → 工具名 → 顺序**」三级对齐，并且只匹配**当前这一轮**的结果（不回放旧结果）。Chat / Anthropic / Responses 三条路径统一走同一套对齐。
 > **超时与晚到结果**：只读/编辑类工具（默认 90s）到点没回结果时，桥会释放并中断上游 agent（这时客户端多半已离开）。客户端若之后才把结果发回来（如审批 diff 超过 90s 后点重试），会**按普通新轮次处理**，把工具结果平铺进提示词让 agent 接着干，而不是在已中断的会话上空转再次报错。超时次数可见于 `/metrics` 的 `opencode_bridge_tool_timeouts_total`。
 > **注册生命周期**：MCP server 在**会话存活期内保持注册**（注销发生在：会话重置 / 客户端不再声明 tools / TTL）。不每轮注销，是因为 OpenCode 的 agent 会话**不会在重新注册后刷新工具目录**，会导致下一轮「Code Mode 目录为空」。
+> **配套工具补全**：声明了 `RunCommand` 等「异步命令」工具时（Trae 这类客户端对长任务立即返回 `command_id`、异步执行），桥会自动补 `CheckCommandStatus` / `check_command_status` 暴露给 agent —— 因为配套的状态查询工具客户端只在本地有、不写进 `tools[]` 声明，不补的话 agent 发起 build 后没法查询结果、会卡住。可被 `BRIDGE_TOOL_COMPANIONS=false` 关闭。
 
 ### Responses API / 用量
 

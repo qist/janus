@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sort"
 	"strings"
@@ -18,6 +19,13 @@ import (
 //  3. 注册过期：上游（OpenCode）重启会丢掉所有 MCP 注册，而桥不知道；
 //     所以超过 ToolReregister 就主动续注册一次，代价只是一次 PUT。
 func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string, tools []ToolSpec) error {
+	// 客户端声明了 RunCommand 这类「异步命令」工具时，配套的状态查询工具
+	//（check_command_status）只在客户端本地存在、不会写进 tools[] 声明，
+	// agent 既看不到也调不到 → 长命令（build）跑起来后没法得知结果、卡住。
+	// 这里按需补上配套工具，走同一透传链路给客户端执行。
+	if s.cfg.ToolCompanions {
+		tools = augmentCompanionTools(tools)
+	}
 	sess := s.tools.Register(conv.Key, tools)
 	// 记录当前上游 session id：parked 工具调用超时时用它中断上游，避免孤儿 agent。
 	sess.setSessionID(conv.snapshotSessionID())
@@ -99,6 +107,77 @@ func (b *ToolBridge) sessionByName(name string) *toolSession {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.byName[name]
+}
+
+// ---------- 配套工具补全 ----------
+
+// companionTriggerTools 是「异步命令」类工具：命中即视为客户端支持配套的状态查询。
+var companionTriggerTools = map[string]bool{
+	"runcommand":      true, // Trae/CodeBuddy 等 PascalCase 命名
+	"run_command":     true,
+	"execute_command": true,
+	"executecommand":  true,
+}
+
+// companionToolID 是配套状态查询工具的入参（RunCommand 返回的异步命令 id）。
+const companionToolID = "command_id"
+
+// companionToolSchema 描述配套状态查询工具的入参：command_id 取 RunCommand 返回的 id。
+var companionToolSchema = json.RawMessage(`{"type":"object","properties":{"` +
+	companionToolID +
+	`":{"type":"string","description":"RunCommand 返回的异步命令 id，用于查询该命令的最新状态/输出"}},"required":["` +
+	companionToolID +
+	`"]}`)
+
+// augmentCompanionTools 给「异步命令」类工具补配套的状态查询工具。
+//
+// 实测（Trae）：RunCommand 对长任务立即返回 command_id、异步执行，但配套的
+// check_command_status 工具只在客户端本地有、不会写进发给桥的 tools[] 声明
+// （"在工具列表外"）。于是 agent 只看到 RunCommand：build 跑起来后既不知道
+// 结束、也拿不到输出，只能猜/干等 → 卡住。补上配套工具后，agent 正常闭环：
+//
+//	RunCommand → command_id → CheckCommandStatus/check_command_status → 结果
+//
+// 补的两个名字都透传给客户端（跟客户端本地名字大小写一致的那个会成功）。
+// 客户端若已在 tools[] 里声明过同名工具则不重复。
+func augmentCompanionTools(tools []ToolSpec) []ToolSpec {
+	need := false
+	for _, t := range tools {
+		if companionTriggerTools[strings.ToLower(t.Function.Name)] {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return tools
+	}
+	out := append([]ToolSpec(nil), tools...)
+	for _, name := range []string{"CheckCommandStatus", "check_command_status"} {
+		if hasTool(out, name) {
+			continue // 客户端自己声明了，别重复
+		}
+		out = append(out, ToolSpec{
+			Type: "function",
+			Function: ToolFunction{
+				Name: name,
+				Description: "查询 RunCommand 启动的异步命令的最新状态与输出。" +
+					"command_id 必须取 RunCommand 返回的 id；构建/编译等长任务仍在运行时返回" +
+					"继续等待，结束后返回退出码与最终输出。",
+				Parameters: companionToolSchema,
+			},
+		})
+	}
+	return normalizeTools(out)
+}
+
+// hasTool 判断工具集里是否已存在指定名字（大小写敏感，与客户端声明一致）。
+func hasTool(tools []ToolSpec, name string) bool {
+	for _, t := range tools {
+		if t.Function.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 客户端回填工具结果 ----------

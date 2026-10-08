@@ -37,6 +37,8 @@ func main() {
 		log.Infof("config file loaded: %s", cfg.ConfigFile)
 	}
 
+	// 本次进程拉起的 upstream PID（退出时回收，见 stopManagedUpstream）。
+	var spawnedPID int
 	if cfg.UpstreamAuto {
 		// 自动发现 + 必要时自己拉起：OpenCode 桌面端端口/密码每次都变，
 		// 没有在跑的（比如桌面端没开）就以随机端口拉一个，读 /proc 找到活的那个。
@@ -47,6 +49,9 @@ func main() {
 			log.Warnf("upstream auto-discovery failed: %v (will keep retrying in background)", derr)
 		} else {
 			cfg.Upstream, cfg.Username, cfg.Password = ep.Base, ep.User, ep.Pass
+			if ep.Spawned {
+				spawnedPID = ep.PID
+			}
 			log.Infof("auto-discovered OpenCode at %s (pid %d)", ep.Base, ep.PID)
 		}
 	} else if cfg.Password == "" {
@@ -58,6 +63,9 @@ func main() {
 	}
 
 	srv := NewServer(cfg, log)
+	if spawnedPID > 0 {
+		srv.setManagedUpstream(spawnedPID)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -134,8 +142,12 @@ func main() {
 		if err := httpSrv.Shutdown(shutCtx); err != nil {
 			log.Warnf("shutdown: %v", err)
 		}
+		// 收掉自己拉起的 opencode（没它的话 nohup/裸进程部署下会留孤儿）。
+		// 注意放在 HTTP 收尾之后、进程退出之前。
+		srv.stopManagedUpstream()
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			srv.stopManagedUpstream()
 			log.Errorf("listen: %v", err)
 			os.Exit(1)
 		}

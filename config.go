@@ -36,6 +36,12 @@ type Config struct {
 	// 注入自己生成的 agent 配置（复用外部实例时注入不生效）。
 	ReuseExternal bool
 
+	// UpstreamCleanup：janus 退出（SIGTERM/SIGINT）时是否收掉「自己拉起的」OpenCode，
+	// 并在下次启动拉起前清扫上一轮 kill -9/崩溃留下的孤儿（BRIDGE_UPSTREAM_CLEANUP，
+	// 默认 true）。无 systemd/容器 cgroup 兜底的裸进程部署（nohup 等）下，
+	// 靠它避免 opencode 进程越积越多。外部实例（桌面端等）不受影响。
+	UpstreamCleanup bool
+
 	Username string // Basic 用户名，OpenCode 固定为 "opencode"
 	Password string // 即 OPENCODE_SERVER_PASSWORD
 
@@ -120,6 +126,10 @@ type Config struct {
 	// ToolFastTools 是走短等待的工具名集合（小写，来自 BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS）。
 	// 只列已知的只读/编辑类；未知工具默认走长等待，避免误杀长任务。
 	ToolFastTools map[string]bool
+	// ToolCompanions 是否给「异步命令」类工具（RunCommand…）补配套的状态查询工具
+	//（CheckCommandStatus/check_command_status）。这些工具客户端本地有、但通常不会
+	// 写进 tools[] 声明；不补的话 agent 发起长命令后没法查询结果、会卡住。
+	ToolCompanions bool
 	// ToolOrphanWait 是「目标会话没有在飞请求」时的宽限：等这么久还没人接手，
 	// 就判定为孤儿 agent（客户端已离开、agent 还在调工具）→ 拒绝并中断其上游会话。
 	ToolOrphanWait time.Duration
@@ -348,6 +358,7 @@ func LoadConfig() (Config, error) {
 		AutostartUpstream: loader.boolean("OPENCODE_AUTOSTART", true),
 		OpencodeBin:       loader.str("OPENCODE_BIN", ""),
 		ReuseExternal:     loader.boolean("OPENCODE_REUSE_EXTERNAL", true),
+		UpstreamCleanup:   loader.boolean("BRIDGE_UPSTREAM_CLEANUP", true),
 
 		Username: loader.str("OPENCODE_USERNAME", "opencode"),
 		Password: pw,
@@ -404,6 +415,7 @@ func LoadConfig() (Config, error) {
 		ToolCallWait:     loader.dur("BRIDGE_TOOL_CALL_WAIT", 5*time.Minute),
 		ToolCallWaitFast: loader.dur("BRIDGE_TOOL_CALL_WAIT_FAST", 90*time.Second),
 		ToolFastTools:    parseToolSet(loader.str("BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS", defaultFastTools)),
+		ToolCompanions:   loader.boolean("BRIDGE_TOOL_COMPANIONS", true),
 		ToolOrphanWait:   loader.dur("BRIDGE_TOOL_ORPHAN_WAIT", 30*time.Second),
 		MCPPublicURL:     strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
 
@@ -478,8 +490,9 @@ func parseProjectMap(s string) map[string]string {
 }
 
 // defaultFastTools 是默认走「短等待」的工具（只读/编辑类，正常秒回）。
-// 命令执行类（RunCommand/execute_command…）不在此列，保持 BRIDGE_TOOL_CALL_WAIT 长等待。
-const defaultFastTools = "Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile"
+// 命令执行类（RunCommand/execute_command…）不在此列，保持 BRIDGE_TOOL_CALL_WAIT 长等待；
+// 状态查询类（CheckCommandStatus/check_command_status，桥自动补的配套工具）秒回，走短等待。
+const defaultFastTools = "Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile,CheckCommandStatus,check_command_status"
 
 // parseToolSet 解析逗号分隔的工具名集合（转小写）。设成 none/off/- 表示空集（禁用短等待）。
 func parseToolSet(s string) map[string]bool {

@@ -784,3 +784,108 @@ func TestAssignToolResultsOrderFallback(t *testing.T) {
 		t.Errorf("顺序兜底错：%+v", assigned)
 	}
 }
+
+// RunCommand 这类「异步命令」工具必须补配套的状态查询工具，
+// 否则 agent 发起 build 后看不到结果、卡死（客户端本地有但 tools[] 不声明）。
+func TestAugmentCompanionTools(t *testing.T) {
+	names := func(ts []ToolSpec) map[string]bool {
+		out := map[string]bool{}
+		for _, s := range ts {
+			out[s.Function.Name] = true
+		}
+		return out
+	}
+	count := func(ts []ToolSpec, name string) int {
+		n := 0
+		for _, s := range ts {
+			if s.Function.Name == name {
+				n++
+			}
+		}
+		return n
+	}
+
+	base := []ToolSpec{
+		{Type: "function", Function: ToolFunction{Name: "Grep"}},
+		{Type: "function", Function: ToolFunction{Name: "RunCommand"}},
+	}
+	out := augmentCompanionTools(base)
+	got := names(out)
+	if !got["Grep"] || !got["RunCommand"] {
+		t.Fatalf("原工具丢失: %+v", got)
+	}
+	if !got["CheckCommandStatus"] || !got["check_command_status"] {
+		t.Fatalf("应补两个配套状态查询工具，got %+v", got)
+	}
+	if count(out, "CheckCommandStatus") != 1 || count(out, "check_command_status") != 1 {
+		t.Fatalf("配套工具重复: %+v", out)
+	}
+
+	// 配套工具要能被 agent 正确使用：入参会声明 command_id
+	for _, name := range []string{"CheckCommandStatus", "check_command_status"} {
+		found := false
+		for _, s := range out {
+			if s.Function.Name != name {
+				continue
+			}
+			found = true
+			var schema struct {
+				Required []string                   `json:"required"`
+				Props    map[string]json.RawMessage `json:"properties"`
+			}
+			if err := json.Unmarshal(s.Function.Parameters, &schema); err != nil {
+				t.Fatalf("%s schema 不是合法 JSON: %v", name, err)
+			}
+			if len(schema.Required) != 1 || schema.Required[0] != "command_id" {
+				t.Errorf("%s 未要求 command_id: %s", name, s.Function.Parameters)
+			}
+			if _, ok := schema.Props["command_id"]; !ok {
+				t.Errorf("%s schema 缺 command_id 属性", name)
+			}
+		}
+		if !found {
+			t.Fatalf("缺 %s", name)
+		}
+	}
+
+	// 没触发工具 → 原样返回
+	if got := augmentCompanionTools([]ToolSpec{{Function: ToolFunction{Name: "Grep"}}}); len(got) != 1 {
+		t.Fatalf("无 RunCommand 不应补工具: %+v", got)
+	}
+
+	// 下划线命名也能触发
+	if got := names(augmentCompanionTools([]ToolSpec{{Function: ToolFunction{Name: "run_command"}}})); !got["CheckCommandStatus"] {
+		t.Fatalf("run_command 未触发补全: %+v", got)
+	}
+
+	// 客户端自己声明了同名工具 → 不重复
+	decl := []ToolSpec{
+		{Function: ToolFunction{Name: "RunCommand"}},
+		{Function: ToolFunction{Name: "CheckCommandStatus"}},
+	}
+	out = augmentCompanionTools(decl)
+	if count(out, "CheckCommandStatus") != 1 {
+		t.Fatalf("客户端已声明的不应重复: %+v", out)
+	}
+	if !names(out)["check_command_status"] {
+		t.Fatalf("仍应补另一个名字: %+v", out)
+	}
+
+	// 补全结果必须稳定（指纹=>每次重新注册，工具列表不能抖）
+	a := augmentCompanionTools(base)
+	if toolsFingerprint(a) != toolsFingerprint(augmentCompanionTools(base)) {
+		t.Fatal("配套工具集不稳定")
+	}
+	if !normSorted(a) {
+		t.Fatal("配套工具未排序")
+	}
+}
+
+func normSorted(ts []ToolSpec) bool {
+	for i := 1; i < len(ts); i++ {
+		if ts[i].Function.Name < ts[i-1].Function.Name {
+			return false
+		}
+	}
+	return true
+}

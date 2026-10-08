@@ -4,6 +4,40 @@
 
 ---
 
+## [v0.3.20] - 2026-10-08
+
+### 修复
+- **`RunCommand` 发起 build 等长命令后 agent 卡住**：Trae 等客户端对长任务让 `RunCommand`
+  立即返回 `command_id` 异步执行，但配套的状态查询工具（`check_command_status`）**只在客户端
+  本地存在、不会写进 `tools[]` 声明**（"在工具列表外"）→ agent 既看不到也调不到，编译结束后
+  不知道结果，只能干等/反复找工具名 → 卡住。
+  现在客户端声明 `RunCommand`/`run_command`/`execute_command` 等「异步命令」工具时，桥自动补
+  **配套工具** `CheckCommandStatus` 与 `check_command_status`（入参 `command_id` 取 RunCommand
+  的返回值）暴露给 agent，走同一透传链路由**客户端本地**执行；客户端已声明同名工具则不重复。
+  可用 `BRIDGE_TOOL_COMPANIONS=false` 关闭。
+
+---
+
+## [v0.3.19] - 2026-10-08
+
+### 修复
+- **`kill janus` 后它拉起的 opencode 变孤儿、越积越多**：旧实现用 `Setsid` 把
+  `opencode serve` 放到独立会话（有意让「kill janus 不带走上游」），但 nohup/裸进程
+  部署（无 systemd/容器 cgroup 兜底）下，每次重启都会留下一个没人管的孤儿，再启动
+  又拉新的。
+  现在改为「谁拉起谁负责」（默认开，`BRIDGE_UPSTREAM_CLEANUP`，`false` 还原旧行为）：
+  - 拉起的实例打 `JANUS_MANAGED_UPSTREAM` 标记；
+  - **优雅退出**（`kill <pid>` / Ctrl+C）时，先 SIGTERM、超时再 SIGKILL 收掉自己托管的
+    upstream；
+  - **`kill -9`/崩溃留下的孤儿**（标记仍在、父进程已死 / PPID=1），下次拉起前自动清扫；
+  - `janus models` 自己拉起的实例用完即收，不再是孤儿制造机；
+  - 外部实例（桌面端等，无标记）不受影响；`WatchUpstream` 换到托管实例时同步接管回收。
+
+### 变更
+- `Endpoint` 增加 `Spawned` / `Managed` 标识（本次进程拉起与否 / 是否带托管标记）。
+
+---
+
 ## [v0.3.18] - 2026-10-08
 
 ### 修复

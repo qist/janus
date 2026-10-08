@@ -566,6 +566,17 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 `BRIDGE_TOOL_CALL_WAIT`（默认 `5m`），避免误杀 build / 长命令。列表用
 `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` 调，设 `none`/`off`/`-` 即禁用短等待。
 
+**配套工具补全（异步命令闭环）**：`RunCommand` 这类「异步命令」工具对长任务（build/编译）
+立即返回 `command_id`、由客户端后台异步执行。但配套的状态查询工具（Trae 的
+`check_command_status`）**只在客户端本地有、不会写进 `tools[]` 声明** —— agent 只能看到
+`RunCommand`，build 跑起来后既不知道结束、也拿不到输出，只能干等 → 卡住。
+桥（`augmentCompanionTools`，`BRIDGE_TOOL_COMPANIONS`，默认开）在客户端声明了
+`RunCommand`/`run_command`/`execute_command` 等触发工具时，自动给 agent 补
+`CheckCommandStatus` 与 `check_command_status`（入参 `command_id`，取 RunCommand 返回值），
+与普通工具同链路：agent 调 → 桥回 `tool_calls` 给客户端（同名）→ 客户端本地执行并回填；
+客户端已声明同名工具则不重复。两者都补是兼容不同客户端对本地工具的大小写命名；
+状态查询秒回，默认走短等待。
+
 **结果回填的 id 对齐**：客户端回填的工具结果按 `tool_call_id` 索引，但部分客户端
 （实测 Trae）会用**它自己生成的** id，而不是 janus 下发的 `call_`+hex。因此
 `assignToolResults` 按「① 精确 id → ② 工具名 → ③ 顺序」三级对齐 `pending ↔ 结果`，
@@ -716,6 +727,10 @@ OpenAI 的 `content` 数组形态（`image_url`）已支持；Responses 的 `inp
   心跳（`BRIDGE_STREAM_HEARTBEAT`）不算数据；一直有真实输出的长回答不受影响。
   注：`BRIDGE_REQUEST_TIMEOUT`（总超时）只对**非流式**生效。
 - 优雅停机：收到 SIGTERM 后停止接受新请求，`interrupt` 所有在飞会话，关闭 EventBus，最多等 10s。
+- **托管上游回收**：janus 拉起的 `opencode serve` 带 `JANUS_MANAGED_UPSTREAM` 标记
+  （`BRIDGE_UPSTREAM_CLEANUP`，默认 true）。优雅退出时对它 SIGTERM → 超时 SIGKILL 逐级
+  终止；`kill -9`/崩溃留下的孤儿（标记还在、`/proc` 里 PPID=1）在下次拉起前自动清扫。
+  这样 nohup/裸进程部署（无 cgroup 兜底）下不会残留孤儿进程。外部实例不受影响。
 
 ### 5.11 客户端"能力协商"细节
 
@@ -939,6 +954,7 @@ $EDITOR janus.env
 | `OPENCODE_URL` | `auto` | 上游地址；`auto` = 自动发现（§5.3.1，仅 Linux） |
 | `OPENCODE_AUTOSTART` | `true` | `auto` 且没找到在跑的 OpenCode 时，由本桥拉起一个 |
 | `OPENCODE_REUSE_EXTERNAL` | `true` | 是否复用已在跑的外部 OpenCode；`false`=总是自己拉起（才能注入生成的 agent 配置，§5.7.2） |
+| `BRIDGE_UPSTREAM_CLEANUP` | `true` | 退出时收掉自己拉起的 opencode + 拉起前清扫孤儿（§5.10）；`false`=留着不清理 |
 | `OPENCODE_BIN` | 空 | 显式指定 `opencode` 可执行文件 |
 | `OPENCODE_USERNAME` | `opencode` | Basic 用户名（固定） |
 | `OPENCODE_PASSWORD` | —（auto 模式下自动获取） | 即 `OPENCODE_SERVER_PASSWORD` |

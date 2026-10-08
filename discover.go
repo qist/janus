@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,57 @@ type Endpoint struct {
 	User string
 	Pass string
 	PID  int
+
+	// Spawned 表示该端点由「本次进程」拉起（EnsureUpstream 的拉起分支）。
+	// 退出时由 janus 负责收掉。
+	Spawned bool
+
+	// Managed 表示该 opencode 是 janus 托管的（进程环境带托管标记，
+	// 包括上一次 janus 非正常退出留下的孤儿）。复用这样的实例后，
+	// 当前 janus 也在退出时负责收掉，避免孤儿长期残留。
+	Managed bool
+}
+
+// managedUpstreamEnv 是 janus 拉起的 opencode 进程环境里的托管标记。
+// 用于：① 退出清理判定；② 开局清扫 kill -9/崩溃留下的孤儿（按 PPID 判定）。
+const managedUpstreamEnv = "JANUS_MANAGED_UPSTREAM"
+
+const managedUpstreamEnvValue = "1"
+
+// isManagedOpenCode 判断 pid 是否是一个「janus 托管」的 opencode：
+// 有新标记 JANUS_MANAGED_UPSTREAM，或带了 janus 注入的内联 agent 配置
+// OPENCODE_CONFIG_CONTENT（兼容旧版本拉起的实例）。
+func isManagedOpenCode(pid int) bool {
+	if procEnv(pid, managedUpstreamEnv) != "" {
+		return true
+	}
+	return procEnv(pid, opencodeConfigContentEnv) != ""
+}
+
+// ppidOf 读取 /proc/<pid>/stat 的父进程号。非 Linux（无 /proc）返回 -1。
+func ppidOf(pid int) int {
+	if runtime.GOOS != "linux" {
+		return -1
+	}
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return -1
+	}
+	s := string(b)
+	// 格式：pid (comm) state ppid ...；comm 可能带空格/括号，从最后一个 ')' 后面解析。
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || i+2 >= len(s) {
+		return -1
+	}
+	fields := strings.Fields(s[i+2:])
+	if len(fields) < 2 {
+		return -1
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return -1
+	}
+	return ppid
 }
 
 // Discover 返回当前可用的 OpenCode 端点；找不到返回错误。
@@ -100,10 +152,11 @@ func scanProc() ([]*Endpoint, error) {
 
 		pass := procEnv(pid, "OPENCODE_SERVER_PASSWORD")
 		out = append(out, &Endpoint{
-			Base: base,
-			User: "opencode",
-			Pass: pass,
-			PID:  pid,
+			Base:    base,
+			User:    "opencode",
+			Pass:    pass,
+			PID:     pid,
+			Managed: isManagedOpenCode(pid),
 		})
 	}
 	return out, nil
@@ -218,6 +271,12 @@ func (s *Server) WatchUpstream(ctx context.Context, allowDiscover bool) {
 		}
 		s.up.SetEndpoint(ep.Base, ep.User, ep.Pass)
 		s.log.Infof("upstream endpoint changed: %s -> %s (pid %d)", oldBase, ep.Base, ep.PID)
+
+		// 换到本进程拉起的实例时，记下 PID 供退出回收（只认本进程拉起的，
+		// 不认领别人的：多 janus 共存时误杀会打断对端）。
+		if ep.Spawned {
+			s.setManagedUpstream(ep.PID)
+		}
 
 		// 事件流跟着换端点重连
 		s.bus.Reconnect()

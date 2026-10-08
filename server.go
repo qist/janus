@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -64,6 +65,10 @@ type Server struct {
 	// 方便看不同 IDE / 设备到底发了什么（user / 头 / 目录 / 首条 user）。
 	clientMu   sync.Mutex
 	clientSeen map[string]bool
+
+	// managedPID 是本进程托管的 upstream opencode PID（0=无）。
+	// 退出时用它回收自己拉起的进程；WatchUpstream 热替换时更新。
+	managedPID atomic.Int64
 }
 
 // logClientInfo 打印一次客户端信息（按签名去重）。用于排查跨设备/跨 IDE 的

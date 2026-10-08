@@ -129,6 +129,23 @@ func hasToolResults(msgs []ChatMessage) bool {
 	return false
 }
 
+// livePending 过滤掉已超时（stale）的挂起调用，保留仍在等客户端回填的。
+//
+// 客户端在等待期内没回结果时，桥会按超时释放并中断上游 agent（见 mcp.go）。
+// 它若之后才把结果发回来，绝不能走 resume：agent 已不在等，续跑只是空转
+// （无 prompt → stalled → 客户端再收到一次"模型请求失败"）。过滤后走普通
+// 新轮次，把结果平铺进提示词（FlattenDelta 输出为 [Tool: name]）继续干活。
+func livePending(list []*pendingCall) []*pendingCall {
+	out := list[:0]
+	for _, p := range list {
+		if p.isStale() {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 // resultIDs 列出客户端回填的所有 tool_call_id（诊断用，排序后稳定输出）。
 func resultIDs(m map[string]ToolResult) []string {
 	out := make([]string, 0, len(m))
@@ -177,25 +194,18 @@ func orderedToolResults(msgs []ChatMessage) []toolResultItem {
 	return out
 }
 
-// resumeToolCalls 处理「客户端回填工具结果」的后续请求。
+// assignToolResults 按「① 精确 id → ② 工具名 → ③ 顺序」三级对齐客户端回填的
+// 工具结果，返回 bridgeID（call_xxx）→ 客户端结果的映射。
 //
-// 关键点：
-//   - 不发送新 prompt。上游 agent 还停在 MCP tools/call 上，等我们把结果喂回去。
-//   - 必须先订阅事件再回填，否则会漏掉 agent 继续执行时产生的开头增量。
-//   - 回填后 agent 可能给出最终答案，也可能再次调用工具（循环），
-//     所以后续流程与普通一轮完全一致。
-func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	req ChatRequest, ref OCModelRef, conv *Conversation,
-	pending []*pendingCall, results map[string]ToolResult,
-	dir string, sub *subscription, promptAt int64) {
+// 部分客户端（实测 Trae / Claude Code）会用它自己生成的 id 回填（toolu_… /
+// 自定义 hex），与 janus 下发到下游的 call_xxx 对不上；Chat / Anthropic /
+// Responses 三条路径统一走这个对齐，避免 answered=0/N、agent 拿到
+// "did not supply a result"。
+func assignToolResults(pending []*pendingCall, results map[string]ToolResult,
+	items []toolResultItem, log *Logger) map[string]ToolResult {
 
-	// 先订阅，再唤醒 agent。
-	// 客户端回填的结果按 tool_call_id 索引；但有些客户端（实测）会用它自己生成的 id，
-	// 而不是 janus 下发的 call_xxx —— 按「① 精确 id → ② 工具名 → ③ 顺序」三级对齐，
-	// 建立 pending ↔ 客户端结果的对应关系。
-	items := orderedToolResults(req.Messages)
+	assigned := map[string]ToolResult{}
 	taken := make([]bool, len(items))
-	assigned := map[string]ToolResult{} // bridgeID -> 结果
 
 	// ① 精确 id
 	for _, p := range pending {
@@ -220,8 +230,10 @@ func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *
 			}
 			assigned[p.CallID] = items[i].Result
 			taken[i] = true
-			s.log.Infof("tool result matched by name (id mismatch): pending=%s tool=%s client_id=%s",
-				p.CallID, p.ToolName, items[i].ID)
+			if log != nil {
+				log.Infof("tool result matched by name (id mismatch): pending=%s tool=%s client_id=%s",
+					p.CallID, p.ToolName, items[i].ID)
+			}
 			break
 		}
 	}
@@ -236,11 +248,33 @@ func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *
 			}
 			assigned[p.CallID] = items[i].Result
 			taken[i] = true
-			s.log.Infof("tool result matched by order (id+name mismatch): pending=%s tool=%s client_id=%s",
-				p.CallID, p.ToolName, items[i].ID)
+			if log != nil {
+				log.Infof("tool result matched by order (id+name mismatch): pending=%s tool=%s client_id=%s",
+					p.CallID, p.ToolName, items[i].ID)
+			}
 			break
 		}
 	}
+	return assigned
+}
+
+// resumeToolCalls 处理「客户端回填工具结果」的后续请求。
+//
+// 关键点：
+//   - 不发送新 prompt。上游 agent 还停在 MCP tools/call 上，等我们把结果喂回去。
+//   - 必须先订阅事件再回填，否则会漏掉 agent 继续执行时产生的开头增量。
+//   - 回填后 agent 可能给出最终答案，也可能再次调用工具（循环），
+//     所以后续流程与普通一轮完全一致。
+func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *http.Request,
+	req ChatRequest, ref OCModelRef, conv *Conversation,
+	pending []*pendingCall, results map[string]ToolResult,
+	dir string, sub *subscription, promptAt int64) {
+
+	// 先订阅，再唤醒 agent。
+	// 客户端回填的结果按 tool_call_id 索引；但有些客户端（实测）会用它自己生成的 id，
+	// 而不是 janus 下发的 call_xxx —— 按「① 精确 id → ② 工具名 → ③ 顺序」三级对齐，
+	// 建立 pending ↔ 客户端结果的对应关系。
+	assigned := assignToolResults(pending, results, orderedToolResults(req.Messages), s.log)
 
 	answered := 0
 	for _, p := range pending {

@@ -4,6 +4,43 @@
 
 ---
 
+## [v0.3.18] - 2026-10-08
+
+### 修复
+- **工具调用超时后，客户端晚到的结果会触发"幽灵续跑"**：`SearchReplace` 等编辑类工具走
+  `BRIDGE_TOOL_CALL_WAIT_FAST`（默认 90s）短等待；客户端（IDE）在该时间内没回填结果时，
+  桥按设计释放并中断 agent。但**会话上挂起的 pending 未清理** —— 客户端之后才把结果发回来，
+  （例如用户审批 diff 超过 90s 后点重试 / IDE 慢一拍回传）会误走 resume：在**已中断的会话**上
+  空转 → `idle_timeout` → 客户端**再收到一次"模型请求失败"**（4054）。
+  现在：超时的调用被打上 stale 标记，Chat / Anthropic / Responses 三条 resume 路径都会先过滤
+  （`livePending`）；全部超时时**按普通新轮次处理**，把工具结果平铺进提示词（`[Tool: name]`）
+  让 agent 从结果里接着干，不再重复报错。
+- **工具结果对齐改为三路径共用一套逻辑**：新增 `assignToolResults`（精确 id → 工具名 → 顺序），
+  Chat / Anthropic / Responses 统一走它。**Responses 路径此前只按精确 id 回填**，客户端换成
+  自己生成的 `function_call` id 时会 `answered=0/N` —— 现在与其它两条路径一致，按名/序兜底。
+- 工具调用超时可观测：新增指标 **`opencode_bridge_tool_timeouts_total`**（`/metrics`），
+  配合既有 `tool call timed out: client did not return a result within …` 日志即可量化。
+- **Anthropic（Claude Code）档位模型解析不认面板选择**：`claude-*` 档位别名此前只认
+  `BRIDGE_DEFAULT_MODEL`，**忽略 `/ui` 面板选的默认模型（存 DB，含思考档位）**，导致
+  「选了其它模型走 Anthropic API 不生效、强制走了 Anthropic 模型」。现在按与虚拟模型
+  `janus` 一致的优先级解析：**面板选择（存 DB）→ `BRIDGE_DEFAULT_MODEL` → 上次显式
+  用过的模型 → 档位启发式 → 上游默认**。
+- **Anthropic 工具结果回填 answered=0/N**：客户端回填 `tool_result` 时若用自己生成的
+  `tool_use_id`（实测会换成 `toolu_…`），与 janus 下发的 `call_xxx` 对不上，agent 会拿到
+  `bridge: client did not supply a result`。`resumeAnthropic` 补齐与 OpenAI 路径一致的
+  「**① 精确 id → ② 工具名 → ③ 顺序**」三级对齐；工具结果回填后也落库。
+- **Anthropic 路径会话重置后丢工具**：`handleMessages` 里工具桥注册在 `DiffReset`（会
+  注销工具桥）**之前**，重置后新会话只剩内置工具。顺序调整为与 Chat 路径一致
+  （**先处理 DiffReset，再注册工具桥**），并补 `persistConv`。
+
+### 说明
+- 若 IDE 侧审批/执行 `SearchReplace` 等工具经常超过默认的 90s，可调大
+  `BRIDGE_TOOL_CALL_WAIT_FAST`（如 `300s`），或从
+  `BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS` 里去掉 `SearchReplace,Write,DeleteFile` 让它们走
+  长等待（`BRIDGE_TOOL_CALL_WAIT`，默认 5 分钟）。
+
+---
+
 ## [v0.3.17] - 2026-10-06
 
 ### 新增

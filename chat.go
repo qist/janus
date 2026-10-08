@@ -785,19 +785,29 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.ToolCalling && conv.mcpName != "" && conv.snapshotSessionID() != "" &&
 		hasToolResults(req.Messages) && len(conv.pendingToolCalls()) > 0 {
 
-		pending := conv.pendingToolCalls()
+		pending := livePending(conv.pendingToolCalls())
 		conv.setPendingToolCalls(nil)
-		conv.setLast(cloneMessages(req.Messages))
-		s.persistConv(conv)
 
-		sid := conv.snapshotSessionID()
-		sub := s.bus.Subscribe(sid, 512)
-		defer sub.cancel()
+		if len(pending) == 0 {
+			// 客户端回填来得太晚：上轮工具调用已全部超时并被释放（见 mcp.go）。
+			// 上游 agent 已中断，此时若续跑只会空转后报错，客户端会再多收一次
+			// "模型请求失败"。改为按普通新轮次继续：结果平铺进提示词（
+			// FlattenDelta 输出 [Tool: name]），agent 从结果里接着干。
+			// 注意不能 setLast —— 否则下面 Diff 会算出 DiffNone 丢掉工具结果。
+			s.log.Warnf("tool results arrived after all pending calls timed out (conv=%s, results=%s); treating as new turn",
+				conv.Key, resultIDs(toolResultsFromMessages(req.Messages)))
+		} else {
+			conv.setLast(cloneMessages(req.Messages))
+			s.persistConv(conv)
+			sid := conv.snapshotSessionID()
+			sub := s.bus.Subscribe(sid, 512)
+			defer sub.cancel()
 
-		// 先订阅再回填，避免漏掉 agent 继续执行时的开头增量
-		s.resumeToolCalls(ctx, w, r, req, ref, conv, pending,
-			toolResultsFromMessages(req.Messages), dir, sub, time.Now().UnixMilli())
-		return
+			// 先订阅再回填，避免漏掉 agent 继续执行时的开头增量
+			s.resumeToolCalls(ctx, w, r, req, ref, conv, pending,
+				toolResultsFromMessages(req.Messages), dir, sub, time.Now().UnixMilli())
+			return
+		}
 	}
 
 	// ---- 历史差分 ----
@@ -1055,23 +1065,36 @@ func isJanusAlias(raw string) bool {
 	return strings.EqualFold(strings.TrimSpace(raw), "janus")
 }
 
+// runtimeDefaultModelRef 尝试解析面板选定的默认模型（可能带 :variant 思考档位）。
+// 返回 false 表示未设置或解析失败（调用方继续走配置 / 启发式兜底）。
+// 供虚拟模型 janus 与 Anthropic 档位映射共用，保证两条路径的优先级一致。
+func (s *Server) runtimeDefaultModelRef(ctx context.Context, list []OCModel) (OCModelRef, bool) {
+	runtime := strings.TrimSpace(s.runtimeDefaultModel())
+	if runtime == "" {
+		return OCModelRef{}, false
+	}
+	ref, err := ResolveModel(runtime, list)
+	if err == nil {
+		return ref, true
+	}
+	// 启动瞬间模型列表可能为空/不完整：强制刷新一次再试，避免落到上游默认
+	//（常是免费档模型，经 API 会 403 "free tier"）。
+	if s.models != nil {
+		if fresh, ferr := s.models.Get(ctx, s.up, s.cfg.Directory, true); ferr == nil {
+			if ref2, err2 := ResolveModel(runtime, fresh); err2 == nil {
+				return ref2, true
+			}
+		}
+	}
+	s.log.Warnf("janus default model %q unresolvable, falling back: %v", runtime, err)
+	return OCModelRef{}, false
+}
+
 // resolveJanusModel 解析 janus 虚拟模型：
 // web 运行时选择 > BRIDGE_DEFAULT_MODEL > 上游默认。
 func (s *Server) resolveJanusModel(ctx context.Context, list []OCModel) (OCModelRef, error) {
-	runtime := strings.TrimSpace(s.runtimeDefaultModel())
-	if runtime != "" {
-		ref, err := ResolveModel(runtime, list)
-		if err == nil {
-			return ref, nil
-		}
-		// 启动瞬间模型列表可能为空/不完整：强制刷新一次再试，避免落到上游默认
-		//（常是免费档模型，经 API 会 403 "free tier"）。
-		if fresh, ferr := s.models.Get(ctx, s.up, s.cfg.Directory, true); ferr == nil {
-			if ref2, err2 := ResolveModel(runtime, fresh); err2 == nil {
-				return ref2, nil
-			}
-		}
-		s.log.Warnf("janus default model %q unresolvable, falling back: %v", runtime, err)
+	if ref, ok := s.runtimeDefaultModelRef(ctx, list); ok {
+		return ref, nil
 	}
 	return s.resolveDefaultModel(ctx, list)
 }

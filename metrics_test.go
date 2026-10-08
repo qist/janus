@@ -18,6 +18,7 @@ func TestMetricsRender(t *testing.T) {
 	m.incRateLimited()
 	m.incToolReg()
 	m.incToolCalls(2)
+	m.incToolTimeouts()
 	m.addTokens(10, 20)
 	m.streamStart()
 
@@ -29,6 +30,7 @@ func TestMetricsRender(t *testing.T) {
 		"opencode_bridge_rate_limited_total 1",
 		"opencode_bridge_tool_registrations_total 1",
 		"opencode_bridge_tool_calls_total 2",
+		"opencode_bridge_tool_timeouts_total 1",
 		"opencode_bridge_active_streams 1",
 		"opencode_bridge_conversations 7",
 		`opencode_bridge_tokens_total{direction="input"} 10`,
@@ -54,6 +56,7 @@ func TestMetricsNilSafe(t *testing.T) {
 	m.incUpstreamErr()
 	m.incToolReg()
 	m.incToolCalls(1)
+	m.incToolTimeouts()
 	m.addTokens(1, 1)
 	m.streamStart()
 	m.streamEnd()

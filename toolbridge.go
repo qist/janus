@@ -65,11 +65,21 @@ type pendingCall struct {
 	ord    int64 // 到达顺序（parallel=false 时按它逐个返回）
 	result chan ToolResult
 	once   sync.Once
+	stale  atomic.Bool // waitResult 超时后置位：客户端没回结果，调用已终结
 }
 
 func (p *pendingCall) complete(r ToolResult) {
 	p.once.Do(func() { p.result <- r })
 }
+
+// markStale 标记该调用已超时（客户端没在等待期内回填结果，桥已释放并中断 agent）。
+//
+// 已 stale 的调用不能再进 resume：上游 agent 已不在等这条结果，续跑等于
+// "无 prompt 空转"，客户端只会再收到一次请求失败。晚到的回填交由
+// livePending 过滤掉，普通新轮次会把结果平铺进提示词让 agent 接着干。
+func (p *pendingCall) markStale() { p.stale.Store(true) }
+
+func (p *pendingCall) isStale() bool { return p.stale.Load() }
 
 // toolSession 是一次会话的工具上下文。
 type toolSession struct {

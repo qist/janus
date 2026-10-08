@@ -459,39 +459,27 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 
-	if s.cfg.ToolCalling && len(tools) > 0 {
-		if err := s.ensureTools(ctx, conv, dir, tools); err != nil {
-			if !s.cfg.ToolSoftFail {
-				writeAnthropicError(w, http.StatusBadGateway, "api_error",
-					fmt.Sprintf("cannot expose your tools to the upstream agent: %v (directory=%s)", err, dir))
-				return
-			}
-			s.log.Warnf("tool bridge registration failed (soft-fail): %v", err)
-		}
-	}
-
-	// Claude Code 的 web_search 是"服务端工具"：声明它后由桥内部执行，
-	// 不把它作为 tool_use 甩回给 CC。这里把它登记到会话上。
-	if s.cfg.WebSearchEnabled && anthropicHasWebSearch(req.Tools) {
-		if sess := s.tools.ByKey(conv.Key); sess != nil {
-			sess.setServerTools(map[string]serverToolFunc{
-				webSearchToolName: s.webSearchServerTool(dir),
-			})
-		}
-	}
-
 	// 客户端回填了工具结果 → 唤醒挂起的 agent，不重发 prompt
 	if s.cfg.ToolCalling && conv.mcpName != "" && conv.snapshotSessionID() != "" &&
 		hasToolResults(inputMsgs) && len(conv.pendingToolCalls()) > 0 {
-		pending := conv.pendingToolCalls()
+		pending := livePending(conv.pendingToolCalls())
 		conv.setPendingToolCalls(nil)
-		conv.setLast(cloneMessages(inputMsgs))
-		sid := conv.snapshotSessionID()
-		sub := s.bus.Subscribe(sid, 512)
-		defer sub.cancel()
-		s.resumeAnthropic(ctx, w, r, req, ref, conv, pending,
-			toolResults, dir, sub, time.Now().UnixMilli())
-		return
+		if len(pending) == 0 {
+			// 回填来得太晚：上轮工具调用已全部超时，agent 已被释放/中断。
+			// 此时续跑只会空转后报错，改为按普通新轮次继续（结果平铺进提示词）。
+			// 注意不能 setLast —— 否则下面 Diff 会算出 DiffNone 丢掉工具结果。
+			s.log.Warnf("anthropic tool results arrived after all pending calls timed out (conv=%s, results=%s); treating as new turn",
+				conv.Key, resultIDs(toolResults))
+		} else {
+			conv.setLast(cloneMessages(inputMsgs))
+			s.persistConv(conv)
+			sid := conv.snapshotSessionID()
+			sub := s.bus.Subscribe(sid, 512)
+			defer sub.cancel()
+			s.resumeAnthropic(ctx, w, r, req, ref, conv, pending,
+				toolResults, inputMsgs, dir, sub, time.Now().UnixMilli())
+			return
+		}
 	}
 
 	stored := conv.snapshotLast()
@@ -525,6 +513,29 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			mode, delta = DiffAppend, d
 		} else {
 			s.resetSession(conv)
+		}
+	}
+
+	// ---- 工具：注册/更新（必须晚于 DiffReset —— resetSession 会注销工具桥；
+	// 先注册再被重置，新会话就没有工具可调，与 OpenAI 路径顺序保持一致）----
+	if s.cfg.ToolCalling && len(tools) > 0 {
+		if err := s.ensureTools(ctx, conv, dir, tools); err != nil {
+			if !s.cfg.ToolSoftFail {
+				writeAnthropicError(w, http.StatusBadGateway, "api_error",
+					fmt.Sprintf("cannot expose your tools to the upstream agent: %v (directory=%s)", err, dir))
+				return
+			}
+			s.log.Warnf("tool bridge registration failed (soft-fail): %v", err)
+		}
+	}
+
+	// Claude Code 的 web_search 是"服务端工具"：声明它后由桥内部执行，
+	// 不把它作为 tool_use 甩回给 CC。这里把它登记到会话上。
+	if s.cfg.WebSearchEnabled && anthropicHasWebSearch(req.Tools) {
+		if sess := s.tools.ByKey(conv.Key); sess != nil {
+			sess.setServerTools(map[string]serverToolFunc{
+				webSearchToolName: s.webSearchServerTool(dir),
+			})
 		}
 	}
 
@@ -576,13 +587,22 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 // resumeAnthropic 回填挂起的工具结果，然后按 Anthropic 形状收尾。
 func (s *Server) resumeAnthropic(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	req AnthropicRequest, ref OCModelRef, conv *Conversation,
-	pending []*pendingCall, results map[string]ToolResult, dir string,
-	sub *subscription, promptAt int64) {
+	pending []*pendingCall, results map[string]ToolResult, inputMsgs []ChatMessage,
+	dir string, sub *subscription, promptAt int64) {
+
+	// 客户端回填的 tool_result 里的 tool_use_id 可能被客户端换成它自己生成的
+	// id（实测会换成 toolu_…），与 janus 下发到下游的 call_xxx 对不上。
+	// 与 Chat / Responses 路径共用 assignToolResults 的「① 精确 id → ② 工具名 →
+	// ③ 顺序」三级对齐，避免 answered=0/N、agent 拿到"did not supply a result"。
+	assigned := assignToolResults(pending, results, orderedToolResults(inputMsgs), s.log)
 
 	answered := 0
 	for _, p := range pending {
-		res, ok := results[p.CallID]
+		res, ok := assigned[p.CallID]
 		if !ok {
+			// 客户端没给这一条的结果：以错误收尾，避免 agent 永久挂住。
+			s.log.Warnf("anthropic tool result missing: pending=%s tool=%s; client supplied=%v",
+				p.CallID, p.ToolName, resultIDs(results))
 			res = ToolResult{Content: "bridge: client did not supply a result for tool_use " + p.CallID, IsError: true}
 		} else {
 			answered++
@@ -773,7 +793,8 @@ func pickTierModel(list []OCModel, tier string) (OCModelRef, bool) {
 // resolveAnthropicModel 解析 Anthropic 请求的 model：
 //  1. 显式 BRIDGE_MODEL_MAP（精确/前缀）
 //  2. 直接可解析（客户端填了 opencode-go/xxx 这类）
-//  3. claude-* 档位名 → BRIDGE_DEFAULT_MODEL（配了就用它，一个开关搞定）
+//  3. claude-* 档位名 → 面板选择的默认模型（存 DB，含思考档位）→ BRIDGE_DEFAULT_MODEL
+//     （配了就用它，一个开关搞定）
 //  4. 否则用"最近一次客户端显式用过的真实模型"兜底（无需配置）
 //  5. 再不行才按档位启发式自动挑；最后才用上游默认
 func (s *Server) resolveAnthropicModel(ctx context.Context, raw string, list []OCModel) (OCModelRef, error) {
@@ -781,6 +802,12 @@ func (s *Server) resolveAnthropicModel(ctx context.Context, raw string, list []O
 		return ref, nil
 	}
 	if tier := anthropicTier(raw); tier != "" {
+		// 面板选择（存 DB）优先于 BRIDGE_DEFAULT_MODEL —— 与虚拟模型 janus 的
+		// 解析优先级一致（面板选择 > BRIDGE_DEFAULT_MODEL > 上游默认），
+		// 否则用户在 /ui 里选的模型（含思考档位）对 Claude Code 不生效。
+		if ref, ok := s.runtimeDefaultModelRef(ctx, list); ok {
+			return ref, nil
+		}
 		if s.cfg.DefaultModel != "" {
 			if ref, err := ResolveModel(s.cfg.DefaultModel, list); err == nil {
 				return ref, nil

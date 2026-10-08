@@ -49,6 +49,7 @@ type metrics struct {
 	upstreamErrs int64
 	toolReg      int64
 	toolCalls    int64
+	toolTimeouts int64
 	tokensIn     int64
 	tokensOut    int64
 
@@ -103,6 +104,12 @@ func (m *metrics) incToolCalls(n int) {
 		return
 	}
 	m.add(&m.toolCalls, int64(n))
+}
+func (m *metrics) incToolTimeouts() {
+	if m == nil {
+		return
+	}
+	m.add(&m.toolTimeouts, 1)
 }
 func (m *metrics) addTokens(in, out int) {
 	if in == 0 && out == 0 {
@@ -228,6 +235,9 @@ func (m *metrics) render() string {
 
 	help("opencode_bridge_tool_calls_total", "counter", "Tool calls handed to clients")
 	fmt.Fprintf(&b, "opencode_bridge_tool_calls_total %d\n", m.toolCalls)
+
+	help("opencode_bridge_tool_timeouts_total", "counter", "Tool calls released because the client did not return a result in time")
+	fmt.Fprintf(&b, "opencode_bridge_tool_timeouts_total %d\n", m.toolTimeouts)
 
 	help("opencode_bridge_active_streams", "gauge", "In-flight SSE streams")
 	fmt.Fprintf(&b, "opencode_bridge_active_streams %d\n", m.activeStreams)

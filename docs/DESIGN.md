@@ -552,6 +552,9 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 （实测约 40 分钟 600+ 条）。两道兜底：
 
 - 工具调用**超时**（客户端在 `BRIDGE_TOOL_CALL_WAIT` 内没回结果）→ **中断该会话的上游 agent**；
+  超时的调用打 stale 标记，客户端**晚到**的回填（用户审批 diff 超时后点重试等）不再触发
+  resume —— 三条路径都先 `livePending` 过滤，全部超时则按普通新轮次处理（结果平铺进提示词），
+  避免在已中断的会话上空转、客户端再多收一次"模型请求失败"；
 - 守卫宽限 `BRIDGE_TOOL_ORPHAN_WAIT`（默认 `30s`）：idle 会话等这么久仍无人接手 → 判孤儿 →
   拒绝 + **中断该会话上游**（从源头结束，不再让 agent 一直重试）；
 - 守卫的 idle 拒绝日志**限流**（同一会话每 60s 最多一条，附被抑制条数）。
@@ -565,9 +568,9 @@ session，模型可能引用到别的会话的 server。那种调用落到一个
 
 **结果回填的 id 对齐**：客户端回填的工具结果按 `tool_call_id` 索引，但部分客户端
 （实测 Trae）会用**它自己生成的** id，而不是 janus 下发的 `call_`+hex。因此
-`resumeToolCalls` 按「① 精确 id → ② 工具名 → ③ 顺序」三级对齐 `pending ↔ 结果`，
-并且只取**当前这一轮**（最后一条带 `tool_calls` 的 assistant 之后）的结果，避免命中
-历史里的旧结果造成「回放旧结果」。
+`assignToolResults` 按「① 精确 id → ② 工具名 → ③ 顺序」三级对齐 `pending ↔ 结果`，
+Chat / Anthropic / Responses 三条路径统一走它；并且只取**当前这一轮**（最后一条带
+`tool_calls` 的 assistant 之后）的结果，避免命中历史里的旧结果造成「回放旧结果」。
 
 **会话存活期内保持注册（不再每轮释放）**：早期实现是「一轮结束即 `RemoveMCP`」，
 但实测 **OpenCode 的 agent 会话不会在 MCP server 重新注册后刷新工具目录** ——
@@ -853,9 +856,10 @@ Store + executor + ToolBridge**，`anthropic.go` / `anthropic_stream.go` 只做�
 - 鉴权 `x-api-key`（也接受 Bearer）；`anthropic-version`/`anthropic-beta` 忽略
 - 接口同时挂在 `/v1/messages` 与 `/anthropic/v1/messages`（对齐 DeepSeek 的 `/anthropic` 约定）
 - **模型路由（档位）**：CC 只用 `claude-opus*`/`claude-sonnet*`/`claude-haiku*` 等少数档位名，
-  因此**无需逐模型映射**。解析优先级：`BRIDGE_MODEL_MAP`（精确/前缀 `*`）→ 请求本身可解析 →
-  `BRIDGE_DEFAULT_MODEL`（多数用户只配这一个，所有档位走它）→ 按档位启发式自动挑选
-  （排除经 API 会 403 的 `opencode/*` 免费额度；opus 挑强、haiku 挑便宜快）。见 `cmd_models.go`
+因此**无需逐模型映射**。解析优先级：`BRIDGE_MODEL_MAP`（精确/前缀 `*`）→ 请求本身可解析 →
+**面板选择的默认模型（`/ui` → 设为 janus，存 DB，含思考档位）** → `BRIDGE_DEFAULT_MODEL`
+（多数用户只配这一个，所有档位走它）→ 按档位启发式自动挑选
+（排除经 API 会 403 的 `opencode/*` 免费额度；opus 挑强、haiku 挑便宜快）。见 `cmd_models.go`
 - **映射可见性 / 选型**：`janus models` 列出全部可用模型（价格/上下文/能力/可用性）并打印三档
   当前映射；`GET /anthropic/v1/models`（或带 `anthropic-version` 头的 `/v1/models`）返回 Claude Code
   模型选择器认的 Anthropic 格式，`display_name` 里带上实际映射目标

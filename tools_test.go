@@ -716,3 +716,71 @@ func TestOrderedToolResults(t *testing.T) {
 		t.Fatalf("item1=%+v", items[1])
 	}
 }
+
+// 工具调用超时后（waitResult 超时、agent 已释放）必须被 livePending 过滤掉，
+// 否则客户端晚到的回填会触发"幽灵 resume"——在已中断的会话上空转后报错。
+func TestLivePendingFiltersStale(t *testing.T) {
+	p1 := &pendingCall{CallID: "call_1", ToolName: "SearchReplace", result: make(chan ToolResult, 1)}
+	p2 := &pendingCall{CallID: "call_2", ToolName: "Grep", result: make(chan ToolResult, 1)}
+	p3 := &pendingCall{CallID: "call_3", ToolName: "Grep", result: make(chan ToolResult, 1)}
+	p1.markStale()
+	p3.markStale()
+
+	live := livePending([]*pendingCall{p1, p2, p3})
+	if len(live) != 1 || live[0] != p2 {
+		t.Fatalf("livePending 应只保留未超时的调用，got %+v", live)
+	}
+	// 全部超时时返回空 → 调用方走"按新轮次处理"而不是 resume
+	if len(livePending([]*pendingCall{p1, p3})) != 0 {
+		t.Fatal("全超时应返回空")
+	}
+}
+
+// 三条路径（Chat / Anthropic / Responses）统一走 assignToolResults 的三级对齐：
+// ① 精确 id → ② 工具名 → ③ 顺序。这里覆盖"客户端换成自己生成的 id"的场景。
+func TestAssignToolResultsAlignment(t *testing.T) {
+	logger := NewLogger("error")
+	pending := []*pendingCall{
+		{CallID: "call_1", ToolName: "SearchReplace"},
+		{CallID: "call_2", ToolName: "Grep"},
+	}
+	// 客户端全部换成自己的 id（client_x），精确匹配全落空
+	results := map[string]ToolResult{
+		"client_1": {Content: "改了"},
+		"client_2": {Content: "找到了"},
+	}
+	// items 带工具名（② 按名命中）
+	items := []toolResultItem{
+		{ID: "client_1", Name: "SearchReplace", Result: results["client_1"]},
+		{ID: "client_2", Name: "Grep", Result: results["client_2"]},
+	}
+	assigned := assignToolResults(pending, results, items, logger)
+	if len(assigned) != 2 {
+		t.Fatalf("按名兜底应全部命中，got %+v", assigned)
+	}
+	if assigned["call_1"].Content != "改了" || assigned["call_2"].Content != "找到了" {
+		t.Errorf("对齐结果错：%+v", assigned)
+	}
+	if logger == nil {
+		t.Fatal("noop")
+	}
+}
+
+// 名字也拿不到时按顺序兜底（③）。
+func TestAssignToolResultsOrderFallback(t *testing.T) {
+	logger := NewLogger("error")
+	pending := []*pendingCall{
+		{CallID: "call_1", ToolName: "SearchReplace"},
+		{CallID: "call_2", ToolName: "Grep"},
+	}
+	results := map[string]ToolResult{"client_1": {Content: "A"}, "client_2": {Content: "B"}}
+	// items 里没有工具名（Name 为空）→ 顺序兜底
+	items := []toolResultItem{
+		{ID: "client_1", Name: "", Result: results["client_1"]},
+		{ID: "client_2", Name: "", Result: results["client_2"]},
+	}
+	assigned := assignToolResults(pending, results, items, logger)
+	if assigned["call_1"].Content != "A" || assigned["call_2"].Content != "B" {
+		t.Errorf("顺序兜底错：%+v", assigned)
+	}
+}

@@ -196,8 +196,11 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		res := s.tools.waitResult(r.Context(), pend)
 
 		// 客户端在 ToolCallWait 内没回结果：多半已经离开（IDE 关闭/断网）。
-		// 中断该会话的上游 agent，否则它会继续调工具 → 被拒 → 重试，形成孤儿循环。
+		// 标记 stale —— 之后客户端若晚到回填，不得再触发 resume（见 livePending），
+		// 否则会在已中断的上游会话上空转，客户端再多收一次"模型请求失败"。
 		if res.TimedOut {
+			pend.markStale()
+			s.metrics.incToolTimeouts()
 			if sid := sess.getSessionID(); sid != "" {
 				s.log.Warnf("tool result timeout: interrupting upstream %s (%s) to stop orphaned agent", sid, sess.key)
 				go func() {

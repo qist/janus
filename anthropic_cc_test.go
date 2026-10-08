@@ -100,6 +100,76 @@ func TestResolveAnthropicModelDefaultKnob(t *testing.T) {
 	}
 }
 
+func TestResolveAnthropicModelPrefersRuntimeDefault(t *testing.T) {
+	list := []OCModel{
+		mkModel("opencode", "free", 0, 0, true, true),
+		mkModel("opencode-go", "cheap-flash", 0.1, 0.2, true, true),
+		mkModel("opencode-go", "big-pro", 5, 10, true, true),
+	}
+	// 面板选择（存 DB，含思考档位）优先于 BRIDGE_DEFAULT_MODEL
+	s := &Server{cfg: Config{DefaultModel: "opencode-go/big-pro"}, log: NewLogger("error")}
+	s.setRuntimeDefaultModel("opencode-go/cheap-flash:high")
+	ref, err := s.resolveAnthropicModel(context.Background(), "claude-sonnet-4-5", list)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if ref.String() != "opencode-go/cheap-flash:high" {
+		t.Errorf("面板选择应优先（含思考档位），got %s", ref)
+	}
+	// 未设置运行时默认：仍走 BRIDGE_DEFAULT_MODEL
+	s2 := &Server{cfg: Config{DefaultModel: "opencode-go/big-pro"}, log: NewLogger("error")}
+	ref, err = s2.resolveAnthropicModel(context.Background(), "claude-sonnet-4-5", list)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if ref.String() != "opencode-go/big-pro" {
+		t.Errorf("未设 runtime 时 default 应优先，got %s", ref)
+	}
+	// 运行时默认选了未知 provider 的模型（解析失败）→ 回落到 BRIDGE_DEFAULT_MODEL
+	s3 := &Server{cfg: Config{DefaultModel: "opencode-go/big-pro"}, log: NewLogger("error")}
+	s3.setRuntimeDefaultModel("nosuch-provider/gone:max")
+	ref, err = s3.resolveAnthropicModel(context.Background(), "claude-sonnet-4-5", list)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if ref.String() != "opencode-go/big-pro" {
+		t.Errorf("runtime 不可解析应回落 default，got %s", ref)
+	}
+}
+
+// Anthropic 客户端回填工具结果时可能用自己生成的 tool_use_id（toolu_…），
+// 与 janus 下发的 call_xxx 对不上 —— resumeAnthropic 改走与 OpenAI 一致的三级
+// 对齐（精确 id → 工具名 → 顺序）。这里验证转换后的消息能支撑按名/序兜底。
+func TestAnthropicToolResultAlignment(t *testing.T) {
+	msgs := []AnthropicMessage{
+		{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"查天气"}]`)},
+		{Role: "assistant", Content: json.RawMessage(`[
+			{"type":"tool_use","id":"toolu_01A","name":"get_weather","input":{"city":"北京"}}]`)},
+		{Role: "user", Content: json.RawMessage(`[
+			{"type":"tool_result","tool_use_id":"toolu_01A","content":"晴，26℃"}]`)},
+	}
+	converted, results := anthropicInputToMessages("", msgs)
+	// 转换结果可按客户端的 toolu_ id 索引到结果…
+	if _, ok := results["toolu_01A"]; !ok {
+		t.Fatalf("results=%+v", results)
+	}
+	// …但 janus 的 pending id 是 call_xxx，精确匹配必然落空
+	if _, ok := results["call_1"]; ok {
+		t.Fatal("精确 id 不应命中")
+	}
+	// orderedToolResults 从转换后的消息里能拿到工具名 + 结果，供 ② 工具名 对齐兜底
+	items := orderedToolResults(converted)
+	if len(items) != 1 {
+		t.Fatalf("items=%+v", items)
+	}
+	if items[0].Name != "get_weather" {
+		t.Errorf("按名兜底需要工具名，got %q", items[0].Name)
+	}
+	if items[0].Result.Content != "晴，26℃" {
+		t.Errorf("结果内容丢失：%+v", items[0].Result)
+	}
+}
+
 func TestStripContextSuffix(t *testing.T) {
 	cases := map[string]string{
 		"mimo-v2.5-pro[1m]":                   "mimo-v2.5-pro",

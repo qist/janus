@@ -662,21 +662,28 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	// ---- 续链：先回填上一轮的工具结果，再放行 ----
 	var sub *subscription
 	if prev != nil && len(conv.pendingToolCalls()) > 0 && len(toolResults) > 0 {
-		pending := conv.pendingToolCalls()
+		pending := livePending(conv.pendingToolCalls())
 		conv.setPendingToolCalls(nil)
-		// 先确保会话存在
-		if _, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs); err != nil {
-			st, typ, msg := s.mapUpstreamError(err)
-			writeOpenAIError(w, st, typ, msg, "")
+		if len(pending) == 0 {
+			// 回填来得太晚：上轮工具调用已全部超时，agent 已被释放/中断。
+			// 续跑只会空转后报错，按新的一轮继续（结果平铺进 input）。
+			s.log.Warnf("responses tool results arrived after all pending calls timed out (conv=%s); treating as new turn",
+				conv.Key)
+		} else {
+			// 先确保会话存在
+			if _, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs); err != nil {
+				st, typ, msg := s.mapUpstreamError(err)
+				writeOpenAIError(w, st, typ, msg, "")
+				return
+			}
+			sub = s.bus.Subscribe(conv.snapshotSessionID(), 512)
+			defer sub.cancel()
+			promptAt := time.Now().UnixMilli()
+			s.deliverToolResults(conv, pending, toolResults, inputMsgs)
+			setSessionHeaders(w, conv)
+			s.finishResponses(ctx, w, r, req, ref, conv, sub, promptAt, dir)
 			return
 		}
-		sub = s.bus.Subscribe(conv.snapshotSessionID(), 512)
-		defer sub.cancel()
-		promptAt := time.Now().UnixMilli()
-		s.deliverToolResults(conv, pending, toolResults)
-		setSessionHeaders(w, conv)
-		s.finishResponses(ctx, w, r, req, ref, conv, sub, promptAt, dir)
-		return
 	}
 
 	// ---- 新的一轮：把 input 作为 prompt 发出 ----
@@ -835,10 +842,13 @@ func (s *Server) newResponsesResponse(req ResponsesRequest, model, convKey strin
 }
 
 // deliverToolResults 把客户端的工具结果回填给挂起的 MCP 调用。
-func (s *Server) deliverToolResults(conv *Conversation, pending []*pendingCall, results map[string]ToolResult) {
+// 对齐方式与 Chat / Anthropic 一致（精确 id → 工具名 → 顺序），
+// 客户端换用自己生成的 function_call id 也能对上。
+func (s *Server) deliverToolResults(conv *Conversation, pending []*pendingCall, results map[string]ToolResult, msgs []ChatMessage) {
+	assigned := assignToolResults(pending, results, orderedToolResults(msgs), s.log)
 	answered := 0
 	for _, p := range pending {
-		res, ok := results[p.CallID]
+		res, ok := assigned[p.CallID]
 		if !ok {
 			res = ToolResult{
 				Content: "bridge: client did not supply a result for tool call " + p.CallID,

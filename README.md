@@ -399,7 +399,8 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 | `BRIDGE_USER_AGENT` | 空 | 所有**出站**请求的 `User-Agent`。空=内置 `janus/<version> (<os>/<arch>; +https://github.com/qist/janus)`。Go 默认的 `Go-http-client/1.1` 易被网关/风控当脚本拦（403/429）；需要时也可覆盖成浏览器式 UA |
 | `BRIDGE_PERMISSION_REPLY` | `once` | 自动应答权限请求：`once`（仅本次）/ `always`（记住）/ `reject`（拒绝）/ `off`（不干预） |
 
-> **结果回填**：客户端用 `role:"tool"` 消息回填结果，按 `tool_call_id` 对应。部分客户端（实测 Trae）会用**自己生成的** id（而非 janus 下发的 `call_`+hex），桥会按「**精确 id → 工具名 → 顺序**」三级对齐，并且只匹配**当前这一轮**的结果（不回放旧结果）。
+> **结果回填**：客户端用 `role:"tool"` 消息回填结果，按 `tool_call_id` 对应。部分客户端（实测 Trae）会用**自己生成的** id（而非 janus 下发的 `call_`+hex），桥会按「**精确 id → 工具名 → 顺序**」三级对齐，并且只匹配**当前这一轮**的结果（不回放旧结果）。Chat / Anthropic / Responses 三条路径统一走同一套对齐。
+> **超时与晚到结果**：只读/编辑类工具（默认 90s）到点没回结果时，桥会释放并中断上游 agent（这时客户端多半已离开）。客户端若之后才把结果发回来（如审批 diff 超过 90s 后点重试），会**按普通新轮次处理**，把工具结果平铺进提示词让 agent 接着干，而不是在已中断的会话上空转再次报错。超时次数可见于 `/metrics` 的 `opencode_bridge_tool_timeouts_total`。
 > **注册生命周期**：MCP server 在**会话存活期内保持注册**（注销发生在：会话重置 / 客户端不再声明 tools / TTL）。不每轮注销，是因为 OpenCode 的 agent 会话**不会在重新注册后刷新工具目录**，会导致下一轮「Code Mode 目录为空」。
 
 ### Responses API / 用量
@@ -478,8 +479,9 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-3-5-haiku
 
   1. `BRIDGE_MODEL_MAP` 显式映射（支持前缀通配 `*` 结尾）
   2. 请求的 `model` 本身能解析（例如客户端直接填 `opencode-go/xxx`）
-  3. `BRIDGE_DEFAULT_MODEL` —— **多数用户只需配这一个**，所有档位都走它
-  4. 都没有时，按档位启发式自动挑：opus 挑强的、haiku 挑便宜快的
+  3. **面板选择的默认模型**（`/ui` →「设为 janus」，存 DB，含思考档位）——与虚拟模型 `janus` 同优先级
+  4. `BRIDGE_DEFAULT_MODEL` —— **多数用户只需配这一个**，所有档位都走它
+  5. 都没有时，按档位启发式自动挑：opus 挑强的、haiku 挑便宜快的
 - **怎么从一堆订阅模型里挑那一个**：`janus models` 列出上游全部可用模型
   （价格 / 上下文 / 能力，并标注哪些经 API 会 403），末尾直接给出三个档位的当前映射结果，
   复制一行填进 `BRIDGE_DEFAULT_MODEL` 即可：

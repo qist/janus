@@ -219,17 +219,23 @@ func (s *Server) scopeOf(r *http.Request, clientDir string, msgs []ChatMessage) 
 	return scopeKey(ide, project), ide + "/" + project
 }
 
-// sessionDir 决定上游 OpenCode 会话的工作目录：
-// 客户端 header > 从消息抽的项目根（**仅当该目录在 janus 主机上真实存在**）
-// > per-scope 中性工作目录（BRIDGE_WORKSPACES_DIR/<scope>）。
+// sessionDir 决定上游 OpenCode 会话的工作目录。Chat / Anthropic Messages /
+// Responses 三个接口共用同一套逻辑，保证远程 + mode B 行为一致：
 //
-// 为什么要存在性校验：Trae/Copilot 的项目路径是「客户端侧」的；远程 + mode B 时
-// janus 主机上未必有该目录，上游对不存在的目录注册 MCP 会 500，整轮直接失败。
-// 用 per-scope 中性目录后，agent 的工作区是该项目专属的空目录，不会误认成别的项目；
-// 隔离仍由 scope（key）保证。
+//	客户端 header（仅当目录在 janus 主机上真实存在）
+//	  > 从消息抽的项目根（同样要求真实存在）
+//	  > per-scope 中性工作目录（BRIDGE_WORKSPACES_DIR/<scope>）
+//
+// 为什么要存在性校验：Trae/Copilot/Claude Code 的项目路径是「客户端侧」的；远程 + mode B 时
+// janus 主机上未必有该目录（Windows 客户端路径在 Linux 上必不存在），上游对不存在的目录
+// 注册 MCP 会 500，整轮直接失败。此时用 per-scope 中性目录后，agent 的工作区是该项目
+// 专属的空目录，不会误认成别的项目，也不会回落到部署目录；隔离仍由 scope（key）保证。
 func (s *Server) sessionDir(headerDir string, msgs []ChatMessage, scopeKey string) string {
 	if d := strings.TrimSpace(headerDir); d != "" {
-		return d
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+			return d
+		}
+		// header 是客户端侧路径（janus 主机上不存在）：不直接使用，继续往下落。
 	}
 	if p := extractProjectRoot(msgs); p != "" {
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {

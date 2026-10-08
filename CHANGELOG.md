@@ -4,6 +4,23 @@
 
 ---
 
+## [v0.3.23] - 2026-10-08
+
+### 修复
+- **Responses 接口未按远程模式处理会话目录**：`/v1/responses` 此前对工作目录只取
+  `X-OpenCode-Directory`，没有则直接回落部署目录（`BRIDGE_DIRECTORY`），远程 + mode B
+  时工具桥 / 上游会话被建在 janus 部署目录而非客户端项目。现在与 Chat / Anthropic
+  Messages 一致改用 `scopeOf + sessionDir`：客户端路径在 janus 主机上不存在时改用
+  `BRIDGE_WORKSPACES_DIR/<scope>` 中性工作目录；`previous_response_id` 续链还会**锁定
+  原链目录**（增量 input 不含项目路径，重算会漂移），dir 随响应落 SQLite 支持跨重启续链。
+- **`sessionDir` 对客户端目录头不做存在性校验**：三套接口（Chat / Messages / Responses）
+  共用逻辑此前对 `X-OpenCode-Directory` 是"非空即用"——远程客户端（如 Windows 上的
+  Claude Code）传来的路径在 janus 主机上不存在时也会被直接使用，上游对不存在目录注册
+  MCP 会报 500。现在目录选择链统一为「header（真实存在才用）> 消息抽取的项目根（同样
+  校验）> per-scope 中性目录」，与文档承诺的远程 + mode B 行为一致。
+
+---
+
 ## [v0.3.22] - 2026-10-08
 
 ### 修复

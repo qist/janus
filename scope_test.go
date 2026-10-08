@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestNormalizeIDE(t *testing.T) {
 	cases := map[string]string{
@@ -80,5 +85,46 @@ func TestProjectIdentityPriority(t *testing.T) {
 	// 都没有 → default
 	if got := s.projectIdentity("", nil); got != "default" {
 		t.Errorf("default: got %q", got)
+	}
+}
+
+// TestSessionDir 验证远程 + mode B 的会话目录选择链：
+// header（存在才用）> 消息抽取的项目根（存在才用）> per-scope 中性目录。
+func TestSessionDir(t *testing.T) {
+	ws := t.TempDir()
+	s := &Server{cfg: Config{WorkspacesDir: ws, Directory: "/deploy"}}
+	sk := scopeKey("testide", "testproj")
+	neutral := filepath.Join(ws, strings.TrimPrefix(sk, scopeKeyPrefix))
+
+	// 1. header 目录在 janus 主机上真实存在 → 直接用
+	exists := t.TempDir()
+	if got := s.sessionDir(exists, nil, sk); got != exists {
+		t.Fatalf("existing header dir: got %q want %q", got, exists)
+	}
+
+	// 2. header 是客户端侧路径、janus 上不存在（远程 + mode B，如 Windows 路径）
+	//    → 不直接使用，落到 per-scope 中性目录，且目录被创建
+	got := s.sessionDir(`C:\Users\dev\proj`, nil, sk)
+	if got != neutral {
+		t.Fatalf("missing header dir: got %q want %q", got, neutral)
+	}
+	if fi, err := os.Stat(neutral); err != nil || !fi.IsDir() {
+		t.Fatalf("neutral dir not created: %v", err)
+	}
+
+	// 3. header 为空，消息抽到真实存在的项目根 → 用它
+	msgs := []ChatMessage{{Role: "user", Content: MessageContent{Text: "Primary working directory: " + exists}}}
+	if got := s.sessionDir("", msgs, sk); got != exists {
+		t.Fatalf("msg-extracted dir: got %q want %q", got, exists)
+	}
+
+	// 4. header 为空且消息里抽不到存在的路径 → 中性目录
+	if got := s.sessionDir("", nil, sk); got != neutral {
+		t.Fatalf("fallback dir: got %q want %q", got, neutral)
+	}
+
+	// 5. header 是客户端侧路径、但消息里能抽到真实存在的目录 → 用消息抽取的
+	if got := s.sessionDir(`/nonexistent-on-janus`, msgs, sk); got != exists {
+		t.Fatalf("header missing + msg found: got %q want %q", got, exists)
 	}
 }

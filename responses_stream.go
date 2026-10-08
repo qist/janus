@@ -236,7 +236,7 @@ func (st *responsesStream) closeAll() {
 
 // streamResponses 以 Responses SSE 格式驱动一轮执行。
 func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	req ResponsesRequest, conv *Conversation, sub *subscription, promptAt int64, model string) {
+	req ResponsesRequest, conv *Conversation, sub *subscription, promptAt int64, model, dir string) {
 
 	ss, err := newResponsesSSE(w)
 	if err != nil {
@@ -349,7 +349,7 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 	final.Usage = usageToResponses(t.res.usage)
 	applyIncomplete(final, t)
 	if req.Store == nil || *req.Store {
-		s.responses.put(final, conv.Key)
+		s.responses.put(final, conv.Key, dir)
 	}
 	st.event("response.completed", map[string]any{"response": final})
 }

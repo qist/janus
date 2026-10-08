@@ -168,10 +168,10 @@ func TestUsageToResponses(t *testing.T) {
 func TestResponseStore(t *testing.T) {
 	st := NewResponseStore(time.Minute)
 	r := &ResponsesResponse{ID: "resp_1", Object: "response"}
-	st.put(r, "resp:key1")
+	st.put(r, "resp:key1", "/workspace/proj")
 
 	got := st.get("resp_1")
-	if got == nil || got.resp.ID != "resp_1" || got.convKey != "resp:key1" {
+	if got == nil || got.resp.ID != "resp_1" || got.convKey != "resp:key1" || got.dir != "/workspace/proj" {
 		t.Fatalf("%+v", got)
 	}
 	if !st.delete("resp_1") {
@@ -187,7 +187,7 @@ func TestResponseStore(t *testing.T) {
 
 func TestResponseStoreGC(t *testing.T) {
 	st := NewResponseStore(time.Nanosecond)
-	st.put(&ResponsesResponse{ID: "resp_old"}, "k")
+	st.put(&ResponsesResponse{ID: "resp_old"}, "k", "/tmp")
 	time.Sleep(time.Millisecond)
 	st.gc()
 	if st.get("resp_old") != nil {
@@ -231,7 +231,7 @@ func newResponsesTestServer(t *testing.T, enabled bool) *Server {
 
 func TestResponsesGetDeleteAndAuth(t *testing.T) {
 	srv := newResponsesTestServer(t, true)
-	srv.responses.put(&ResponsesResponse{ID: "resp_x", Object: "response", Status: "completed"}, "resp:k")
+	srv.responses.put(&ResponsesResponse{ID: "resp_x", Object: "response", Status: "completed"}, "resp:k", "/tmp")
 
 	// 鉴权
 	req := httptest.NewRequest(http.MethodGet, "/v1/responses/resp_x", nil)
@@ -520,7 +520,7 @@ func TestResponsesToolResultContinuation(t *testing.T) {
 	pc := &pendingCall{CallID: "call_1", ToolName: "get_weather", Args: `{"city":"北京"}`, result: make(chan ToolResult, 1)}
 	conv.setPendingToolCalls([]*pendingCall{pc})
 	srv.store.Release(conv)
-	srv.responses.put(&ResponsesResponse{ID: "resp_prev", Object: "response", Status: "completed"}, "resp:tc")
+	srv.responses.put(&ResponsesResponse{ID: "resp_prev", Object: "response", Status: "completed"}, "resp:tc", "/workspace/proj")
 
 	body := `{"model":"default","previous_response_id":"resp_prev","store":true,
 	  "input":[{"type":"function_call_output","call_id":"call_1","output":"晴，24°C"}]}`

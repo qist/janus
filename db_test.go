@@ -18,7 +18,7 @@ func TestDBStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.putResponse("resp_1", "resp:k", time.Now().Add(time.Minute).Unix(), []byte(`{"id":"resp_1"}`))
+	d.putResponse("resp_1", "resp:k", "/apps", time.Now().Add(time.Minute).Unix(), []byte(`{"id":"resp_1"}`))
 	d.saveConv(dbConversation{Key: "resp:k", SessionID: "ses_1", ProviderID: "p", ModelID: "m"})
 	d.close()
 
@@ -29,9 +29,9 @@ func TestDBStoreRoundTrip(t *testing.T) {
 	}
 	defer d2.close()
 
-	payload, ck, _, ok := d2.getResponse("resp_1")
-	if !ok || ck != "resp:k" || string(payload) != `{"id":"resp_1"}` {
-		t.Fatalf("getResponse: payload=%s convKey=%s ok=%v", payload, ck, ok)
+	payload, ck, ddir, _, ok := d2.getResponse("resp_1")
+	if !ok || ck != "resp:k" || ddir != "/apps" || string(payload) != `{"id":"resp_1"}` {
+		t.Fatalf("getResponse: payload=%s convKey=%s dir=%s ok=%v", payload, ck, ddir, ok)
 	}
 	row, ok := d2.loadConv("resp:k")
 	if !ok || row.SessionID != "ses_1" || row.ProviderID != "p" {
@@ -41,7 +41,7 @@ func TestDBStoreRoundTrip(t *testing.T) {
 		t.Error("deleteResponse 应返回 true")
 	}
 	d2.deleteConv("resp:k")
-	if _, _, _, ok := d2.getResponse("resp_1"); ok {
+	if _, _, _, _, ok := d2.getResponse("resp_1"); ok {
 		t.Error("删除后不应再查到")
 	}
 }

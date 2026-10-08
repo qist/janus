@@ -140,6 +140,7 @@ type ResponsesOutputDetails struct {
 type storedResponse struct {
 	resp    *ResponsesResponse
 	convKey string
+	dir     string // 该响应所在链锁定的会话工作目录
 	at      time.Time
 }
 
@@ -165,19 +166,19 @@ func (r *responseStore) attachDB(db *dbStore) {
 	r.mu.Unlock()
 }
 
-func (r *responseStore) put(resp *ResponsesResponse, convKey string) {
+func (r *responseStore) put(resp *ResponsesResponse, convKey, dir string) {
 	if resp == nil {
 		return
 	}
 	at := time.Now()
 	r.mu.Lock()
-	r.items[resp.ID] = &storedResponse{resp: resp, convKey: convKey, at: at}
+	r.items[resp.ID] = &storedResponse{resp: resp, convKey: convKey, dir: dir, at: at}
 	db := r.db
 	ttl := r.ttl
 	r.mu.Unlock()
 	if db != nil {
 		if b, err := json.Marshal(resp); err == nil {
-			db.putResponse(resp.ID, convKey, at.Add(ttl).Unix(), b)
+			db.putResponse(resp.ID, convKey, dir, at.Add(ttl).Unix(), b)
 		}
 	}
 }
@@ -194,7 +195,7 @@ func (r *responseStore) get(id string) *storedResponse {
 	if db == nil {
 		return nil
 	}
-	payload, convKey, expiresAt, ok := db.getResponse(id)
+	payload, convKey, dir, expiresAt, ok := db.getResponse(id)
 	if !ok {
 		return nil
 	}
@@ -206,7 +207,7 @@ func (r *responseStore) get(id string) *storedResponse {
 	if err := json.Unmarshal(payload, &resp); err != nil {
 		return nil
 	}
-	sr = &storedResponse{resp: &resp, convKey: convKey, at: time.Unix(expiresAt, 0).Add(-ttl)}
+	sr = &storedResponse{resp: &resp, convKey: convKey, dir: dir, at: time.Unix(expiresAt, 0).Add(-ttl)}
 	r.mu.Lock()
 	r.items[id] = sr
 	r.mu.Unlock()
@@ -599,7 +600,10 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	dir := firstNonEmpty(r.Header.Get("X-OpenCode-Directory"), s.cfg.Directory)
+	// 会话目录：与 Chat / Anthropic 一致——客户端项目路径在 janus 主机上不存在时
+	// 用 per-scope 中性工作目录（远程 + mode B，见 scope.go），而不是回落到部署目录。
+	scopeK, _ := s.scopeOf(r, r.Header.Get("X-OpenCode-Directory"), inputMsgs)
+	dir := s.sessionDir(r.Header.Get("X-OpenCode-Directory"), inputMsgs, scopeK)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
 	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
 
@@ -623,8 +627,13 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		convKey = "resp:" + responseIDPrefix + newID()
 	}
 
+	// 续链时锁定原链的工作目录：增量 input 里通常没有项目路径，重算会漂移。
+	if prev != nil && prev.dir != "" {
+		dir = prev.dir
+	}
+
 	conv := s.store.AcquireKey(convKey)
-	s.logClientInfo(r, "", dir, convKey, nil)
+	s.logClientInfo(r, "", dir, convKey, inputMsgs)
 	defer s.store.Release(conv)
 
 	// 上一轮被中止过：重开干净会话。
@@ -757,7 +766,7 @@ func (s *Server) finishResponses(ctx context.Context, w http.ResponseWriter, r *
 	model := s.echoModel(ref, req.Model)
 
 	if req.Stream {
-		s.streamResponses(ctx, w, r, req, conv, sub, promptAt, model)
+		s.streamResponses(ctx, w, r, req, conv, sub, promptAt, model, dir)
 		return
 	}
 
@@ -808,7 +817,7 @@ func (s *Server) finishResponses(ctx context.Context, w http.ResponseWriter, r *
 		respObj.Error = &e
 	}
 	if req.Store == nil || *req.Store {
-		s.responses.put(respObj, conv.Key)
+		s.responses.put(respObj, conv.Key, dir)
 	}
 	writeJSON(w, http.StatusOK, respObj)
 }

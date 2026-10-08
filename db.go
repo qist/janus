@@ -22,6 +22,7 @@ import (
 type dbResponse struct {
 	ID        string `gorm:"primaryKey;size:80"`
 	ConvKey   string `gorm:"index;size:160"`
+	Directory string `gorm:"size:512"`
 	ExpiresAt int64  `gorm:"index"`
 	CreatedAt int64
 	Payload   []byte
@@ -92,24 +93,24 @@ func (d *dbStore) close() {
 
 // ---------- responses ----------
 
-func (d *dbStore) putResponse(id, convKey string, expiresAt int64, payload []byte) {
+func (d *dbStore) putResponse(id, convKey, dir string, expiresAt int64, payload []byte) {
 	if d == nil {
 		return
 	}
-	row := dbResponse{ID: id, ConvKey: convKey, ExpiresAt: expiresAt, CreatedAt: time.Now().Unix(), Payload: payload}
+	row := dbResponse{ID: id, ConvKey: convKey, Directory: dir, ExpiresAt: expiresAt, CreatedAt: time.Now().Unix(), Payload: payload}
 	// Upsert：同 id 覆盖
 	d.db.Save(&row)
 }
 
-func (d *dbStore) getResponse(id string) (payload []byte, convKey string, expiresAt int64, ok bool) {
+func (d *dbStore) getResponse(id string) (payload []byte, convKey, dir string, expiresAt int64, ok bool) {
 	if d == nil {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 	var row dbResponse
 	if err := d.db.First(&row, "id = ?", id).Error; err != nil {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
-	return row.Payload, row.ConvKey, row.ExpiresAt, true
+	return row.Payload, row.ConvKey, row.Directory, row.ExpiresAt, true
 }
 
 func (d *dbStore) deleteResponse(id string) bool {

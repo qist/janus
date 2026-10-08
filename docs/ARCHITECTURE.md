@@ -1,8 +1,9 @@
 # Janus 架构演进：控制平面 + Agent 生态
 
 > 状态：讨论稿（未实现部分均为规划）
-> 日期：2026-10-05
+> 日期：2026-10-08
 > 关系：本文描述 janus 的**目标架构与路线**；当前已实现细节见 [`DESIGN.md`](./DESIGN.md)。
+> 2026-10-08 更新：新增**多 Agent 编排**章节（§6，Agent Registry / Router / DAG）与定位升级。
 
 ---
 
@@ -20,10 +21,29 @@ Janus 是**控制平面**，不是 agent runtime：
 | 会话网关（映射 / 生命周期） | 不实现工具 runtime |
 | Agent 网关（选 harness / 注入配置） | 不实现 MCP runtime |
 | 模型访问层（目录 / 网关 / 路由） | 不实现模型推理 |
-| 派单 / 调度 / 门禁 | 不实现沙箱（下沉 OS） |
+| 派单 / 调度 / 门禁 | 不实现模型推理 |
+| Agent 编排（Registry / Router / DAG） | 不实现沙箱（下沉 OS） |
 | 权限策略 | — |
 | 工具桥（MCP） | — |
 | 事件 / 审计 / 计量 | — |
+
+**定位升级（2026-10-08）：Agent Gateway + Agent Runtime，而不是单纯的「OpenAI API 转换层」。**
+
+类比：**Kubernetes 管理 Container，Janus 管理 Agent。** IDE（Trae / Cursor / CodeBuddy /
+VSCode）永远只看到一个模型端点（`/v1/chat/completions`），下游可以是**整个 Agent 团队**
+（Architect / Planner / Coder / Tester / Security / Reviewer）。
+
+对客户端的竞争力不是「又一个写代码 Agent」（那条赛道 Claude / OpenAI 很强），而是
+**AI Agent Operating System for IDE**：
+
+- 一个 API 接入所有 IDE；
+- 多模型混合 + 多角色协作；
+- 企业权限控制 + 审计日志；
+- Agent 生命周期管理（Registry / Router / DAG Scheduler）。
+
+已有能力（session key、MCP bridge、权限隔离、Async Job、`/v1/requests` 审计）都是这一层的
+**基础件**，不是终点；补齐 **Agent Registry + Intent Router + DAG Scheduler** 之后，
+Janus 从「接口转换器」升级为真正的 **Agent Runtime**（详见 §6）。
 
 **核心原则：标准件优先，只自定义产品面。**
 
@@ -135,7 +155,7 @@ harness 自己管模型配置，Janus **注入配置**：
 - **模型目录**：聚合公开注册表（models.dev）+ 各 provider `/models`，落 DB。
 - **翻译网关**：LiteLLM / new-api / one-api / OpenRouter，同时暴露 Anthropic + OpenAI 协议；统一鉴权、限流、计量。
 - **用户自带 key**：加密存储（AES-GCM，主密钥来自文件/env）。
-- **订阅式 OAuth**（Codex/Claude）为**可选附加**，不作主干（见 §10 硬约束）。
+- **订阅式 OAuth**（Codex/Claude）为**可选附加**，不作主干（见 §11 硬约束）。
 
 ---
 
@@ -160,10 +180,97 @@ role: backend
 - 未配置的 role → 回落 `BRIDGE_DEFAULT_MODEL`。
 
 **意义**：客户端只选 role，一次选择就定死 **模型 + 执行模式 + 权限 + 预算**。
+一个 role 也可绑定**多 Agent 团队**（内部按 §6 编排，客户端无感知）。
 
 ---
 
-## 6. 权限策略
+## 6. 多 Agent 编排（Registry / Router / DAG）
+
+> Router 决定「**调谁**」，Registry 决定「**谁知道什么**」，DAG / 派单决定「**谁先谁后、门禁在哪**」。
+> 对外（IDE）永远只有一个 /v1 端点、一堆 `janus/<role>` 虚拟模型；多 Agent 全部在 Janus 内部消化。
+
+### 6.1 Agent Profile：角色不是「模型后缀」，是一整套契约
+
+```
+agent:
+  name: security-reviewer
+  model: gpt-6
+  system_prompt: "…"
+  tools: [git, filesystem, grep]
+  permissions:
+    filesystem: { write: false }
+  memory: security-memory        # 独立记忆域（§6.5）
+  mode: remote-tools             # 复用 §2 执行模式
+```
+
+与 §5 role 的关系：**role 是客户端可选面（`janus/<role>` 虚拟模型），agent 是内部执行面**；
+一个 role 可绑一个 agent，也可绑一个 agent 团队（team = 一个 DAG）。
+
+### 6.2 Agent Registry：能力自描述 + Agent 市场
+
+- 每个 agent **自描述** `skills / input / output` 契约，Janus 落 `agents` 表
+  （id、name、skills、model、tools、permission、status）。
+- 路由按能力匹配：`需要检查 SQL 注入` → `vulnerability_scan` → `security-agent`。
+- **Agent 市场**：`janus agent install security-guru` 安装第三方 agent → 自动注册 skills →
+  Router 自动可见（类似 IDE 插件）。比「把角色写死在代码里」可演化得多。
+
+### 6.3 Agent Router：怎么知道调谁（四条路线，推荐混用）
+
+| 方案 | 机制 | 优点 | 缺点 / 适用 |
+|---|---|---|---|
+| 1 显式指定 | 客户端/用户 `@architect`，或请求带 `agent:"architect"` | 准确、零成本 | 用户要懂角色名；适合工单 / IDE 高级模式 |
+| 2 **意图 Router Agent（推荐主干）** | 专用 router 不干活，只输出 `{agents:[{name, reason}]}` | 通用、可扩展 | 多一跳、一点延迟/token |
+| 3 阶段状态机 | 复杂任务按 plan→architect→code→test→review 阶段推进 | 稳定、可预期 | 不适用于一次性的小请求 |
+| 4 能力自描述匹配 | Router 先查 Registry，按 skills 命中即路由 | 精确、可审计 | 依赖注册质量 |
+
+**明确不做**：`strings.Contains(prompt, "设计")` 这类硬编码意图匹配——新角色一多就会废。
+
+### 6.4 Agent 通信（内部协议）
+
+```
+AgentMessage { from, to, task_id, type: plan|code|test|report|review, payload }
+```
+
+- 走 Janus 内部（现有事件总线 + durable queue 的雏形）；**对外仍是标准 `tool_calls`**，
+  客户端不用懂 MCP / AgentMessage。
+- 只传**结论与交付物引用**（短引用/摘要），不传整段上下文——子 agent 的探索留在自己的
+  上下文，主线只拿结论（省 token，见 §8.2 Token 控制）。
+
+### 6.5 Agent 记忆（隔离）
+
+- 每个 agent 独立记忆域（`architect-memory` / `coder-memory` / `security-memory`…），不混。
+- 记忆挂 `agent + task/conversation` 维度，DB 落 KV/向量；可清、可导出，避免「串记忆」。
+
+### 6.6 与任务派单（§9）的关系
+
+Router 产出「谁参与」→ 派单引擎把 agents 摊成 **DAG 节点**（非线性、可并行）：
+
+```
+        Architect
+           |
+     +-----+------+
+     |            |
+   Coder      Security
+     |
+   Tester
+     |
+   Review
+```
+
+DAG 的边 = **artifact 依赖 + 门禁**（沿用 §9 artifact-gated 规则：只读可并行、同一 artifact
+单 writer、门禁通过才推进）。
+
+### 6.7 交付顺序（与 §12 路线图对齐）
+
+1. **Agent Registry**：`agents` 表 + `janus/agent/*` 管理 API + 市场安装；
+2. **Intent Router**：默认走方案 2 意图路由，方案 1/4 作旁路；
+3. **DAG Scheduler**：扩展现有派单，agents 列表 → DAG 节点 → 门禁推进。
+
+这三个补齐，Janus 就从「接口转换器」升级为真正的 **Agent Runtime**。
+
+---
+
+## 7. 权限策略
 
 - **服务端裁决**：复用 harness 的权限事件（如 OpenCode `permission.asked`，`action=external_directory`）+ 会话 workspace，按 `allowed_paths / deny_paths / tools` 判 allow/deny。
 - **观测**：只进 Janus 日志 / `/ui`（运维审计），**不推给客户端**（标准协议无此通道）。
@@ -175,15 +282,15 @@ role: backend
 
 ---
 
-## 7. 对话与上下文
+## 8. 对话与上下文
 
-### 7.1 存储不一致：不翻译存储，只映射会话
+### 8.1 存储不一致：不翻译存储，只映射会话
 - **Janus canonical transcript**：客户端看到的那条对话线，只存 `role / content / tool_calls / 结果摘要`；不存 reasoning、文件快照、harness 内部噪音。
 - **harness 原生 session**：各自存储，Janus 只记 `{harness, session_id}`。
 - 适配靠 **ACP**（`session/new|load|resume|prompt|update|cancel`）。
 - **硬限制**：会话**不能跨 harness 迁移**。默认**一条对话绑一个 harness**；切换 = 新 session + 重放 canonical。
 
-### 7.2 Token 控制
+### 8.2 Token 控制
 | 手段 | 说明 |
 |---|---|
 | **增量发送** | harness 会话有状态，只发新增（最大头；现有 `Diff` 即此） |
@@ -198,19 +305,19 @@ role: backend
 
 **最贵的两个动作：重发全量、重建会话。** 压住这俩，费用就下来。
 
-### 7.3 有状态对话 API（生态优势）
+### 8.3 有状态对话 API（生态优势）
 自建 API 可做**有状态对话**：客户端只发**新消息**（非全量），彻底消除「客户端重发历史」的浪费。这是标准 OpenAI 客户端给不了的。
 
 ---
 
-## 8. 任务派单（artifact-gated）
+## 9. 任务派单（artifact-gated）
 
-### 8.1 依赖是「交付物」，不是「角色顺序」
+### 9.1 依赖是「交付物」，不是「角色顺序」
 - 阶段启动充要条件：**输入 artifact 已冻结 + 已批准**。
 - 阶段完成定义：**输出 artifact 已产出 + 通过验收**。
 - **冻结（freeze）** 是防乱套的根：下游不能回头改上游决定。
 
-### 8.2 角色流水线（默认串行 + 门禁）
+### 9.2 角色流水线（默认串行 + 门禁）
 | 阶段 | mode | 输入 | 输出 | 门禁 |
 |---|---|---|---|---|
 | product | none | 产品目标 | PRD / 范围 | 人工 |
@@ -222,12 +329,12 @@ role: backend
 | bugfix | native | 审计报告 | 修复 | 测试 |
 | qa | native / 只读 | 修复 | 验收报告 | 人工 |
 
-### 8.3 并发规则
+### 9.3 并发规则
 - **只读阶段可并行**（多审计维度、多分析）。
 - **写阶段默认串行**；仅 artifact 不相交时并行（backend ∥ frontend，前提接口已冻结），各自 **worktree 隔离**。
 - 铁律：**同一 artifact 只有一个 writer。**
 
-### 8.4 对象
+### 9.4 对象
 ```
 Goal   产品目标
 Stage  阶段：{role, mode, inputs[], outputs[], gate}
@@ -239,18 +346,18 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 ---
 
-## 9. 平台层（多用户）
+## 10. 平台层（多用户）
 
-### 9.1 配置入库
+### 10.1 配置入库
 - **文件 bootstrap**：监听地址、DB DSN、加密主密钥、初始 admin（启动前必需）。
 - **DB**：providers、roles（虚拟模型）、users、api_keys、budgets、permissions。
 
-### 9.2 身份
+### 10.2 身份
 - **OIDC**（Janus 当 Relying Party；IdP 用 Authentik / Keycloak / Zitadel / Google / GitHub）。
 - 程序化客户端：**Janus 签发 API key**（`sk-janus-…`，绑定用户）。
 - 两条腿都要：浏览器 OIDC + API key。
 
-### 9.3 隔离
+### 10.3 隔离
 | 方案 | 说明 | 代价 |
 |---|---|---|
 | 逻辑隔离 | 共享一个 harness，Janus 按 user 打标 | 便宜，隔离弱 |
@@ -258,14 +365,14 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 **推荐后者**（扩展现有 autostart 能力）。
 
-### 9.4 provider 登录
+### 10.4 provider 登录
 - **不要 Janus 自己实现各厂商 OAuth**。
 - 走 harness 自身登录（`opencode auth login`）或 **ACP `authenticate`**；Janus 只透出 URL / device code。
 - API：`POST /v1/providers/{id}/login` → `{url, user_code}`；`GET .../login/status`。
 
 ---
 
-## 10. 可行性与硬约束
+## 11. 可行性与硬约束
 
 | # | 能力 | 可行性 | 依据 / 风险 |
 |---|---|---|---|
@@ -291,26 +398,29 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 20 | Janus 拦网络 / 命令 | ⛔ 不可能 | 靠 OS |
 | 21 | 客户端权限审批（标准协议） | ⛔ 无通道 | OpenAI/Anthropic 无此通道 |
 | 22 | 重写 agent runtime | ⛔ 不做 | 违背定位 |
+| 23 | Agent Registry + 能力自描述匹配 | 🟡 中 | `agents` 表 + skills 契约 + 管理 API |
+| 24 | Intent Router（Router Agent） | 🟡 中 | 复用现有 Agent 通道；多一跳 |
+| 25 | DAG Scheduler（agents 列表 → DAG） | 🔴 难 | 依赖异步 Job + 派单（#15/#16） |
 
 **三条硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）、订阅 OAuth 别做主干（#19）。
 
 ---
 
-## 11. 路线图
+## 12. 路线图
 
 | 阶段 | 内容 | 目标 |
 |---|---|---|
 | **P0** | Role 注册表 + `janus/<role>` 虚拟模型 + API key；配置「文件 + DB 覆盖」 | 让客户端只选 role；模型可集中配置 |
 | **P1** | 自建模型网关 + 目录（摆脱 Console）；权限策略（服务端裁决 + 审计） | 模型访问层独立；权限可管 |
-| **P2** | **异步 Job**（durable、events / cancel / 续订） | 派单的地基 |
+| **P2** | **异步 Job**（durable、events / cancel / 续订） | 派单与 Multi-Agent 编排队列的地基 |
 | **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 | harness 可插拔；多用户 |
-| **P4** | 派单（先串行 + 人工门禁），再逐步加 artifact 依赖图 | 产品研发流水线 |
+| **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4），再逐步加 artifact 依赖图 | 产品研发流水线 / Multi-Agent |
 
 每阶段独立可交付，且可回退。
 
 ---
 
-## 12. 现状对照
+## 13. 现状对照
 
 **已实现（见 DESIGN.md）**：OpenAI/Anthropic/Responses 三套协议、会话分桶与历史重放、**无会话 id 的 scope（IDE+项目）共享会话**（独立 TTL）、工具桥（MCP，等待分两档）、权限自动应答、上游自动发现与托管、`/v1/usage`、`/v1/requests` + `/ui`、持久化、工具结果注释、终止后重开会话、**跨平台（linux/darwin/windows）**、统一出站 `User-Agent`。
 
@@ -318,14 +428,15 @@ Gate   门禁：人工 / 自动（测试、审计）
 - **harness 配置自动注入**：janus 通过 `OPENCODE_CONFIG_CONTENT` 注入自动生成的 `orchestrator` 白名单（§3.3），无需手写 `~/.config/opencode/opencode.jsonc`；
 - **janus 自管上游**：`OPENCODE_REUSE_EXTERNAL=false` 时 janus 总是自己拉起 OpenCode（注入的前提）。
 
-**本路线新增**：模型访问层、Role/虚拟模型、权限策略、异步 Job、ACP、平台层（DB/OIDC/多用户）、派单。
+**本路线新增**：模型访问层、Role/虚拟模型、权限策略、异步 Job、ACP、平台层（DB/OIDC/多用户）、派单、**多 Agent 编排（Registry / Router / DAG，§6）**。
 
 ---
 
-## 13. 非目标（明确排除）
+## 14. 非目标（明确排除）
 
 - 不重写 agent / 工具 / MCP / 会话 runtime。
 - 不实现模型推理。
 - 不在 Janus 内造沙箱（下沉 OS）。
 - 不为客户端做权限审批（无标准通道）。
 - 不以订阅式 OAuth 作为多用户主干。
+- 不做硬编码意图匹配（`if contains(prompt, "设计")` 型路由）——角色路由走 §6.3 的 Registry / Router。

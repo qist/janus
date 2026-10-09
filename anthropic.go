@@ -509,12 +509,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	if mode == DiffReset && conv.snapshotSessionID() != "" {
 		if s.cfg.ScopeKey && explicit == "" {
-			if d := lastUserTurn(inputMsgs); len(d) > 0 {
-				s.log.Infof("scope mode: appending last user turn to shared context (scope=%s)", conv.Key)
-				mode, delta = DiffAppend, d
-			} else {
-				s.resetSession(conv)
-			}
+			// scope 模式（无会话 id）：新话题/子代理必须重开干净会话全量重发，
+			// 不能 append 进旧共享会话，否则新旧内容会被模型合拼回答。
+			s.log.Infof("scope mode: new topic, resetting shared session (scope=%s)", conv.Key)
+			s.resetSession(conv)
 		} else if d, ok := TolerateReset(stored, inputMsgs); ok {
 			s.log.Infof("history mismatch tolerated, appending last user turn (key=%s)", conv.Key)
 			mode, delta = DiffAppend, d

@@ -827,19 +827,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 若先注册再重置，新会话就会没有工具（agent 只剩内置工具）。
 	if mode == DiffReset && conv.snapshotSessionID() != "" {
 		if s.cfg.ScopeKey && explicit == "" {
-			// scope 模式：明确退化为「一个 scope 一个上下文」——不重置，追加最后一条 user。
-			// 但追加的必须是「新内容」：若最后一条 user 与已有上下文里最后一条 user 相同
-			// （断线重试 / 客户端重放旧消息），再追加只会让模型把旧问题再答一遍（表现成
-			// "接着旧内容补充回答"），真正的新话题反而进不了 prompt。这种情况按正常逻辑
-			// 重置会话、全量重发，保证新话题必然进 delta。
-			d := lastUserTurn(req.Messages)
-			prev := lastUserTurn(stored)
-			if len(d) > 0 && (len(prev) == 0 || !msgEqual(d[0], prev[0])) {
-				s.log.Infof("scope mode: appending last user turn to shared context (scope=%s)", conv.Key)
-				mode, delta = DiffAppend, d
-			} else {
-				s.resetSession(conv)
-			}
+			// scope 模式（无会话 id）：历史不匹配 = 客户端换了新话题 / 起了子代理。
+			// 必须重开干净会话、全量重发，绝不能把新话题 append 进旧共享会话——
+			// 否则模型会把新旧内容合拼回答（表现为"继续回答旧话题"）。bucket 模式下
+			// 每个话题本应独立会话，这里只做兜底保证不串味。
+			s.log.Infof("scope mode: new topic, resetting shared session (scope=%s)", conv.Key)
+			s.resetSession(conv)
 		} else if d, ok := TolerateReset(stored, req.Messages); ok {
 			s.log.Infof("history mismatch tolerated, appending last user turn (key=%s)", conv.Key)
 			mode, delta = DiffAppend, d

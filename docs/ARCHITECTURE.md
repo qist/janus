@@ -9,6 +9,7 @@
 > 2026-10-08 更新：§6 一致性修订——AgentMessage 扩展协商消息、Task 对象携带技能、API 前缀约定（/v1/* vs janus/*）、越权防护覆盖技能挂载、角色表补技能行。
 > 2026-10-08 更新：补充 **§6.10 Agent 执行预算（Tool Call Rounds 与止损）**——分层轮数 + 预算/阶段/异常三重止损 + 死循环检测；Task.budget 具体化。
 > 2026-10-08 更新：补充 **§6.11 无 IDE 执行拓扑（Local Tool Executor）**——tool_target=client|local，闲聊/CI/Async Job 不依赖 IDE 也能跑完整多 Agent 编排。
+> 2026-10-08 更新：§6.11 修正——**tool_target 不用全局 env**，改为**任务 / 角色属性**（任务来源决定：Web/Job→local、IDE→client，同进程共存）。
 
 ---
 
@@ -97,7 +98,7 @@ Janus 从「接口转换器」升级为真正的 **Agent Runtime**（详见 §6�
 | 模式 | 语义 | 工具执行位置 | 现状对应 |
 |---|---|---|---|
 | `native` | harness 用自带工具 | Janus 主机 / 会话目录 | A：`build` + `TOOL_CALLING=false` |
-| `remote-tools` | 只用声明的工具，走 MCP 工具桥；**工具执行位置 = `tool_target`（client：客户端 / local：Janus 主机）** | 客户端 或 Janus 主机 | B：`orchestrator` + `TOOL_CALLING=true` |
+| `remote-tools` | 只用声明的工具，走 MCP 工具桥；**工具执行位置按 Task/role 的 `tool_target`（client→客户端 / local→Janus 主机，§6.11）** | 客户端 或 Janus 主机 | B：`orchestrator` + `TOOL_CALLING=true` |
 | `none` | 无工具，纯文本推理 | 无（可不经 harness） | C：`orchestrator` + `TOOL_CALLING=false` |
 
 **mode B 的协议边界（重要）**：MCP 只存在于 **Janus ↔ harness** 之间（Janus 当 MCP server，harness 当 MCP client）；对客户端始终是**标准 `tool_calls` / `tool_use`**。客户端无需懂 MCP。
@@ -149,6 +150,9 @@ harness 自己管模型配置，Janus **注入配置**：
 | 1（现有 mode B） | Janus | 客户端 | **tool_call** |
 | 2（IDE 全本地） | 客户端 | 客户端 | **task**（需新增 client worker） |
 | 3（无 IDE：自用 / CI / Async Job） | Janus | **Janus（Local Tool Executor，§6.11）** | **tool_call**（同一协议，本地执行） |
+
+拓扑 1 与拓扑 3 可在**同一 Janus 进程内并存**：IDE 会话走 `client`（远程桥），janus Web / Async Job
+走 `local`（§6.11）；`tool_target` 是任务 / 角色属性，不是全局开关。
 
 拓扑 2 需要客户端跑一个 **Janus worker**（连 Janus → 领 id → 收任务 → 跑本地 harness → 回流事件）。任务体 `{task_id, harness, prompt, workspace, mode, permissions, budget}`；target = `{client_id, harness}`。
 
@@ -561,9 +565,11 @@ agent_execution:            # 全局默认（高级用户 / 平台可调大）
 
 | target | 执行者 | 场景 |
 |---|---|---|
-| `client`（现状） | 客户端 IDE | IDE 接入；工具在客户端机器上跑（远程文件） |
-| `local`（新增） | **Local Tool Executor** | 无 IDE / CI / Async Job；工具在 janus 主机、会话目录内跑 |
+| `client` | 客户端 IDE | 远程 IDE 接入；工具在客户端机器上跑（远程文件） |
+| `local` | **Local Tool Executor** | janus Web / API / Async Job 创建的任务；工具在 janus 主机、会话目录内跑 |
 
+- **tool_target 不是全局环境变量，而是「任务 / 角色」属性**：janus 可多角色并存，
+  本地（Web 建任务）与远程（IDE 接入）**同时接入同一进程**，各自按来源决定执行者；
 - 挂起 / 回填 / 超时 / 孤儿判定全部复用 `toolSession`（§toolbridge），只换执行后端；
 - `client` 的"等客户端回填"改成 `local` 的"立即本地执行"，不需要任何人机回路。
 
@@ -598,18 +604,23 @@ janus 主机 · 会话目录
 ```
 
 - 与 IDE 场景的唯一差异：没有客户端回填环节，其余（协商、分工、权限、预算、审计）一致；
-- 模式 A 演进为 **A'**：`orchestrator` + `TOOL_CALLING=true` + `TOOL_TARGET=local`——
-  多 Agent 编排 + 本地工具统一控制面，替代"build + 自带工具不可控"。
+- 模式 A 演进为 **A'**：`orchestrator` + `TOOL_CALLING=true`，Web / Async Job 任务
+  默认 `tool_target=local`——多 Agent 编排 + 本地工具统一控制面，替代"build + 自带工具不可控"
+  （IDE 会话仍走 `client`，两者同进程共存）。
 
-#### 6.11.4 配置
+#### 6.11.4 tool_target 的赋值（任务来源决定，role 可覆盖）
 
-```
-BRIDGE_TOOL_TARGET=local       # client（现状，默认）| local（无 IDE 自用）| hybrid（后续）
-BRIDGE_LOCAL_TOOLS="fs,shell,git,test,web_search"   # 本地默认工具集（可裁剪）
-```
+| 任务来源 | 默认 tool_target | 说明 |
+|---|---|---|
+| janus Web / API / Async Job 创建的任务 | `local` | 无 IDE；走 Local Tool Executor |
+| IDE 接入（`/v1` 协议请求，客户端声明了 tools[]） | `client` | 远程桥，工具在 IDE 机器执行 |
+| IDE 接入但未声明 tools | `local`（兜底） | 用本地默认工具集，避免无工具可用 |
 
-- `hybrid` 预留：部分工具走客户端、部分本地（按工具声明 / 技能里 `tool_target` 字段），后续版本。
-- 与 §6.10 预算天然共用一个配置面（`agent_execution`）。
+- `tool_target` 是 **Task 属性**（§9.4），与 mode、skills、budget 并列；role / agent 可写死默认
+  （沿用 §5 role 属性，如 `audit` 强制 `local` + 只读工具）；
+- 同一 Janus 进程内不同任务可以落在不同 target：Web 任务走 `local`、IDE 会话走 `client`，互不干扰；
+- 本地工具集按 role / 技能裁剪（§6.9 `skills.tools` + §5 `role.tools`），不需要全局开关；
+- `hybrid`（单任务内部分工具本地 / 部分客户端）仍为后续可选，不进主线。
 
 ---
 
@@ -683,7 +694,7 @@ BRIDGE_LOCAL_TOOLS="fs,shell,git,test,web_search"   # 本地默认工具集（�
 ```
 Goal   产品目标
 Stage  阶段：{role, mode, inputs[], outputs[], gate}
-Task   派单单元：{task_id, skills[]（挂载技能 id@version）, target{client_id,harness}, workspace, budget{rounds, tool_calls, duration, tokens, cost}(§6.10), status, events}
+Task   派单单元：{task_id, skills[]（挂载技能 id@version）, tool_target(client|local，§6.11), target{client_id,harness}, workspace, budget{rounds, tool_calls, duration, tokens, cost}(§6.10), status, events}
 Gate   门禁：人工 / 自动（测试、审计）
 ```
 - dispatcher = **artifact-gated DAG 状态机**，默认单条关键路径单飞。
@@ -845,7 +856,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 37 | 协商式路由（Coordinator + Negotiation Protocol + max_round + Task Lock） | 🔴 难 | 依赖 #23/#24/#25 + 异步 Job；先文档后落地（§6.8） |
 | 38 | Skill Registry（skills/agent_skills 表 + 挂载 API + match + 生命周期） | 🟡→🔴 中大 | 依赖 #23；与方案 4/5 匹配共用（§6.9） |
 | 39 | Agent 执行预算（rounds / tool_calls / duration / tokens / cost + 相同调用 / 无进展检测） | 🟡 中 | executor tokenBudget 已有雏形；与 Task.budget 对接（§6.10） |
-| 40 | Local Tool Executor（tool_target=local：本地内置工具集走同一工具桥） | 🟡 中 | serverToolFunc（web_search）已是先例；依赖 #4 权限裁决（§6.11） |
+| 40 | Local Tool Executor（tool_target 按任务来源 per-task：Web/Job→local、IDE→client） | 🟡 中 | serverToolFunc（web_search）已是先例；依赖 #4 权限裁决 + Task.tool_target（§6.11） |
 
 **三条硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）、订阅 OAuth 别做主干（#19）。
 
@@ -856,7 +867,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 阶段 | 内容 | 目标 |
 |---|---|---|
 | **P0** | Role 注册表 + `janus/<role>` 虚拟模型 + **角色注入（§5.1：agent 配置 + 身份卡 + 工作台）** + API key；配置「文件 + DB 覆盖」 | 让客户端只选 role；模型可集中配置 |
-| **P1** | 自建模型网关 + 目录（摆脱 Console）+ **模型/供应商自由创建（DB + API/UI）**；权限策略（服务端裁决 + 审计）+ **Local Tool Executor（§6.11，tool_target=local）** | 模型访问层独立；权限可管；无 IDE 也能跑编排 |
+| **P1** | 自建模型网关 + 目录（摆脱 Console）+ **模型/供应商自由创建（DB + API/UI）**；权限策略（服务端裁决 + 审计）+ **Local Tool Executor（§6.11）** | 模型访问层独立；权限可管；无 IDE 也能跑编排 |
 | **P1.5** | **观测与计量**：单请求 usage 全量落库（含 cache 分项）、成本聚合、缓存命中率两口径、多租户监控 API（§11） | 平台的计费 / 审计 / 监控卖点 |
 | **P2** | **异步 Job**（durable、events / cancel / 续订；承载 task claim 与技能挂载 TTL） | 派单与 Multi-Agent 编排队列的地基 |
 | **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 + **用户自建 API key**；**订阅制授权（用户维度）**；sqlite 配置中心（config-as-data） | harness 可插拔；多用户 |

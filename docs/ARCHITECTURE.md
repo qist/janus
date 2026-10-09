@@ -5,6 +5,7 @@
 > 关系：本文描述 janus 的**目标架构与路线**；当前已实现细节见 [`DESIGN.md`](./DESIGN.md)。
 > 2026-10-08 更新：新增**多 Agent 编排**章节（§6，Agent Registry / Router / DAG）与定位升级。
 > 2026-10-08 更新：补充 **§6.8 协商式路由（Self-Organizing Team）**——Coordinator + 协商协议 + max_round + Task Lock。
+> 2026-10-08 更新：补充 **§6.9 Skill Registry（技能中心）**——技能独立于 Agent、动态挂载、版本化共享；同步 §6.2 内嵌 skills 改为挂载引用。
 
 ---
 
@@ -264,10 +265,11 @@ agent:
 
 ### 6.2 Agent Registry：能力自描述 + Agent 市场
 
-- 每个 agent **自描述** `skills / input / output` 契约，Janus 落 `agents` 表
-  （id、name、skills、model、tools、permission、status）。
-- 路由按能力匹配：`需要检查 SQL 注入` → `vulnerability_scan` → `security-agent`。
-- **Agent 市场**：`janus agent install security-guru` 安装第三方 agent → 自动注册 skills →
+- 每个 agent 在 `agents` 表登记（id、name、model、tools、permission、status）；
+  **技能不内嵌在 agent 里**——agent 通过 `agent_skills` 挂载表动态获得技能（§6.9），
+  Registry 的 `skills` 字段只是**最近一次挂载的快照（缓存）**，权威在 `skills` 表。
+- 路由按能力匹配：`需要检查 SQL 注入` → `security-audit` 技能 → 挂载该技能的执行者。
+- **Agent 市场**：`janus agent install security-guru` 安装第三方 agent → 自动登记 →
   Router 自动可见（类似 IDE 插件）。比「把角色写死在代码里」可演化得多。
 
 ### 6.3 Agent Router：怎么知道调谁（四条路线，推荐混用）
@@ -323,6 +325,7 @@ DAG 的边 = **artifact 依赖 + 门禁**（沿用 §9 artifact-gated 规则：�
 2. **Intent Router**：默认走方案 2 意图路由，方案 1/4 作旁路；
 3. **DAG Scheduler**：扩展现有派单，agents 列表 → DAG 节点 → 门禁推进；
 4. **协商式路由（§6.8）**：Coordinator + 协商协议 + Task Lock，默认关闭按任务开启。
+5. **Skill Registry（§6.9）**：`skills` / `agent_skills` 表 + 挂载 API + `match`，是 2/4 路的匹配底座。
 
 这三个补齐，Janus 就从「接口转换器」升级为真正的 **Agent Runtime**。
 
@@ -389,6 +392,89 @@ REVIEW      门禁（§9.4 Gate）——人工检查点是硬要求（§12 #17�
 - **不新增权限层**：认领即申请权限，放行与否仍由 §7 服务端裁决；
 - **只新增路由层一跳**：DISCOVER / PROPOSE / DISCUSS ≈ 意图路由的"多智能体版本"，
   失败可逐级降级（6.8.2）；落地顺序依赖 §6.7 的前三步（Registry → Router → DAG）。
+
+### 6.9 Skill Registry（技能中心，动态技能挂载）
+
+> 定位：**技能不写死在 Agent 里**。Agent 是通用执行体，根据任务**临时挂载**技能成为对应
+> 专家（`一个 Coder Agent 永远写代码` 的固定角色模式被 `通用 Agent + 动态技能` 取代）。
+> 技能是独立、版本化、可共享的资源，分工匹配 = **技能匹配**（§6.8 协商的 DISCOVER 也用它），
+> 而不是预设角色。类比：Kubernetes 的镜像仓库之于 Container，Skill Registry 之于 Agent。
+
+#### 6.9.1 Skill ≠ Prompt（四件套）
+
+很多系统把 Skill 等同于提示词，不够。一个 Skill 是：
+
+```
+skill:
+  id: golang.backend.v1        # id@version 引用，不直接覆盖
+  capability: [go, gin, grpc, mysql]   # 匹配用（Router / DISCOVER）
+  prompt:                       # ① Instructions：注入系统，指导如何完成任务
+    system: |
+      你是一名资深 Go 后端工程师…
+  tools: [filesystem, shell, git, trivy…]   # ② Tools：进权限白名单（§7）
+  knowledge: [go-style-guide.md, api-rule.md, database-rule.md]  # ③ Knowledge：可检索文档
+  workflow:                     # ④ Workflow：可执行的步骤（编译进 plan/DAG，不新造执行层）
+    steps: [{run: go test ./...}, {run: golangci-lint}, {report: result}]
+  version: 1.0.0
+```
+
+- prompt / knowledge 注入会话，tools 进白名单（§7 服务端裁决），workflow 复用 §9 派单；
+- 挂载后生效范围 = **会话 / 任务级**；任务结束按 TTL / 门禁**卸载**，防止技能串台
+  （与 §6.5 记忆隔离同一精神）。
+
+#### 6.9.2 三层作用域（共享管理）
+
+| 作用域 | 路径语义 | 示例 |
+|---|---|---|
+| 全局 | `/skills/global` | git、linux、security-basic |
+| 团队 / 项目 | `/projects/{project}/skills` | api-design、go-style、deployment |
+| 私有 | `/agents/{id}/skills` | experimental-code-review |
+
+- 作用域决定可见性与**可挂载授权**；权限裁决仍走 §7（allowed_paths / tools / 服务端裁决）。
+
+#### 6.9.3 动态挂载（Agent 不预装技能）
+
+```
+agent 初始: {agent_id: a001, model: gpt-6, skills: []}
+任务: 开发 CoreFusion API
+Router 匹配（§6.3 方案 4 / §6.8 DISCOVER）⟶ load_skills: [golang.backend.v1, grpc.v1]
+挂载后: prompt 注入 / tools 进白名单 / knowledge 可检索 / workflow 可执行
+```
+
+- 匹配 = `POST /api/v1/skills/match {task}` → `{skills: [security.audit, jwt.review]}`；
+- 同一 capability 多版本命中 → 按匹配分 / 策略选版（`@latest` 解析到 ENABLE 的版本）。
+
+#### 6.9.4 生命周期（类软件包）
+
+```
+CREATE → REGISTER → PUBLISH → ENABLE → UPDATE → DEPRECATE
+```
+
+- **版本化**：`security-audit@1.2.0`，不直接覆盖；引用 `id@version` 或 `id@latest`；
+- DEPRECATE 后新任务不挂载，存量任务可继续到门禁；
+- 审核门：PUBLISH 需通过 Review（人工 / 自动，呼应 §12 #17「必须留人工检查点」）。
+
+#### 6.9.5 Agent 生成技能（学习闭环，高级）
+
+- Agent 完成批量同类任务后总结规律（如 80% Go 项目用 repository pattern + service layer）→
+  生成技能草案（`golang-enterprise-pattern.skill`）→ **Review** → PUBLISH；
+- 生成物必须过审才能进共享池，防污染；默认生成到私有域，人工提升到团队 / 全局。
+
+#### 6.9.6 API 与管理
+
+```
+GET  /api/v1/skills                    # 按作用域 / capability 查询（含 version / score）
+POST /api/v1/agents/{id}/skills        # 挂载技能到 agent
+POST /api/v1/skills/match              # 任务 → 技能匹配（Router / DISCOVER 内部用）
+janus skill install|publish|deprecate  # CLI，与 §6.2 Agent 市场同款语义
+```
+
+#### 6.9.7 落库与一致性
+
+- §10.4：新增 `skills`（id、capability、version、scope、prompt/tools/knowledge/workflow 引用）
+  与 `agent_skills`（agent_id、skill_id@version、enable、mounted_at）两表；
+  `agents.skills` 字段降级为挂载快照缓存，不再是权威；
+- Router 方案 4 与 5 的能力匹配统一走 `skills.match`，不是读死静态字段。
 
 ---
 
@@ -507,7 +593,9 @@ Gate   门禁：人工 / 自动（测试、审计）
 | `providers` | id, type, base_url, auth_ref | auth 指向加密凭据（§4） |
 | `models` | id, provider_id, name, context_window, pricing, fallback[] | §4 / §4.1 共用 |
 | `roles` | id, agent_ref, mode, permissions, budget | §5 客户端可选面 |
-| `agents` | id, skills, system_prompt, tools | §6 Registry |
+| `agents` | id, model, tools, permission, status, skills(快照) | §6 Registry；技能权威在 `skills` 表 |
+| `skills` | id, capability[], version, scope(global/team/private), prompt, tools, knowledge, workflow | §6.9 Skill Registry；`id@version` 不覆盖 |
+| `agent_skills` | agent_id, skill_id@version, enable, mounted_at | §6.9 动态挂载；任务级装载 / 卸载 |
 | `conversations` | id, user_id, scope, harness, session_id, summary | canonical 映射（§8.1） |
 | `budgets` | subject(user/org/project), limit, window | §11.5 |
 | `usage` | request_id, user_id, model, tokens(含 cache 分项), cost | §11 逐条落库 |
@@ -618,6 +706,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 35 | 核心表清单落库（users/api_keys/providers/models/roles/agents/usage…） | 🟡 中 | §10.4；不保留 env 兼容分支 |
 | 36 | 安全与合规（密钥轮换 / 日志脱敏 / 审计保留期 / 越权过滤） | 🟡 中 | §15；AUDIT.md 已有明细 |
 | 37 | 协商式路由（Coordinator + Negotiation Protocol + max_round + Task Lock） | 🔴 难 | 依赖 #23/#24/#25 + 异步 Job；先文档后落地（§6.8） |
+| 38 | Skill Registry（skills/agent_skills 表 + 挂载 API + match + 生命周期） | 🟡→🔴 中大 | 依赖 #23；与方案 4/5 匹配共用（§6.9） |
 
 **三条硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）、订阅 OAuth 别做主干（#19）。
 
@@ -632,7 +721,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | **P1.5** | **观测与计量**：单请求 usage 全量落库（含 cache 分项）、成本聚合、缓存命中率两口径、多租户监控 API（§11） | 平台的计费 / 审计 / 监控卖点 |
 | **P2** | **异步 Job**（durable、events / cancel / 续订） | 派单与 Multi-Agent 编排队列的地基 |
 | **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 + **用户自建 API key**；**订阅制授权（用户维度）**；sqlite 配置中心（config-as-data） | harness 可插拔；多用户 |
-| **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4），再逐步加 artifact 依赖图；最后叠加**协商式组队（§6.8，方案 5）** | 产品研发流水线 / Multi-Agent 自组织 |
+| **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4）+ **Skill Registry（§6.9，skills 表 + 挂载 + match）**，再逐步加 artifact 依赖图；最后叠加**协商式组队（§6.8，方案 5）** | 产品研发流水线 / Multi-Agent 自组织 |
 
 每阶段独立可交付，且可回退。
 

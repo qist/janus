@@ -636,10 +636,15 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	s.logClientInfo(r, "", dir, convKey, inputMsgs)
 	defer s.store.Release(conv)
 
-	// 上一轮被中止过：重开干净会话。
-	if conv.takeTerminated() {
-		s.log.Infof("previous turn was terminated; starting a fresh session (key=%s)", conv.Key)
-		s.resetSession(conv)
+	// 上一轮被中止过：重开干净会话。断线后客户端的「同内容重发」不消费标记、
+	// 也不重跑被终止的旧内容（否则模型会接着答中断的半截话）；新内容才重置。
+	if terminatedReplay(conv, inputMsgs) {
+		s.log.Infof("terminated conversation replayed identical turn; keep flag, not re-running (key=%s)", conv.Key)
+		writeOpenAIError(w, 499, "api_error", "generation was interrupted by the client; the previous turn will not be re-run automatically", "canceled")
+		return
+	}
+	if conv.snapshotTerminated() {
+		s.consumeTerminated(conv)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)

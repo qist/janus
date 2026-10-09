@@ -770,9 +770,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 上一轮被客户端中止过（用户点了终止 / 断连）：新内容不能再续接到那个
 	// 残缺会话上，否则新任务会看到旧任务的上下文和中断残影。重开干净会话。
-	if conv.takeTerminated() {
-		s.log.Infof("previous turn was terminated; starting a fresh session (key=%s)", conv.Key)
-		s.resetSession(conv)
+	// 但「内容与旧历史完全相同的请求」（断线后客户端自动重发上一轮 payload，
+	// 实测 Trae 等 IDE 会这样）**不消费**标记、也不许把被终止的旧问题自动重答一遍——
+	// 否则模型会接着把中断的半截话答完，而你真正发的新内容反而被当成续接追加。
+	// 标记要保留给携带新内容的请求：同内容复读直接回 canceled（等待真实新内容），
+	// 新内容到来时才消费标记、重置会话、全量重发。
+	if terminatedReplay(conv, req.Messages) {
+		s.log.Infof("terminated conversation replayed identical turn; keep flag, not re-running (key=%s)", conv.Key)
+		writeOpenAIError(w, 499, "api_error", "generation was interrupted by the client; the previous turn will not be re-run automatically", "canceled")
+		return
+	}
+	if conv.snapshotTerminated() {
+		s.consumeTerminated(conv)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
@@ -1117,6 +1126,25 @@ func isDefaultAlias(raw string) bool {
 	default:
 		return false
 	}
+}
+
+// terminatedReplay 判断 conv 是否处于「被终止」且本次请求只是被终止轮次的复读
+// （内容与上轮完全一致，常见于 IDE 断线后自动重发上一轮 payload）。此时不消费
+// 终止标记、也不重跑被终止的旧内容——标记保留给携带新内容的请求。
+func terminatedReplay(conv *Conversation, incoming []ChatMessage) bool {
+	if !conv.snapshotTerminated() {
+		return false
+	}
+	mode, _ := Diff(conv.snapshotLast(), incoming)
+	return mode == DiffNone
+}
+
+// consumeTerminated 消费终止标记并重置会话（仅当请求携带真实新内容时调用；
+// 复读请求走 terminatedReplay 提前返回，不会走到这里）。
+func (s *Server) consumeTerminated(conv *Conversation) {
+	s.log.Infof("previous turn was terminated; starting a fresh session (key=%s)", conv.Key)
+	conv.takeTerminated()
+	s.resetSession(conv)
 }
 
 // resetSession 丢弃当前上游 session，让 ensureSession 重建一个干净的。

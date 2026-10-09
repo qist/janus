@@ -60,6 +60,10 @@ func (c *Conversation) markTerminated() { c.terminated.Store(true) }
 // takeTerminated 读取并清除中止标记（只消费一次）。
 func (c *Conversation) takeTerminated() bool { return c.terminated.Swap(false) }
 
+// snapshotTerminated 只读中止标记、不清除：判断断线后的「同内容重发」时用，
+// 此时标记必须保留给真正携带新内容的请求。
+func (c *Conversation) snapshotTerminated() bool { return c.terminated.Load() }
+
 func (c *Conversation) snapshotLast() []ChatMessage {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()

@@ -7,6 +7,7 @@
 > 2026-10-08 更新：补充 **§6.8 协商式路由（Self-Organizing Team）**——Coordinator + 协商协议 + max_round + Task Lock。
 > 2026-10-08 更新：补充 **§6.9 Skill Registry（技能中心）**——技能独立于 Agent、动态挂载、版本化共享；同步 §6.2 内嵌 skills 改为挂载引用。
 > 2026-10-08 更新：§6 一致性修订——AgentMessage 扩展协商消息、Task 对象携带技能、API 前缀约定（/v1/* vs janus/*）、越权防护覆盖技能挂载、角色表补技能行。
+> 2026-10-08 更新：补充 **§6.10 Agent 执行预算（Tool Call Rounds 与止损）**——分层轮数 + 预算/阶段/异常三重止损 + 死循环检测；Task.budget 具体化。
 
 ---
 
@@ -483,6 +484,64 @@ janus skill install|publish|deprecate  # CLI，与 §6.2 Agent 市场同款语�
   `agents.skills` 字段降级为挂载快照缓存，不再是权威；
 - Router 方案 4 与 5 的能力匹配统一走 `skills.match`，不是读死静态字段。
 
+### 6.10 Agent 执行预算（Tool Call Rounds 与止损）
+
+> 定位：多 Agent 不能无限跑。**预算（Budget）+ 阶段限制 + 异常终止** 三重止损；
+> 大任务不靠放大轮数，而是拆 **Job → Task**（§9 / §13 P2），真正的大任务走 **Async Agent Job**，
+> 不一直挂 Chat Stream。**轮数不是唯一指标**——token / 时长 / 成本往往更关键。
+
+#### 6.10.1 两个概念：工具轮 vs 生命周期
+
+- **工具轮**：`LLM → Tool → 结果` 一个回合；一次 Bug 修复（读→改→编译→查日志→修复→测试）
+  很容易 10+ 轮。
+- **Agent 生命周期**：Planning → Coding → Testing → Review，累计几十轮工具调用。
+- 因此限制是**分层**的（`planning_rounds / execution_rounds / review_rounds / total_rounds`），
+  不是单一 `MAX_TOOL_ROUNDS`。
+
+#### 6.10.2 默认预算（全局 + 每角色覆盖）
+
+```
+agent_execution:            # 全局默认（高级用户 / 平台可调大）
+  max_rounds: 50
+  max_tool_calls: 100
+  max_duration: 30m
+  max_tokens: 200_000
+  same_tool_limit: 3        # 连续相同 tool+args 上限
+  no_progress_limit: 5      # 连续无进展（环境信号未变）上限
+```
+
+| 角色 | 建议轮数上限 | 说明 |
+|---|---|---|
+| 普通 Chat Agent | 10 | 查询文件 / 改配置 / 简单命令 |
+| Coding Agent | 30 ~ 50 | 修 Bug 一次 10+ 轮；默认给 50 |
+| Coordinator / Planner | 5 | 只主持 / 只出计划，不执行 |
+| Architect | 10 | 出方案 / 接口设计 |
+| Tester / Security | 20 | 跑测试 / 审计 |
+| Reviewer | 10 | 只读 Review |
+
+- role / agent 可覆盖全局默认（沿用 §5 role 属性）；
+- 超出上限不是静默失败：`finish` 原因（`length` / `budget`）+ 审计落 `/v1/requests`。
+
+#### 6.10.3 防死循环三检测
+
+1. **相同工具调用检测**：连续相同 `{tool, args}` ≥ `same_tool_limit(3)` → 中断该轮，
+   提示换策略（附已尝试清单，喂回 agent 而不是沉默）；
+2. **无进展检测**：连续 `no_progress_limit(5)` 次环境信号未变（同一测试失败 / 同一 diff /
+   同一报错）→ 中断 → **Need human review**（或交 Coordinator 重新分工）；
+3. **资源上限**：`max_tokens` / `max_cost`（$）/ `max_duration`——比轮数更重要，命中即停。
+
+#### 6.10.4 大任务拆 Job，不是放大轮数
+
+- 不要 `max_rounds=500`；拆 `Job → Task1..N`，每个 Task 20~50 轮；
+- Task = **durable Async Job**（§13 P2），预算挂在 Task 上（§9.4 `Task.budget`）；
+- 单 Task 超预算 → 摘要当前成果 + 事件回流 → 平台 / 人工决定续跑或终止。
+
+#### 6.10.5 与现有能力的关系
+
+- executor 的 `tokenBudget`（max_tokens）已是雏形，扩展 rounds / duration / cost；
+- 与 §11.5 配额同库：**配额是租户 / 用户级，执行预算是任务 / Agent 级**，两层都命中才放行；
+- 与 §6.8 协商衔接：DISCUSS 的 `max_round` / 单轮 token 预算就是本节的协商实例。
+
 ---
 
 ## 7. 权限策略
@@ -516,6 +575,7 @@ janus skill install|publish|deprecate  # CLI，与 §6.2 Agent 市场同款语�
 | **减少会话重建** | 重建 = 重放 = 烧钱；持久化 session id |
 | **成本分层路由** | 简单轮次便宜模型，难轮次强模型 |
 | **预算上限** | per-conversation / per-job，超限摘要或停 |
+| **执行预算 / 止损（§6.10）** | per-task rounds / tool_calls / duration / tokens / cost：轮数不是唯一，token 与成本更重要 |
 | **子代理只回摘要** | 探索在子代理上下文，主线拿结论 |
 | **按模型窗口适配截断** | `models.context_window` 配在模型表（§10.4）；摘要/截断阈值按窗口比例（如 70% 触发摘要），避免小窗口模型被同一条策略卡死 |
 
@@ -554,7 +614,7 @@ janus skill install|publish|deprecate  # CLI，与 §6.2 Agent 市场同款语�
 ```
 Goal   产品目标
 Stage  阶段：{role, mode, inputs[], outputs[], gate}
-Task   派单单元：{task_id, skills[]（挂载技能 id@version）, target{client_id,harness}, workspace, budget, status, events}
+Task   派单单元：{task_id, skills[]（挂载技能 id@version）, target{client_id,harness}, workspace, budget{rounds, tool_calls, duration, tokens, cost}(§6.10), status, events}
 Gate   门禁：人工 / 自动（测试、审计）
 ```
 - dispatcher = **artifact-gated DAG 状态机**，默认单条关键路径单飞。
@@ -664,7 +724,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 层级 | 配额 | 超限行为 |
 |---|---|---|
 | 每用户 / 每租户 | 月度 token / 金额（`budgets` 表） | 拒绝新请求（`402`/`429`）或降级到备用模型 |
-| 每 role / 每任务 | role 的 `budget`（§5） | **先摘要在途轮次、再停**（统一 §8.2 口径） |
+| 每 role / 每任务 | role 的 `budget`（§5）+ `Task.budget`（§6.10：rounds/tokens/时长/成本） | **先摘要在途轮次、再停**（统一 §8.2 口径） |
 | 每模型 / provider | 上游 rate limit（分钟级） | 排队 / 退避 / 切 fallback（§4.1） |
 
 - **决策点都在 Janus**（网关层统一裁决），harness / 客户端不感知；
@@ -715,6 +775,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 36 | 安全与合规（密钥轮换 / 日志脱敏 / 审计保留期 / 越权过滤） | 🟡 中 | §15；AUDIT.md 已有明细 |
 | 37 | 协商式路由（Coordinator + Negotiation Protocol + max_round + Task Lock） | 🔴 难 | 依赖 #23/#24/#25 + 异步 Job；先文档后落地（§6.8） |
 | 38 | Skill Registry（skills/agent_skills 表 + 挂载 API + match + 生命周期） | 🟡→🔴 中大 | 依赖 #23；与方案 4/5 匹配共用（§6.9） |
+| 39 | Agent 执行预算（rounds / tool_calls / duration / tokens / cost + 相同调用 / 无进展检测） | 🟡 中 | executor tokenBudget 已有雏形；与 Task.budget 对接（§6.10） |
 
 **三条硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）、订阅 OAuth 别做主干（#19）。
 

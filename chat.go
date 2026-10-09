@@ -822,7 +822,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if mode == DiffReset && conv.snapshotSessionID() != "" {
 		if s.cfg.ScopeKey && explicit == "" {
 			// scope 模式：明确退化为「一个 scope 一个上下文」——不重置，追加最后一条 user。
-			if d := lastUserTurn(req.Messages); len(d) > 0 {
+			// 但追加的必须是「新内容」：若最后一条 user 与已有上下文里最后一条 user 相同
+			// （断线重试 / 客户端重放旧消息），再追加只会让模型把旧问题再答一遍（表现成
+			// "接着旧内容补充回答"），真正的新话题反而进不了 prompt。这种情况按正常逻辑
+			// 重置会话、全量重发，保证新话题必然进 delta。
+			d := lastUserTurn(req.Messages)
+			prev := lastUserTurn(stored)
+			if len(d) > 0 && (len(prev) == 0 || !msgEqual(d[0], prev[0])) {
 				s.log.Infof("scope mode: appending last user turn to shared context (scope=%s)", conv.Key)
 				mode, delta = DiffAppend, d
 			} else {

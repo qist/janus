@@ -71,6 +71,9 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	case outcome = <-ex.done:
 	case <-clientGone:
 		cancel()
+		// 被终止的这轮绝不能作为缓存回放：客户端若重试同一请求（DiffNone），
+		// 不能把被终止的旧答案再发一遍（表现成"终止后继续回答前面的内容"）。
+		conv.setResponse(nil)
 		conv.markTerminated()
 		s.log.Infof("client disconnected, interrupting %s", sid)
 		go func() {

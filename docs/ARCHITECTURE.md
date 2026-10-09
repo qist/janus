@@ -24,7 +24,7 @@ Janus 是**控制平面**，不是 agent runtime：
 | Janus 做 | Janus 不做 |
 |---|---|
 | 协议网关（OpenAI / Anthropic） | 不实现 agent 循环 |
-| 会话网关（映射 / 生命周期） | 不实现工具 runtime |
+| 会话网关（映射 / 生命周期） | 不实现通用工具 runtime（§6.11 仅提供最小本地执行集） |
 | Agent 网关（选 harness / 注入配置） | 不实现 MCP runtime |
 | 模型访问层（目录 / 网关 / 路由） | 不实现模型推理 |
 | 派单 / 调度 / 门禁 | 不实现模型推理 |
@@ -48,7 +48,7 @@ VSCode）永远只看到一个模型端点（`/v1/chat/completions`），下游�
 - 企业权限控制 + 审计日志；
 - Agent 生命周期管理（Registry / Router / DAG Scheduler）。
 
-已有能力（session key、MCP bridge、权限隔离、Async Job、`/v1/requests` 审计）都是这一层的
+已有能力（session key、MCP bridge、权限隔离、`/v1/requests` 审计；Async Job 属 P2 规划，§13）都是这一层的
 **基础件**，不是终点；补齐 **Agent Registry + Intent Router + DAG Scheduler** 之后，
 Janus 从「接口转换器」升级为真正的 **Agent Runtime**（详见 §6）。
 
@@ -97,7 +97,7 @@ Janus 从「接口转换器」升级为真正的 **Agent Runtime**（详见 §6�
 
 | 模式 | 语义 | 工具执行位置 | 现状对应 |
 |---|---|---|---|
-| `native` | harness 用自带工具 | Janus 主机 / 会话目录 | A：`build` + `TOOL_CALLING=false` |
+| `native` | harness 用自带工具（不经 Janus 工具桥，无权限/审计/预算钩子） | Janus 主机 / 会话目录 | A：`build` + `TOOL_CALLING=false` |
 | `remote-tools` | 只用声明的工具，走 MCP 工具桥；**工具执行位置按 Task/role 的 `tool_target`（client→客户端 / local→Janus 主机，§6.11）** | 客户端 或 Janus 主机 | B：`orchestrator` + `TOOL_CALLING=true` |
 | `none` | 无工具，纯文本推理 | 无（可不经 harness） | C：`orchestrator` + `TOOL_CALLING=false` |
 
@@ -154,7 +154,7 @@ harness 自己管模型配置，Janus **注入配置**：
 拓扑 1 与拓扑 3 可在**同一 Janus 进程内并存**：IDE 会话走 `client`（远程桥），janus Web / Async Job
 走 `local`（§6.11）；`tool_target` 是任务 / 角色属性，不是全局开关。
 
-拓扑 2 需要客户端跑一个 **Janus worker**（连 Janus → 领 id → 收任务 → 跑本地 harness → 回流事件）。任务体 `{task_id, harness, prompt, workspace, mode, permissions, budget}`；target = `{client_id, harness}`。
+拓扑 2 需要客户端跑一个 **Janus worker**（连 Janus → 领 id → 收任务 → 跑本地 harness → 回流事件）。任务体与 §9.4 Task 同构：`{task_id, skills[]（挂载技能 id@version，§6.9）, tool_target（client|local，§6.11）, harness, prompt, workspace, mode, permissions, budget, status, events}`；target = `{client_id, harness}`。
 
 ---
 
@@ -165,19 +165,30 @@ harness 自己管模型配置，Janus **注入配置**：
 - **provider 抽象**：`{type: openrouter|openai|anthropic|litellm|opencode|local, base_url, auth}`。
   **auth 不止 api-key**：
   - `api-key`：BYOK（openrouter / openai / anthropic / litellm / 各网关 / 本地）；
-  - `oauth-subscription`：订阅制授权（Claude 订阅、Codex/ChatGPT 登录态、OpenCode Go）。
-    **按用户维度绑定**——每个用户自登自用，不做租户级共享（边界见 §12 #19）；
+- `oauth-subscription`：订阅制授权（Claude 订阅、Codex/ChatGPT 登录态、OpenCode Go）。
+  分两档：**个人订阅**按用户维度绑定（自登自用，不做租户级共享——消费级订阅共享有风控
+  风险，§12 #19）；**企业订阅 / 组织合同**按 org 维度接入（SSO/SCIM + 组织凭据，
+  成员共用企业资源是合同允许的形态，§12 #41）；
   - `free-tier`：免费档（如 OpenCode 免费额度，自带限流 / 地域限制）；
   - `none`：本地 / 无需鉴权。
+- **OAuth 订阅 = 凭据，与 api-key 同一地位**：OAuth 只是取得授权的通道，不是另一种访问模型；
+  登录态与 api-key 一样**按 provider 存储、按 provider 取用**，不存在“登录了就不能用 key”或
+  “只能用一家订阅”的互斥。
+- **多 provider · 多凭据并存（禁止“全局唯一”）**：同一用户可同时持有 api-key（OpenRouter）＋
+  阿里订阅 ＋ DeepSeek 登录态 ＋ 腾讯订阅……互不排斥；**选择模型 = 选择 provider =
+  自动带该 provider 的凭据**；无全局唯一 key、无全局唯一登录态的概念。
+- **订阅即团队（§6）**：Agent 团队可混合各厂商订阅——architect 挂阿里（通义）、coder 挂
+  DeepSeek、reviewer 挂腾讯（混元），模型访问层按 provider 独立解析凭据，各角色各用各家。
 - **模型自由创建**：providers / models 落 sqlite，用户可经 API / UI 自行增删改
   （base_url、auth 类型、模型列表、定价 / 限流），**不写死在配置文档里**。
 - **模型目录**：先用公开注册表（models.dev）+ 各 provider `/models` 初始化，之后全凭用户编辑。
 - **翻译网关**：LiteLLM / new-api / one-api / OpenRouter，同时暴露 Anthropic + OpenAI 协议；
   统一鉴权、限流、计量。
 - **用户凭据中心**：api-key 与订阅登录态**统一加密存储**（AES-GCM，主密钥来自文件/env bootstrap），
-  按用户隔离——谁的 key 谁用、谁的订阅谁用。
+  按用户隔离——谁的 key 谁用、谁的订阅谁用；**同一用户可存多家的多份凭据，按 provider 取用**。
 - **订阅式 OAuth** 由用户在自己账号下完成（`POST /v1/providers/{id}/login` 透出 URL / device code），
-  不透传、不缓存到租户级。
+  不透传到他人；**企业订阅**由管理员绑定 org 凭据（enterprise key / SSO IdP 授权），
+  成员经 OIDC 进入后共用 org 资源（§10.2），凭据仍加密、访问面逐人审计。
 
 ### 4.1 故障转移与降级（路由韧性）
 
@@ -272,6 +283,10 @@ agent:
 与 §5 role 的关系：**role 是客户端可选面（`janus/<role>` 虚拟模型），agent 是内部执行面**；
 一个 role 可绑一个 agent，也可绑一个 agent 团队（team = 一个 DAG）。
 
+- agent 的 `model` 从 §4 模型目录选（**任意 provider**）；执行时凭据由模型访问层按该
+  provider 自动解析（api-key 或该用户绑定的 OAuth 订阅）——不同 agent 挂不同厂商模型，
+  天然就是“每家订阅组成一个团队”（阿里 ＋ DeepSeek ＋ 腾讯 …，§4）。
+
 ### 6.2 Agent Registry：能力自描述 + Agent 市场
 
 - 每个 agent 在 `agents` 表登记（id、name、model、tools、permission、status）；
@@ -332,18 +347,21 @@ DAG 的边 = **artifact 依赖 + 门禁**（沿用 §9 artifact-gated 规则：�
 
 1. **Agent Registry**：`agents` 表 + `janus/agent/*` 管理 API + 市场安装；
 2. **Intent Router**：默认走方案 2 意图路由，方案 1/4 作旁路；
-3. **DAG Scheduler**：扩展现有派单，agents 列表 → DAG 节点 → 门禁推进；
-4. **协商式路由（§6.8）**：Coordinator + 协商协议 + Task Lock，默认关闭按任务开启。
-5. **Skill Registry（§6.9）**：`skills` / `agent_skills` 表 + 挂载 API + `match`，是 2/4 路的匹配底座。
+3. **Skill Registry（§6.9）**：`skills` / `agent_skills` 表 + 挂载 API + `match`，是 2/4/5 路的**匹配底座**，
+   协商的 DISCOVER（§6.8.1）也依赖它，故排在协商之前；
+4. **DAG Scheduler**：扩展现有派单，agents 列表 → DAG 节点 → 门禁推进；
+5. **协商式路由（§6.8）**：Coordinator + 协商协议 + Task Lock，默认关闭按任务开启，
+   依赖 1/2/3 + 异步 Job（§13 P2）。
 
-这三个补齐，Janus 就从「接口转换器」升级为真正的 **Agent Runtime**。
+方案 1/2/4 补齐 + DAG 之后，Janus 就从「接口转换器」升级为真正的 **Agent Runtime**。
 
 ### 6.8 协商式路由（Self-Organizing Team）
 
 > 定位：Registry / Router / DAG 解决"派人干活"；协商式路由解决**派活之前先组队**——
 > 多个 Agent 像临时项目组一样先讨论、再分工，Router 退化为 **Coordinator（主持）**。
 > 不固定角色（没有 architect-agent / coder-agent 这种写死分工），是 §6.3 的**方案 5**，
-> 默认关闭、按任务开启，失败可逐级降级。
+> 默认关闭、按任务开启，失败可逐级降级（§9.2 的阶段状态机仍是固定角色的默认流水线；
+> 这里“不固定角色”只指协商开启时的动态匹配，两者并存：小请求走固定流水线，复杂工单按需开协商组队）。
 
 **为什么不是完全自治**：自由讨论会内耗——两个 agent 抢同一块活、一个 agent 反复提重构、
 无限争论。工程口径是**半自治**：
@@ -720,8 +738,13 @@ Gate   门禁：人工 / 自动（测试、审计）
 - **OIDC**（Janus 当 Relying Party；IdP 用 Authentik / Keycloak / Zitadel / Google / GitHub）。
 - **用户自助创建 API key**：Web / API 里生成 `sk-janus-…`，绑定用户 + 权限 + 预算；
   可随时吊销、可轮换；程序化客户端 / IDE 用它接入。
-- **订阅制授权**：用户可在自己账号下绑定订阅登录（Claude / Codex / OpenCode Go 等），
-  凭据加密归个人，组织不共享订阅（§12 #19 的边界）。
+- **订阅制授权（两档）**：
+  - 个人订阅：用户在自己账号下绑定订阅登录（Claude / Codex / OpenCode Go 等），凭据加密归个人；
+  - **企业订阅 / 组织合同**：管理员绑定 org 级凭据（enterprise key、企业 OAuth/SSO IdP 授权、
+    私有化网关余额），成员经 OIDC SSO 进入后共用（§12 #41）；计费/配额归 org（§11 budgets），
+    审计仍按 Janus 用户逐人记录——私有网关把“厂商 org 级身份”还原成“Janus user 级审计”。
+- **一人多凭据**：同一用户可绑定**多家** provider（阿里 / DeepSeek / 腾讯 / Claude / Codex 的
+  OAuth 与 api-key 并存），各自加密、按 provider 独立生效；不存在“只能绑一个”的限制（§4）。
 - 两条腿都要：浏览器 OIDC + API key。
 
 ### 10.3 隔离
@@ -745,6 +768,8 @@ Gate   门禁：人工 / 自动（测试、审计）
 | `skills` | id, capability[], version, scope(global/team/private), prompt, tools, knowledge, workflow | §6.9 Skill Registry；`id@version` 不覆盖 |
 | `agent_skills` | agent_id, skill_id@version, enable, mounted_at | §6.9 动态挂载；任务级装载 / 卸载 |
 | `conversations` | id, user_id, scope, harness, session_id, summary | canonical 映射（§8.1） |
+| `tasks` | id, job_id, agent_ref, skills[], tool_target, workspace, budget, status, events | §9 派单单元（durable job）；承接 claim / 技能挂载 TTL（§13 P2） |
+| `agent_memory` | agent_id, key/embedding, value_ref, task_id | §6.5 agent 独立记忆域（KV/向量，可清可导出） |
 | `budgets` | subject(user/org/project), limit, window | §11.5 |
 | `usage` | request_id, user_id, model, tokens(含 cache 分项), cost | §11 逐条落库 |
 | `requests` | id, user_id, org, model, status, cache_hit, fallback_chain | 审计（现有 `/v1/requests` 的库化） |
@@ -835,7 +860,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 16 | 任务派单（artifact-gated DAG） | 🔴 难 | 先串行 + 人工门禁 |
 | 17 | **全自动产品开发（无人）** | 🔴 不现实 | 必须留人工检查点 |
 | 18 | 会话跨 harness 迁移 | ⛔ 不可行 | harness session 不透明 |
-| 19 | 订阅 OAuth 多用户共享 | 🔴 高风险 | 厂商封禁 / 会失效 |
+| 19 | 消费级个人订阅多用户共享 | 🔴 高风险 | 个人订阅 ToS 仅限本人；并发/多 IP 触发风控封禁（Claude Pro / ChatGPT Plus / Codex 个人） |
 | 20 | Janus 拦网络 / 命令 | ⛔ 不可能 | 靠 OS |
 | 21 | 客户端权限审批（标准协议） | ⛔ 无通道 | OpenAI/Anthropic 无此通道 |
 | 22 | 重写 agent runtime | ⛔ 不做 | 违背定位 |
@@ -843,7 +868,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 24 | Intent Router（Router Agent） | 🟡 中 | 复用现有 Agent 通道；多一跳 |
 | 25 | DAG Scheduler（agents 列表 → DAG） | 🔴 难 | 依赖异步 Job + 派单（#15/#16） |
 | 26 | 模型/供应商自由创建（DB + API/UI） | 🟡 中 | providers/models 表 + 管理 API（§4） |
-| 27 | 订阅制授权（用户维度 OAuth/登录态） | 🟡→🔴 中高 | 每用户自登自用；不透传/不共享（§4） |
+| 27 | 订阅制授权（个人自登自用 ＋ 企业订阅组织接入） | 🟡 中 | 个人不透传/不共享（§4）；企业走 SSO/SCIM + org 凭据（#41） |
 | 28 | 配置即数据（sqlite 全量，config-as-data） | 🟡 中 | §10.4 表清单 + 管理 API/UI；无 env 兼容层 |
 | 29 | 用量/成本聚合（单请求 usage 全量落库，含 cache 分项） | 🟡 中 | 现有 `/v1/usage` + `/v1/requests` 基础 |
 | 30 | 缓存命中率两口径（上游 prompt 缓存 + 自身响应缓存） | 🟡 中 | 上游 usage 字段 + DiffNone 回放计数 |
@@ -857,8 +882,9 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 38 | Skill Registry（skills/agent_skills 表 + 挂载 API + match + 生命周期） | 🟡→🔴 中大 | 依赖 #23；与方案 4/5 匹配共用（§6.9） |
 | 39 | Agent 执行预算（rounds / tool_calls / duration / tokens / cost + 相同调用 / 无进展检测） | 🟡 中 | executor tokenBudget 已有雏形；与 Task.budget 对接（§6.10） |
 | 40 | Local Tool Executor（tool_target 按任务来源 per-task：Web/Job→local、IDE→client） | 🟡 中 | serverToolFunc（web_search）已是先例；依赖 #4 权限裁决 + Task.tool_target（§6.11） |
+| 41 | **企业订阅 / 组织合同作多用户主干** | 🟡 中 | OIDC SSO + SCIM + org 凭据（enterprise key / 私有化网关）；成员共用是合同允许形态；配额/审计在 Janus 层（§10.2 / §4） |
 
-**三条硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）、订阅 OAuth 别做主干（#19）。
+**硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）；另注意消费级个人订阅别共享（#19）——企业订阅作主干是允许的（#41）。
 
 ---
 
@@ -866,11 +892,11 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 | 阶段 | 内容 | 目标 |
 |---|---|---|
-| **P0** | Role 注册表 + `janus/<role>` 虚拟模型 + **角色注入（§5.1：agent 配置 + 身份卡 + 工作台）** + API key；配置「文件 + DB 覆盖」 | 让客户端只选 role；模型可集中配置 |
+| **P0** | Role 注册表 + `janus/<role>` 虚拟模型 + **角色注入（§5.1：agent 配置 + 身份卡 + 工作台）** + API key；配置「文件 + DB 覆盖」（过渡期双源，P3 一次性导入后废弃文件，对齐 §10.1） | 让客户端只选 role；模型可集中配置 |
 | **P1** | 自建模型网关 + 目录（摆脱 Console）+ **模型/供应商自由创建（DB + API/UI）**；权限策略（服务端裁决 + 审计）+ **Local Tool Executor（§6.11）** | 模型访问层独立；权限可管；无 IDE 也能跑编排 |
 | **P1.5** | **观测与计量**：单请求 usage 全量落库（含 cache 分项）、成本聚合、缓存命中率两口径、多租户监控 API（§11） | 平台的计费 / 审计 / 监控卖点 |
 | **P2** | **异步 Job**（durable、events / cancel / 续订；承载 task claim 与技能挂载 TTL） | 派单与 Multi-Agent 编排队列的地基 |
-| **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 + **用户自建 API key**；**订阅制授权（用户维度）**；sqlite 配置中心（config-as-data） | harness 可插拔；多用户 |
+| **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 + **用户自建 API key**；**订阅制授权（个人自绑 ＋ 企业订阅组织接入，§4 / §10.2）**；sqlite 配置中心（config-as-data） | harness 可插拔；多用户 |
 | **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4）+ **Skill Registry（§6.9，skills 表 + 挂载 + match）**，再逐步加 artifact 依赖图；最后叠加**协商式组队（§6.8，方案 5）** | 产品研发流水线 / Multi-Agent 自组织 |
 
 每阶段独立可交付，且可回退。
@@ -898,7 +924,8 @@ Gate   门禁：人工 / 自动（测试、审计）
   → 访问密钥（`sk-janus-…`，**只存 hash**）。
 - **轮换**：主密钥轮换 = `rekey` 管理操作（重加密全部凭据）；`sk-janus-*` 随时吊销 / 再生（§10.2）。
 - **脱敏**：请求 / 审计日志对 api-key、provider auth、订阅 token 脱敏（只留尾 4 位或 hash）；
-  prompt / 回复正文默认不落库（除显式审计开关）。
+  prompt / 回复正文默认**不进审计库**（除显式审计开关）；会话状态快照（§8.1 canonical，
+  按 TTL 清理）仅用于会话恢复，不属于审计留存、不长期保存。
 
 ### 15.2 审计与合规
 - `/v1/requests`（§11.3）是审计主通道：谁、何时、哪个用户/租户、模型、用量、fallback 链、权限裁决事件。
@@ -915,9 +942,11 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 ## 16. 非目标（明确排除）
 
-- 不重写 agent / 工具 / MCP / 会话 runtime。
+- 不重写 agent / 工具 / MCP / 会话 runtime（§6.11 的 Local Tool Executor 只是工具桥的
+  **最小本地执行后端**（fs/shell/git/test），不构成独立工具 runtime；沙箱仍下沉 OS）。
 - 不实现模型推理。
 - 不在 Janus 内造沙箱（下沉 OS）。
 - 不为客户端做权限审批（无标准通道）。
-- 不以订阅式 OAuth 作为多用户主干。
+- 不以**消费级个人订阅** OAuth 作为多用户主干（个人订阅 ToS 限本人，§12 #19）；
+  企业订阅 / 组织合同是允许的主干形态（SSO/SCIM + org 凭据，§12 #41）。
 - 不做硬编码意图匹配（`if contains(prompt, "设计")` 型路由）——角色路由走 §6.3 的 Registry / Router。

@@ -4,6 +4,7 @@
 > 日期：2026-10-08
 > 关系：本文描述 janus 的**目标架构与路线**；当前已实现细节见 [`DESIGN.md`](./DESIGN.md)。
 > 2026-10-08 更新：新增**多 Agent 编排**章节（§6，Agent Registry / Router / DAG）与定位升级。
+> 2026-10-08 更新：补充 **§6.8 协商式路由（Self-Organizing Team）**——Coordinator + 协商协议 + max_round + Task Lock。
 
 ---
 
@@ -277,6 +278,7 @@ agent:
 | 2 **意图 Router Agent（推荐主干）** | 专用 router 不干活，只输出 `{agents:[{name, reason}]}` | 通用、可扩展 | 多一跳、一点延迟/token |
 | 3 阶段状态机 | 复杂任务按 plan→architect→code→test→review 阶段推进 | 稳定、可预期 | 不适用于一次性的小请求 |
 | 4 能力自描述匹配 | Router 先查 Registry，按 skills 命中即路由 | 精确、可审计 | 依赖注册质量 |
+| 5 协商式组队（规划，§6.8） | Coordinator 主持，候选 PROPOSE → DISCUSS → ALLOCATE | 团队自组织、分工合理、可解释 | 多跳；依赖 Registry + Router + DAG + 异步 Job |
 
 **明确不做**：`strings.Contains(prompt, "设计")` 这类硬编码意图匹配——新角色一多就会废。
 
@@ -319,9 +321,74 @@ DAG 的边 = **artifact 依赖 + 门禁**（沿用 §9 artifact-gated 规则：�
 
 1. **Agent Registry**：`agents` 表 + `janus/agent/*` 管理 API + 市场安装；
 2. **Intent Router**：默认走方案 2 意图路由，方案 1/4 作旁路；
-3. **DAG Scheduler**：扩展现有派单，agents 列表 → DAG 节点 → 门禁推进。
+3. **DAG Scheduler**：扩展现有派单，agents 列表 → DAG 节点 → 门禁推进；
+4. **协商式路由（§6.8）**：Coordinator + 协商协议 + Task Lock，默认关闭按任务开启。
 
 这三个补齐，Janus 就从「接口转换器」升级为真正的 **Agent Runtime**。
+
+### 6.8 协商式路由（Self-Organizing Team）
+
+> 定位：Registry / Router / DAG 解决"派人干活"；协商式路由解决**派活之前先组队**——
+> 多个 Agent 像临时项目组一样先讨论、再分工，Router 退化为 **Coordinator（主持）**。
+> 不固定角色（没有 architect-agent / coder-agent 这种写死分工），是 §6.3 的**方案 5**，
+> 默认关闭、按任务开启，失败可逐级降级。
+
+**为什么不是完全自治**：自由讨论会内耗——两个 agent 抢同一块活、一个 agent 反复提重构、
+无限争论。工程口径是**半自治**：
+
+- Agent 自由提出分工 ✅
+- Agent 自己认领任务 ✅
+- Coordinator 最终确认 ✅
+- 权限与资源由 Janus 控制 ✅（§7）
+
+#### 6.8.1 协商协议（Agent Negotiation Protocol）
+
+```
+DISCOVER   按 skills 粗筛候选池（复用 §6.2 Registry，含各自 tools / permission）
+PROPOSE    每个候选提交 {skills, proposal}（各一句建议，不展开）
+DISCUSS    候选互相看到建议，最多 max_round 轮；只允许补充 / 反驳 / 让渡
+VOTE/ALLOCATE  Coordinator 收束 → plan: [{task, owner, depends_on}]
+EXECUTE     plan → Task Queue → DAG（§9 派单；资源按 §7 权限放行）
+REVIEW      门禁（§9.4 Gate）——人工检查点是硬要求（§12 #17）
+```
+
+- 每轮讨论**只传结论与短引用**（复用 §6.4 AgentMessage 摘要原则，不传整段上下文）；
+- 讨论预算挂在 per-job 上（§8.2 / §11.5），超预算直接进 ALLOCATE。
+
+#### 6.8.2 Coordinator（主持，不干活）
+
+- 可以是"最省模型 + 严格只读工具"的专用 agent；职责只有三个：
+  **收集意见 → 结束讨论 → 生成任务图**，不执行任何业务代码。
+- 输出物 = `plan[]`（与意图路由 §6.3 方案 2 同形），下游 DAG Scheduler 无感知——
+  协商只是"路由的另一种输入"，**不新增执行层**。
+- **降级链**：讨论超轮数 / 超时 / 预算 → Coordinator 直接按收到的 PROPOSE 拍板；
+  连 PROPOSE 都拿不到 → 回退方案 2 意图路由 / 方案 3 阶段状态机。
+
+#### 6.8.3 防内耗规则
+
+| 规则 | 说明 |
+|---|---|
+| `max_round = 3` | DISCUSS 轮数硬上限（默认 1～2，可配）；超限即进 ALLOCATE |
+| 单轮 token 预算 | 每轮讨论挂 per-job budget，防止"讨论到没钱执行"（§8.2） |
+| 一人一票 | VOTE 只对"该技能域内"的候选有效，避免外行投票 |
+| Coordinator 一票否决 | 分配冲突时 Coordinator 定夺，不做无限投票 |
+| 参与白名单 | Registry 的 agent 可标 `conference: true/false`，决定是否进候选池 |
+
+#### 6.8.4 Task Lock（认领与冲突）
+
+- 协商产物落到 Task Queue 后，Agent 通过 **claim** 领取：`POST /agent/task/claim {agent, task_id}`；
+- **文件级锁**：写任务认领后即锁定其输出路径（`file: internal/user.go → owner: agent-A`）；
+- 冲突规则 = §9.3"同一 artifact 只有一个 writer"的具体化：
+  - 锁冲突 → 拒绝认领，提示已认领者与交接路径（`handoff`）；
+  - 只读任务（audit / review）不抢写锁，可并行（沿用 §9.3）；
+  - 锁随 job 生命周期释放（cancel / 超时 / 门禁通过）。
+
+#### 6.8.5 与现有设计的关系
+
+- **不新增执行层**：`plan[]` → Task Queue → DAG（§9）完全复用；
+- **不新增权限层**：认领即申请权限，放行与否仍由 §7 服务端裁决；
+- **只新增路由层一跳**：DISCOVER / PROPOSE / DISCUSS ≈ 意图路由的"多智能体版本"，
+  失败可逐级降级（6.8.2）；落地顺序依赖 §6.7 的前三步（Registry → Router → DAG）。
 
 ---
 
@@ -550,6 +617,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | 34 | 配额与限流执行（budgets 表 + 网关裁决） | 🟡 中 | 用量同库（§11.5） |
 | 35 | 核心表清单落库（users/api_keys/providers/models/roles/agents/usage…） | 🟡 中 | §10.4；不保留 env 兼容分支 |
 | 36 | 安全与合规（密钥轮换 / 日志脱敏 / 审计保留期 / 越权过滤） | 🟡 中 | §15；AUDIT.md 已有明细 |
+| 37 | 协商式路由（Coordinator + Negotiation Protocol + max_round + Task Lock） | 🔴 难 | 依赖 #23/#24/#25 + 异步 Job；先文档后落地（§6.8） |
 
 **三条硬约束别硬碰**：会话不能跨 harness（#18）、网络/命令隔离靠 OS（#20）、订阅 OAuth 别做主干（#19）。
 
@@ -564,7 +632,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | **P1.5** | **观测与计量**：单请求 usage 全量落库（含 cache 分项）、成本聚合、缓存命中率两口径、多租户监控 API（§11） | 平台的计费 / 审计 / 监控卖点 |
 | **P2** | **异步 Job**（durable、events / cancel / 续订） | 派单与 Multi-Agent 编排队列的地基 |
 | **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 + **用户自建 API key**；**订阅制授权（用户维度）**；sqlite 配置中心（config-as-data） | harness 可插拔；多用户 |
-| **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4），再逐步加 artifact 依赖图 | 产品研发流水线 / Multi-Agent |
+| **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4），再逐步加 artifact 依赖图；最后叠加**协商式组队（§6.8，方案 5）** | 产品研发流水线 / Multi-Agent 自组织 |
 
 每阶段独立可交付，且可回退。
 

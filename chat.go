@@ -759,13 +759,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	key := s.conversationKey(r, explicit, firstSystem(req.Messages), req.User, dir, req.Messages)
 	s.logClientInfo(r, req.User, dir, key, req.Messages)
-	// scope 模式（无会话 id 的兜底）：一个 scope 一个会话，不做历史前缀分桶。
-	var conv *Conversation
-	if s.cfg.ScopeKey && explicit == "" {
-		conv = s.store.AcquireKey(key)
-	} else {
-		conv = s.store.Acquire(key, req.Messages)
-	}
+	// scope 模式（无会话 id 的兜底）：scope 只作分桶依据，桶内仍按历史前缀匹配
+	// （与普通模式一致）。中途插入的新话题/子代理因此落到独立会话立即回答，
+	// 不会阻塞在在飞会话的会话锁上；跨设备同话题仍共享同一会话（前缀命中复用）。
+	conv := s.store.Acquire(key, req.Messages)
 	defer s.store.Release(conv)
 
 	// 上一轮被客户端中止过（用户点了终止 / 断连）：新内容不能再续接到那个

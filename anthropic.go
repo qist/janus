@@ -442,12 +442,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	key := s.conversationKey(r, explicit, systemText, "", dir, inputMsgs)
 	s.logClientInfo(r, "", dir, key, inputMsgs)
-	var conv *Conversation
-	if s.cfg.ScopeKey && explicit == "" {
-		conv = s.store.AcquireKey(key)
-	} else {
-		conv = s.store.Acquire(key, inputMsgs)
-	}
+	// scope 模式（无会话 id 的兜底）：scope 只作分桶依据，桶内仍按历史前缀匹配
+	// （与普通模式一致），中途插入的新话题/子代理落到独立会话立即回答，
+	// 不再阻塞在在飞会话的会话锁上；跨设备同话题仍共享同一会话。
+	conv := s.store.Acquire(key, inputMsgs)
 	defer s.store.Release(conv)
 
 	// 上一轮被中止过：重开干净会话，别把新任务续接到残缺会话上。

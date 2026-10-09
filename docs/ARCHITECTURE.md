@@ -6,6 +6,7 @@
 > 2026-10-08 更新：新增**多 Agent 编排**章节（§6，Agent Registry / Router / DAG）与定位升级。
 > 2026-10-08 更新：补充 **§6.8 协商式路由（Self-Organizing Team）**——Coordinator + 协商协议 + max_round + Task Lock。
 > 2026-10-08 更新：补充 **§6.9 Skill Registry（技能中心）**——技能独立于 Agent、动态挂载、版本化共享；同步 §6.2 内嵌 skills 改为挂载引用。
+> 2026-10-08 更新：§6 一致性修订——AgentMessage 扩展协商消息、Task 对象携带技能、API 前缀约定（/v1/* vs janus/*）、越权防护覆盖技能挂载、角色表补技能行。
 
 ---
 
@@ -25,6 +26,7 @@ Janus 是**控制平面**，不是 agent runtime：
 | 模型访问层（目录 / 网关 / 路由） | 不实现模型推理 |
 | 派单 / 调度 / 门禁 | 不实现模型推理 |
 | Agent 编排（Registry / Router / DAG） | 不实现沙箱（下沉 OS） |
+| 技能中心（Skill Registry / 动态挂载，§6.9） | 不实现模型推理 |
 | 权限策略 | — |
 | 工具桥（MCP） | — |
 | 事件 / 审计 / 计量 | — |
@@ -287,7 +289,7 @@ agent:
 ### 6.4 Agent 通信（内部协议）
 
 ```
-AgentMessage { from, to, task_id, type: plan|code|test|report|review, payload }
+AgentMessage { from, to, task_id, type: plan|code|test|report|review|propose|discuss|vote|allocate, payload }
 ```
 
 - 走 Janus 内部（现有事件总线 + durable queue 的雏形）；**对外仍是标准 `tool_calls`**，
@@ -347,7 +349,7 @@ DAG 的边 = **artifact 依赖 + 门禁**（沿用 §9 artifact-gated 规则：�
 #### 6.8.1 协商协议（Agent Negotiation Protocol）
 
 ```
-DISCOVER   按 skills 粗筛候选池（复用 §6.2 Registry，含各自 tools / permission）
+DISCOVER   按 skill 匹配粗筛候选池（§6.9 skills.match：capability → 候选 agent）
 PROPOSE    每个候选提交 {skills, proposal}（各一句建议，不展开）
 DISCUSS    候选互相看到建议，最多 max_round 轮；只允许补充 / 反驳 / 让渡
 VOTE/ALLOCATE  Coordinator 收束 → plan: [{task, owner, depends_on}]
@@ -379,7 +381,7 @@ REVIEW      门禁（§9.4 Gate）——人工检查点是硬要求（§12 #17�
 
 #### 6.8.4 Task Lock（认领与冲突）
 
-- 协商产物落到 Task Queue 后，Agent 通过 **claim** 领取：`POST /agent/task/claim {agent, task_id}`；
+- 协商产物落到 Task Queue 后，Agent 通过 **claim** 领取：`POST /janus/task/claim {agent, task_id}`；
 - **文件级锁**：写任务认领后即锁定其输出路径（`file: internal/user.go → owner: agent-A`）；
 - 冲突规则 = §9.3"同一 artifact 只有一个 writer"的具体化：
   - 锁冲突 → 拒绝认领，提示已认领者与交接路径（`handoff`）；
@@ -441,8 +443,10 @@ Router 匹配（§6.3 方案 4 / §6.8 DISCOVER）⟶ load_skills: [golang.backe
 挂载后: prompt 注入 / tools 进白名单 / knowledge 可检索 / workflow 可执行
 ```
 
-- 匹配 = `POST /api/v1/skills/match {task}` → `{skills: [security.audit, jwt.review]}`；
-- 同一 capability 多版本命中 → 按匹配分 / 策略选版（`@latest` 解析到 ENABLE 的版本）。
+- 匹配 = `POST /v1/skills/match {task}` → `{skills: [security.audit, jwt.review]}`；
+- 同一 capability 多版本命中 → 按匹配分 / 策略选版（`@latest` 解析到 ENABLE 的版本）；
+- **技能组合冲突检测**：同任务挂载多个技能时校验 tools / prompt / knowledge 不冲突
+  （如两个技能对同一 tool 声明不同权限 → 拒绝共装，按 §7 最小权限合并）。
 
 #### 6.9.4 生命周期（类软件包）
 
@@ -463,11 +467,14 @@ CREATE → REGISTER → PUBLISH → ENABLE → UPDATE → DEPRECATE
 #### 6.9.6 API 与管理
 
 ```
-GET  /api/v1/skills                    # 按作用域 / capability 查询（含 version / score）
-POST /api/v1/agents/{id}/skills        # 挂载技能到 agent
-POST /api/v1/skills/match              # 任务 → 技能匹配（Router / DISCOVER 内部用）
+GET  /v1/skills                    # 查询技能（按作用域 / capability，含 version / score）
+POST /v1/skills/match              # 任务 → 技能匹配（Router / DISCOVER 内部用）
+POST /janus/agents/{id}/skills     # 给 agent 挂载技能（管理面，与 janus/agent/* 同族）
 janus skill install|publish|deprecate  # CLI，与 §6.2 Agent 市场同款语义
 ```
+
+> **API 前缀约定**：协议兼容端点走 `/v1/*`（OpenAI / Anthropic 同形）；Janus 管理 / 控制面
+> 走 `janus/*`（`janus/agent/*`、`janus/skill/*`、`janus/task/*`），与虚拟模型 `janus/<role>` 同族。
 
 #### 6.9.7 落库与一致性
 
@@ -547,7 +554,7 @@ janus skill install|publish|deprecate  # CLI，与 §6.2 Agent 市场同款语�
 ```
 Goal   产品目标
 Stage  阶段：{role, mode, inputs[], outputs[], gate}
-Task   派单单元：{task_id, target{client_id,harness}, workspace, budget, status, events}
+Task   派单单元：{task_id, skills[]（挂载技能 id@version）, target{client_id,harness}, workspace, budget, status, events}
 Gate   门禁：人工 / 自动（测试、审计）
 ```
 - dispatcher = **artifact-gated DAG 状态机**，默认单条关键路径单飞。
@@ -560,8 +567,9 @@ Gate   门禁：人工 / 自动（测试、审计）
 ### 10.1 配置入库（SQLite，config-as-data）
 - **数据库 = SQLite**（单文件嵌入式、WAL、零外部依赖）；不引 PostgreSQL 等外部服务。
   schema 以 §10.4 表清单为准，不做任何“沿用旧结构”的兼容设计。
-- **配置都是数据**：providers、models（§4）、roles、agents（§6）、users、api_keys、budgets、permissions
-  全部落 sqlite，经 API / UI 管理——**运行配置不写进文档 / 配置文件**。
+- **配置都是数据**：providers、models（§4）、roles、agents（§6）、**skills / agent_skills（§6.9）**、
+  users、api_keys、budgets、permissions 全部落 sqlite，经 API / UI 管理——**运行配置不写进
+  文档 / 配置文件**。
 - **文件 / env 只做 bootstrap**：监听地址、DB 路径、加密主密钥、初始 admin（启动前必需的最小集）。
   旧 env 映射（`BRIDGE_PROJECT_MAP` / `BRIDGE_MODEL_MAP` 等）**不做兼容层**：数据库为准，
   无回退分支、无双读逻辑；存量配置一次性导入，导入完旧 env 即废弃。
@@ -719,7 +727,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 | **P0** | Role 注册表 + `janus/<role>` 虚拟模型 + **角色注入（§5.1：agent 配置 + 身份卡 + 工作台）** + API key；配置「文件 + DB 覆盖」 | 让客户端只选 role；模型可集中配置 |
 | **P1** | 自建模型网关 + 目录（摆脱 Console）+ **模型/供应商自由创建（DB + API/UI）**；权限策略（服务端裁决 + 审计） | 模型访问层独立；权限可管 |
 | **P1.5** | **观测与计量**：单请求 usage 全量落库（含 cache 分项）、成本聚合、缓存命中率两口径、多租户监控 API（§11） | 平台的计费 / 审计 / 监控卖点 |
-| **P2** | **异步 Job**（durable、events / cancel / 续订） | 派单与 Multi-Agent 编排队列的地基 |
+| **P2** | **异步 Job**（durable、events / cancel / 续订；承载 task claim 与技能挂载 TTL） | 派单与 Multi-Agent 编排队列的地基 |
 | **P3** | ACP 适配层 + 每用户 harness 实例；OIDC 登录 + **用户自建 API key**；**订阅制授权（用户维度）**；sqlite 配置中心（config-as-data） | harness 可插拔；多用户 |
 | **P4** | 派单（先串行 + 人工门禁）+ **Agent Registry / Intent Router**（§6.3 方案 1/2/4）+ **Skill Registry（§6.9，skills 表 + 挂载 + match）**，再逐步加 artifact 依赖图；最后叠加**协商式组队（§6.8，方案 5）** | 产品研发流水线 / Multi-Agent 自组织 |
 
@@ -735,7 +743,7 @@ Gate   门禁：人工 / 自动（测试、审计）
 - **harness 配置自动注入**：janus 通过 `OPENCODE_CONFIG_CONTENT` 注入自动生成的 `orchestrator` 白名单（§3.3），无需手写 `~/.config/opencode/opencode.jsonc`；
 - **janus 自管上游**：`OPENCODE_REUSE_EXTERNAL=false` 时 janus 总是自己拉起 OpenCode（注入的前提）。
 
-**本路线新增**：模型访问层、Role/虚拟模型、**角色注入（§5.1）**、**故障转移（§4.1）**、权限策略、异步 Job、ACP、平台层（DB/OIDC/多用户，**§10.4 表清单**）、派单、**多 Agent 编排（Registry / Router / DAG，§6）**、**观测计量与配额（§11）**、**安全合规（§15）**。
+**本路线新增**：模型访问层、Role/虚拟模型、**角色注入（§5.1）**、**故障转移（§4.1）**、权限策略、异步 Job、ACP、平台层（DB/OIDC/多用户，**§10.4 表清单**）、派单、**多 Agent 编排（Registry / Router / DAG / 协商式路由 / Skill Registry，§6）**、**观测计量与配额（§11）**、**安全合规（§15）**。
 
 ---
 
@@ -757,7 +765,8 @@ Gate   门禁：人工 / 自动（测试、审计）
 
 ### 15.3 越权防护（多租户）
 - 所有查询按 `user_id / org` 过滤（服务端强制，不是前端过滤）；管理 API 仅 admin 角色。
-- `agents` / `roles` 的资源引用在会话创建时**校验归属**，防跨租户引用。
+- `agents` / `roles` / `skills`（含 `agent_skills` 挂载）的资源引用在会话创建时**校验归属与作用域**，
+  防跨租户引用 / 跨作用域挂载。
 - 会话 scope（IDE+项目，§8.1）归属到 user，跨用户不可见。
 
 ---

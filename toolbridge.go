@@ -100,6 +100,9 @@ type toolSession struct {
 	// 用于「客户端走了」时中断上游，避免孤儿 agent 一直调工具。
 	sessionID string
 
+	// onTimeout 在工具结果超时时被调用，用于标记会话 terminated（下一轮重放保护）。
+	onTimeout func()
+
 	// idle 拒绝日志限流（防刷屏）
 	lastRejectLog atomic.Int64 // 上次打印时间（毫秒）
 	rejectCount   atomic.Int64 // 距上次日志以来被抑制的拒绝次数

@@ -27,6 +27,9 @@ func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string
 		tools = augmentCompanionTools(tools)
 	}
 	sess := s.tools.Register(conv.Key, tools)
+	// 工具结果超时时标记会话 terminated：下一轮请求若重发相同内容（Trae 自动重试）
+	// 会被 499 挡掉，不白跑一遍；若发了新内容则走 terminated 路径重建。
+	sess.onTimeout = conv.markTerminated
 	// 记录当前上游 session id：parked 工具调用超时时用它中断上游，避免孤儿 agent。
 	sess.setSessionID(conv.snapshotSessionID())
 	fp := toolsFingerprint(tools)

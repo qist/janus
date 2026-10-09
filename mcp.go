@@ -201,6 +201,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		if res.TimedOut {
 			pend.markStale()
 			s.metrics.incToolTimeouts()
+			// 标记会话 terminated：下一轮请求的重放保护（同内容 → 499，新内容 → 重建）。
+			if sess.onTimeout != nil {
+				sess.onTimeout()
+			}
 			if sid := sess.getSessionID(); sid != "" {
 				s.log.Warnf("tool result timeout: interrupting upstream %s (%s) to stop orphaned agent", sid, sess.key)
 				go func() {

@@ -1198,6 +1198,25 @@ func (s *Server) resetSession(conv *Conversation) {
 func (s *Server) ensureSession(ctx context.Context, conv *Conversation,
 	ref OCModelRef, agent, dir string, msgs []ChatMessage) (created bool, err error) {
 
+	// DB 恢复的会话首次使用时先探活：上游 opencode 重启/换实例后旧会话已失效，
+	// 直接重建新会话（原来要等首请求 502 后再靠 isSessionGone 自愈，改后无缝重建）。
+	if conv.restoredFromDB.Swap(false) {
+		if sid := conv.snapshotSessionID(); sid != "" {
+			if _, gerr := s.up.GetSession(ctx, sid); gerr != nil {
+				if !isSessionGone(gerr) {
+					return false, gerr
+				}
+				s.log.Warnf("db-restored session %s is gone (key=%s); recreating", sid, conv.Key)
+				if s.db != nil {
+					s.db.deleteConv(conv.Key)
+				}
+				conv.setSessionID("")
+				conv.clearLast()
+				conv.setResponse(nil)
+			}
+		}
+	}
+
 	if conv.snapshotSessionID() == "" {
 		loc := &struct {
 			Directory string `json:"directory"`

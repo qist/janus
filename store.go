@@ -47,6 +47,10 @@ type Conversation struct {
 	// 停在一个残缺的回合上，下一次请求必须重开干净会话，绝不能把「新任务」
 	// 续接到那个已中止的会话（否则新任务会看到旧任务的上下文/中断残影）。
 	terminated atomic.Bool
+
+	// restoredFromDB：本会话是从持久化库恢复的（跨进程重启续链）。首次使用前
+	// 需对上流探活，避免恢复出已失效的 session 导致首请求 502（见 ensureSession）。
+	restoredFromDB atomic.Bool
 }
 
 func (c *Conversation) touch() { c.lastActive.Store(time.Now().UnixMilli()) }
@@ -159,6 +163,7 @@ func (s *Store) restoreLocked(c *Conversation) {
 		return
 	}
 	c.setSessionID(row.SessionID)
+	c.restoredFromDB.Store(true)
 	c.model = OCModelRef{ProviderID: row.ProviderID, ID: row.ModelID, Variant: row.Variant}
 	c.agent = row.Agent
 	c.directory = row.Directory

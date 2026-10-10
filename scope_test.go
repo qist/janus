@@ -317,6 +317,30 @@ func TestPathMappingNote(t *testing.T) {
 	}
 }
 
+// TestSessionBehaviorNote 验证行为约定注入条件：仅首轮注入，且与路径改写规则无关
+// （同机部署、无 mode B 改写时也要约束「用户说已修复就停止排查」的行为）。
+func TestSessionBehaviorNote(t *testing.T) {
+	if got := sessionBehaviorNote(false); got != "" {
+		t.Fatalf("non-first turn must not inject: %q", got)
+	}
+	got := sessionBehaviorNote(true)
+	if !strings.Contains(got, "已修复") || !strings.Contains(got, "停止") {
+		t.Fatalf("note must state the stop rule: %q", got)
+	}
+
+	// firstTurnNote：无路径规则时仍带行为约定；有路径规则时两者都有
+	s := &Server{}
+	only := s.firstTurnNote(&Conversation{}, true)
+	if only == "" || strings.Contains(only, "工作目录") {
+		t.Fatalf("no rewrite rule: want behavior note only, got %q", only)
+	}
+	conv := &Conversation{rewriteFrom: "/var/lib/janus/workspaces/abc", rewriteTo: "/home/u/proj"}
+	both := s.firstTurnNote(conv, true)
+	if !strings.Contains(both, "环境说明") || !strings.Contains(both, "行为约定") {
+		t.Fatalf("with rewrite rule: want both notes, got %q", both)
+	}
+}
+
 // ---------- 子 agent 并发干扰修复（v0.3.31） ----------
 
 // TestToolSessionPendingKeyedByCallID 锁定核心修复：同一工具的并发多次调用必须

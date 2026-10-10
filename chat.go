@@ -939,9 +939,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 发 prompt（必须先订阅事件再发，否则丢开头）----
 	planText := FlattenDelta(delta)
-	if note := s.pathMappingNote(conv, newSession); note != "" {
-		planText += note
-	}
+	planText += s.firstTurnNote(conv, newSession)
 
 	// 图片：data URI 直传，http(s) 下载转 base64。失败的 URL 以文字说明补进 prompt，
 	// 免得模型以为用户根本没发图（实测会出现"未看到图片"这种误导性回答）。
@@ -972,7 +970,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err != nil && len(files) > 0 {
 		// 上游对附件格式挑剔，附件导致失败时降级重发一次纯文本，保住对话本身
 		s.log.Warnf("prompt with %d attachment(s) failed, retrying as plain text: %v", len(files), err)
-		planText = FlattenDelta(delta) + s.pathMappingNote(conv, newSession) + attachFailureNote(failed)
+		planText = FlattenDelta(delta) + s.firstTurnNote(conv, newSession) + attachFailureNote(failed)
 		files = nil
 		resp, err = s.up.Prompt(ctx, sid, OCPromptReq{Text: planText})
 	}

@@ -555,9 +555,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	planText := FlattenDelta(delta)
-	if note := s.pathMappingNote(conv, newSession); note != "" {
-		planText += note
-	}
+	planText += s.firstTurnNote(conv, newSession)
 	files, failed := ExtractAttachments(ctx, delta, s.httpc)
 	if m := FindModel(ocModels, ref); len(files) > 0 {
 		var dropped []OCFileAttach

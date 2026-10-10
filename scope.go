@@ -373,3 +373,21 @@ func (s *Server) pathMappingNote(conv *Conversation, first bool) string {
 		"调用工具读写文件/执行命令时，路径参数一律使用用户项目目录 " + conv.rewriteTo +
 		" 下的路径（或对话里出现的用户侧路径），不要把你的工作目录路径传给工具。"
 }
+
+// firstTurnNote 会话首轮随 prompt 注入的说明合集（随上游会话上下文留存，不逐轮
+// 重复）。各说明独立成立：路径映射仅远程 mode B 有内容，行为约定对所有会话生效。
+func (s *Server) firstTurnNote(conv *Conversation, first bool) string {
+	return s.pathMappingNote(conv, first) + sessionBehaviorNote(first)
+}
+
+// sessionBehaviorNote 约束 agent 对「用户中途表示已解决」的反应：立即停止相关
+// 排查与验证、确认后等待指示。否则 agent 会把手头的验证计划执行完——用户已经
+// 修好的东西被反复检查，还可能基于过期状态得出误导结论（实测发生过）。
+func sessionBehaviorNote(first bool) string {
+	if !first {
+		return ""
+	}
+	return "\n\n[行为约定] 用户中途表示问题「已修复/已解决/已自行处理」时，视为该问题已关闭：" +
+		"立即停止为它安排的排查、验证或检查动作（含已计划的），简要确认后等待用户下一步指示；" +
+		"仅当用户明确要求验证时才继续。"
+}

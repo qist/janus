@@ -714,9 +714,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	planText := Flatten(inputMsgs)
-	if note := s.pathMappingNote(conv, newSession); note != "" {
-		planText += note
-	}
+	planText += s.firstTurnNote(conv, newSession)
 	// 附件：data URI 直传 / http(s) 下载；模型不支持该模态就丢弃并说明。
 	files, failed := ExtractAttachments(ctx, inputMsgs, s.httpc)
 	if m := FindModel(ocModels, ref); len(files) > 0 {

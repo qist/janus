@@ -448,6 +448,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	conv := s.store.Acquire(key, inputMsgs)
 	defer s.store.Release(conv)
 
+	// 出向路径改写：远程 mode B 下把回答里的工作区路径改写回客户端项目路径。
+	s.setPathRewrite(conv, dir, r.Header.Get("X-OpenCode-Directory"), inputMsgs)
+
 	// 上一轮被中止过：重开干净会话，别把新任务续接到残缺会话上。
 	// 断线后客户端的「同内容重发」不消费标记、不重跑被终止的旧内容（否则模型
 	// 会接着答中断的半截话）；只有携带新内容的请求才消费标记并重置会话。
@@ -544,13 +547,17 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if _, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs); err != nil {
+	newSession, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs)
+	if err != nil {
 		st, typ, msg := s.anthropicErrorFromUpstream(err)
 		writeAnthropicError(w, st, typ, msg)
 		return
 	}
 
 	planText := FlattenDelta(delta)
+	if note := s.pathMappingNote(conv, newSession); note != "" {
+		planText += note
+	}
 	files, failed := ExtractAttachments(ctx, delta, s.httpc)
 	if m := FindModel(ocModels, ref); len(files) > 0 {
 		var dropped []OCFileAttach

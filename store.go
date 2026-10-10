@@ -32,6 +32,10 @@ type Conversation struct {
 	agent     string
 	model     OCModelRef
 	directory string
+	// 出向路径改写（远程 mode B：工作区目录 → 客户端项目路径）。
+	// 只在持 conv.mu 的请求路径上读写（与上面三个字段同一约定）。
+	rewriteFrom string
+	rewriteTo   string
 
 	// 工具调用状态（只在请求路径上、持 conv.mu 时访问）
 	mcpName      string         // 已注册的 MCP server 名；空=未注册

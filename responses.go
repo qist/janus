@@ -636,6 +636,9 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	s.logClientInfo(r, "", dir, convKey, inputMsgs)
 	defer s.store.Release(conv)
 
+	// 出向路径改写：远程 mode B 下把回答里的工作区路径改写回客户端项目路径。
+	s.setPathRewrite(conv, dir, r.Header.Get("X-OpenCode-Directory"), inputMsgs)
+
 	// 上一轮被中止过：重开干净会话。断线后客户端的「同内容重发」不消费标记、
 	// 也不重跑被终止的旧内容（否则模型会接着答中断的半截话）；新内容才重置。
 	if terminatedReplay(conv, inputMsgs) {
@@ -711,6 +714,9 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	planText := Flatten(inputMsgs)
+	if note := s.pathMappingNote(conv, newSession); note != "" {
+		planText += note
+	}
 	// 附件：data URI 直传 / http(s) 下载；模型不支持该模态就丢弃并说明。
 	files, failed := ExtractAttachments(ctx, inputMsgs, s.httpc)
 	if m := FindModel(ocModels, ref); len(files) > 0 {

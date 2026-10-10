@@ -272,6 +272,7 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 	sid := conv.snapshotSessionID()
 	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
+	ex.setRewrite(conv.rewriteFrom, conv.rewriteTo)
 	ex.parallel = parallelDefault(req.ParallelToolCalls)
 	ex.budget = newTokenBudget(responsesMaxTokens(req))
 	ex.writeText = func(t string) error { st.text(t); return nil }

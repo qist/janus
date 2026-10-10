@@ -54,6 +54,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	sid := conv.snapshotSessionID()
 	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
+	ex.setRewrite(conv.rewriteFrom, conv.rewriteTo)
 	ex.parallel = parallelDefault(req.ParallelToolCalls)
 	ex.budget = newTokenBudget(effectiveMaxTokens(req.MaxTokens, req.MaxCompletionTokens))
 	ex.writeText = func(t string) error { return sw.deltaText(t) }
@@ -176,6 +177,7 @@ func (s *Server) runBlocking(ctx context.Context, conv *Conversation, model stri
 	started := time.Now()
 	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
+	ex.setRewrite(conv.rewriteFrom, conv.rewriteTo)
 	ex.parallel = parallel
 	ex.budget = newTokenBudget(maxTokens)
 

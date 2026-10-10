@@ -212,6 +212,7 @@ func (s *Server) streamAnthropic(ctx context.Context, w http.ResponseWriter, r *
 	sid := conv.snapshotSessionID()
 	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
+	ex.setRewrite(conv.rewriteFrom, conv.rewriteTo)
 	ex.parallel = true
 	ex.budget = newTokenBudget(req.MaxTokens)
 	ex.writeText = func(t string) error { ss.textDelta(t); return nil }

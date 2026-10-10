@@ -115,6 +115,10 @@ type executor struct {
 
 	// 输出预算（max_tokens 的近似实现）
 	budget *tokenBudget
+
+	// 出向路径改写器（nil = 不改写）。正文与思考流各一个，避免跨流串扣留状态。
+	rwText   *pathRewriter
+	rwReason *pathRewriter
 }
 
 func newExecutor(srv *Server, sid, model string, toolAnn bool) *executor {
@@ -122,6 +126,33 @@ func newExecutor(srv *Server, sid, model string, toolAnn bool) *executor {
 		toolNames: map[string]string{}, done: make(chan string, 4)}
 	e.touchData()
 	return e
+}
+
+// setRewrite 配置出向路径改写（远程 mode B：工作区目录 → 客户端项目路径）。
+func (e *executor) setRewrite(from, to string) {
+	e.rwText = newPathRewriter(from, to)
+	e.rwReason = newPathRewriter(from, to)
+}
+
+// flushRewrite 终态时补发被扣住的跨 delta 路径尾部：先入快照再流式补发，
+// 必须发生在内容快照与 finish 之前（snapshot 入口调用，幂等）。
+func (e *executor) flushRewrite() {
+	e.mu.Lock()
+	t := e.rwText.flush()
+	r := e.rwReason.flush()
+	if t != "" {
+		e.text.WriteString(t)
+	}
+	if r != "" {
+		e.reasoning.WriteString(r)
+	}
+	e.mu.Unlock()
+	if t != "" && e.writeText != nil {
+		_ = e.writeText(t)
+	}
+	if r != "" && e.writeReasoning != nil {
+		_ = e.writeReasoning(r)
+	}
 }
 
 // touchData 记录一次"真实数据"（模型 delta / 上游 session 事件）。
@@ -142,11 +173,13 @@ func (e *executor) addText(s string) error {
 		return nil
 	}
 	e.mu.Lock()
-	e.text.WriteString(s)
+	// serverText 记上游原文（对账基准，见 reconcile），改写只影响出向内容。
 	e.serverText.WriteString(s)
+	out := e.rwText.rewrite(s)
+	e.text.WriteString(out)
 	e.mu.Unlock()
 	if e.writeText != nil {
-		return e.writeText(s)
+		return e.writeText(out)
 	}
 	return nil
 }
@@ -157,10 +190,11 @@ func (e *executor) addToolText(s string) error {
 		return nil
 	}
 	e.mu.Lock()
-	e.text.WriteString(s)
+	out := e.rwText.rewrite(s)
+	e.text.WriteString(out)
 	e.mu.Unlock()
 	if e.writeText != nil {
-		return e.writeText(s)
+		return e.writeText(out)
 	}
 	return nil
 }
@@ -170,10 +204,11 @@ func (e *executor) addReasoning(s string) error {
 		return nil
 	}
 	e.mu.Lock()
-	e.reasoning.WriteString(s)
+	out := e.rwReason.rewrite(s)
+	e.reasoning.WriteString(out)
 	e.mu.Unlock()
 	if e.writeReasoning != nil {
-		return e.writeReasoning(s)
+		return e.writeReasoning(out)
 	}
 	return nil
 }
@@ -250,6 +285,7 @@ func (e *executor) signal(t string) {
 }
 
 func (e *executor) snapshot() runResult {
+	e.flushRewrite()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	u := e.usage
@@ -765,6 +801,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	conv := s.store.Acquire(key, req.Messages)
 	defer s.store.Release(conv)
 
+	// 出向路径改写：远程 mode B 下把回答里的工作区路径改写回客户端项目路径。
+	s.setPathRewrite(conv, dir, r.Header.Get("X-OpenCode-Directory"), req.Messages)
+
 	// 上一轮被客户端中止过（用户点了终止 / 断连）：新内容不能再续接到那个
 	// 残缺会话上，否则新任务会看到旧任务的上下文和中断残影。重开干净会话。
 	// 但「内容与旧历史完全相同的请求」（断线后客户端自动重发上一轮 payload，
@@ -900,6 +939,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 发 prompt（必须先订阅事件再发，否则丢开头）----
 	planText := FlattenDelta(delta)
+	if note := s.pathMappingNote(conv, newSession); note != "" {
+		planText += note
+	}
 
 	// 图片：data URI 直传，http(s) 下载转 base64。失败的 URL 以文字说明补进 prompt，
 	// 免得模型以为用户根本没发图（实测会出现"未看到图片"这种误导性回答）。
@@ -930,7 +972,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err != nil && len(files) > 0 {
 		// 上游对附件格式挑剔，附件导致失败时降级重发一次纯文本，保住对话本身
 		s.log.Warnf("prompt with %d attachment(s) failed, retrying as plain text: %v", len(files), err)
-		planText = FlattenDelta(delta) + attachFailureNote(failed)
+		planText = FlattenDelta(delta) + s.pathMappingNote(conv, newSession) + attachFailureNote(failed)
 		files = nil
 		resp, err = s.up.Prompt(ctx, sid, OCPromptReq{Text: planText})
 	}

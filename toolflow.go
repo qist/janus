@@ -32,6 +32,8 @@ func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string
 	sess.onTimeout = conv.markTerminated
 	// 记录当前上游 session id：parked 工具调用超时时用它中断上游，避免孤儿 agent。
 	sess.setSessionID(conv.snapshotSessionID())
+	// 同步出向路径改写规则：客户端工具的 args 在 park 前用它改写（远程 mode B）。
+	sess.setRewritePaths(conv.rewriteFrom, conv.rewriteTo)
 	fp := toolsFingerprint(tools)
 
 	// 注册名带工具集指纹：OpenCode 对"已存在的 MCP server 重新 PUT"不会重拉

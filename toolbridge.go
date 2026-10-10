@@ -109,6 +109,11 @@ type toolSession struct {
 
 	// serverTools 由桥自己执行的工具（如 Claude Code 的 web_search），不甩给客户端。
 	serverTools map[string]serverToolFunc
+
+	// 出向路径改写（远程 mode B：工作区目录 → 客户端项目路径）。
+	// ensureTools 每轮从 conv 同步；客户端工具的 args 在 park 前用它改写。
+	rwFrom string
+	rwTo   string
 }
 
 // ToolBridge 管理所有会话的 MCP 工具上下文。
@@ -402,6 +407,32 @@ func (s *toolSession) serverTool(name string) serverToolFunc {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.serverTools[name]
+}
+
+// setRewritePaths 同步出向路径改写规则（ensureTools 每轮调用）。
+func (s *toolSession) setRewritePaths(from, to string) {
+	s.mu.Lock()
+	s.rwFrom, s.rwTo = from, to
+	s.mu.Unlock()
+}
+
+// rewriteArgs 把客户端工具的调用参数里的 janus 主机工作区路径改写成客户端项目路径。
+//
+// 远程 mode B 下 agent 的 cwd 是中性工作区，它给客户端工具传的文件/目录参数可能
+// 带着工作区路径 —— 客户端会在**自己设备上**按该路径执行：轻则找不到，重则把
+// 文件写到错误位置。与出向正文共用同一条改写规则（见 scope.go pathRewriter）。
+// args 是完整 JSON 文本（非增量流），直接整体替换、无需扣留：
+//   - from 是纯路径，不含需 JSON 转义的字符，可安全文本替换；
+//   - to 可能是 Windows 路径（反斜杠），必须以 JSON 转义形式写入（\\ → \\\\），
+//     否则整段 args 变非法 JSON。
+func (s *toolSession) rewriteArgs(args string) string {
+	s.mu.Lock()
+	from, to := s.rwFrom, s.rwTo
+	s.mu.Unlock()
+	if from == "" || to == "" || from == to {
+		return args
+	}
+	return strings.ReplaceAll(args, from, jsonStringValue(to))
 }
 
 // hasWaiter 报告是否有执行器正在等待新的挂起调用（= 该会话当前有在飞请求）。

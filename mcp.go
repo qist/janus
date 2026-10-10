@@ -143,6 +143,9 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			args = "{}"
 		}
 
+		// 远程 mode B：参数里的工作区路径改写成客户端项目路径（见 toolbridge.rewriteArgs）。
+		args = sess.rewriteArgs(args)
+
 		// 桥自己执行的工具（如 Claude Code 的 web_search 服务端工具）：
 		// 直接执行并把结果回给 agent，不甩给客户端。
 		if fn := sess.serverTool(original); fn != nil {

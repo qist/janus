@@ -1271,6 +1271,11 @@ func (s *Server) ensureSession(ctx context.Context, conv *Conversation,
 		conv.model = ref
 		conv.agent = agent
 		conv.directory = dir
+		// 同步工具桥的会话绑定：换绑会让旧会话遗留的挂起调用立刻以错误收尾，
+		// 而不是等它们的超时去误伤新会话。
+		if conv.toolSess != nil {
+			conv.toolSess.setSessionID(sess.ID)
+		}
 		s.persistConv(conv)
 		s.log.Infof("session created %s dir=%s model=%s", sess.ID, dir, ref.String())
 		return true, nil

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeIDE(t *testing.T) {
@@ -314,4 +315,120 @@ func TestPathMappingNote(t *testing.T) {
 	if got := s.pathMappingNote(&Conversation{}, true); got != "" {
 		t.Fatalf("no rule must not inject: %q", got)
 	}
+}
+
+// ---------- 子 agent 并发干扰修复（v0.3.31） ----------
+
+// TestToolSessionPendingKeyedByCallID 锁定核心修复：同一工具的并发多次调用必须
+// 各自挂起、互不覆盖。按工具名做键时后到的 park 会覆盖先到的，被覆盖的调用永远
+// 等不到回填，agent 卡死在 tools/call 上（实测：客户端无限「等待模型响应」）。
+func TestToolSessionPendingKeyedByCallID(t *testing.T) {
+	s := &toolSession{key: "k", pending: map[string]*pendingCall{}}
+	name := s.mcpToolName("execute_command")
+	p1 := s.park("call_1", "execute_command", name, `{"command":"echo a"}`)
+	p2 := s.park("call_2", "execute_command", name, `{"command":"echo b"}`)
+	if p1 == p2 {
+		t.Fatal("两次 park 不应互相覆盖")
+	}
+	if len(s.pending) != 2 {
+		t.Fatalf("应有两个挂起调用, got %d", len(s.pending))
+	}
+	// takeOldest 按到达顺序取，先取 call_1
+	oldest := s.takeOldest()
+	if oldest == nil || oldest.CallID != "call_1" {
+		t.Fatalf("takeOldest = %+v, want call_1", oldest)
+	}
+	// 剩下的 call_2 仍可取到
+	got := s.takePending()
+	if len(got) != 1 || got[0].CallID != "call_2" {
+		t.Fatalf("takePending = %+v, want [call_2]", got)
+	}
+}
+
+// TestToolSessionSetSessionIDDropsStalePending：换绑上游会话时，旧会话遗留的
+// 挂起调用立刻以错误收尾并移除；当前会话的调用不受影响。
+func TestToolSessionSetSessionIDDropsStalePending(t *testing.T) {
+	s := &toolSession{key: "k", pending: map[string]*pendingCall{}}
+	s.setSessionID("ses_old")
+	ghost := s.park("call_1", "Read", s.mcpToolName("Read"), "{}")
+	if ghost.CallSid != "ses_old" {
+		t.Fatalf("park 应记录 CallSid, got %q", ghost.CallSid)
+	}
+	s.setSessionID("ses_new")
+	select {
+	case r := <-ghost.result:
+		if !r.IsError {
+			t.Fatalf("幽灵调用应以错误收尾: %+v", r)
+		}
+	default:
+		t.Fatal("换绑后幽灵调用应立刻收到错误")
+	}
+	if s.hasPending() {
+		t.Fatal("换绑后不应残留旧会话的挂起调用")
+	}
+	// 新会话的调用不受影响
+	cur := s.park("call_2", "Read", s.mcpToolName("Read"), "{}")
+	s.setSessionID("ses_new")
+	if !s.hasPending() || len(s.pending) != 1 {
+		t.Fatal("当前会话的调用不应被清理")
+	}
+	select {
+	case r := <-cur.result:
+		t.Fatalf("当前会话的调用不应被应答: %+v", r)
+	default:
+	}
+}
+
+// TestToolSessionOwnsPendingCall：超时只处理属于当前会话的调用；
+// 幽灵调用（来自已被替换的旧会话）不得中断正在服务的新会话。
+func TestToolSessionOwnsPendingCall(t *testing.T) {
+	s := &toolSession{key: "k", pending: map[string]*pendingCall{}}
+	s.setSessionID("ses_a")
+	if !s.ownsPendingCall(&pendingCall{CallSid: "ses_a"}) {
+		t.Fatal("当前会话的调用应被视为属于当前会话")
+	}
+	if s.ownsPendingCall(&pendingCall{CallSid: "ses_dead"}) {
+		t.Fatal("旧会话的调用不应被视为属于当前会话")
+	}
+	if !s.ownsPendingCall(&pendingCall{}) {
+		t.Fatal("CallSid 为空（历史遗留）按旧行为处理")
+	}
+}
+
+// TestRestoreLockedVerifiesHistory：DB 恢复只在前缀匹配时续链 —— 子代理/新话题的
+// 会话不得继承主会话的 sessionID（否则 claim 抖动 + 孤儿删除风暴 + 误删主会话）。
+func TestRestoreLockedVerifiesHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "janus.db")
+	d, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hist := []ChatMessage{{Role: "user", Content: MessageContent{Text: "主话题"}}}
+	hb, _ := json.Marshal(hist)
+	d.saveConv(dbConversation{Key: "s:abc", SessionID: "ses_main", ProviderID: "p", ModelID: "m", History: hb})
+	d.close()
+
+	d2, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d2.close()
+	st := NewStore(NewLogger("error"), time.Minute, time.Minute, 10)
+	st.attachDB(d2)
+
+	// 同一会话线（历史前缀匹配，模拟进程重启后续链）→ 恢复
+	cont := append(append([]ChatMessage{}, hist...), ChatMessage{Role: "user", Content: MessageContent{Text: "继续"}})
+	c1 := st.Acquire("s:abc", cont)
+	if c1.snapshotSessionID() != "ses_main" {
+		t.Fatalf("前缀匹配应恢复 sessionID, got %q", c1.snapshotSessionID())
+	}
+	st.Release(c1)
+
+	// 子代理/新话题（历史不匹配）→ 不继承主会话的 sessionID
+	sub := []ChatMessage{{Role: "user", Content: MessageContent{Text: "子代理任务"}}}
+	c2 := st.Acquire("s:abc", sub)
+	if c2.snapshotSessionID() != "" {
+		t.Fatalf("历史不匹配不得恢复 sessionID, got %q", c2.snapshotSessionID())
+	}
+	st.Release(c2)
 }

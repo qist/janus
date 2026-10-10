@@ -158,7 +158,15 @@ func (s *Store) attachDB(db *dbStore) {
 
 // restoreLocked 为新会话恢复持久化的上游 sessionID / model / agent / dir。
 // 只在会话刚创建、尚未对外发布时调用（持 s.mu，且未持 c.mu）。
-func (s *Store) restoreLocked(c *Conversation) {
+// restoreLocked 为新会话恢复持久化的上游 sessionID / model / agent / dir。
+// 只在会话刚创建、尚未对外发布时调用（持 s.mu，且未持 c.mu）。
+//
+// incoming 非 nil 时（claim 路径）只有「恢复出的历史确为本次请求历史的前缀」才续链：
+// 恢复是给跨进程重启续同一会话用的。scope 模式下同一 key 的桶里会进新话题/子代理的
+// 会话 —— 若无条件恢复，它们会继承主会话的 sessionID：轻则 claim 反复失配、一轮请求
+// 连建多个会话把桶挤爆（孤儿删除风暴），重则子代理 DiffReset 时把主会话正在使用的
+// 上游 session 删掉（跨会话互相干扰，实测）。
+func (s *Store) restoreLocked(c *Conversation, incoming []ChatMessage) {
 	if s.db == nil || c == nil {
 		return
 	}
@@ -166,17 +174,32 @@ func (s *Store) restoreLocked(c *Conversation) {
 	if !ok || row.SessionID == "" {
 		return
 	}
+	var msgs []ChatMessage
+	if len(row.History) > 0 {
+		if json.Unmarshal(row.History, &msgs) != nil || len(msgs) == 0 {
+			msgs = nil
+		}
+	}
+	if incoming != nil && !restorableHistory(msgs, incoming) {
+		return
+	}
 	c.setSessionID(row.SessionID)
 	c.restoredFromDB.Store(true)
 	c.model = OCModelRef{ProviderID: row.ProviderID, ID: row.ModelID, Variant: row.Variant}
 	c.agent = row.Agent
 	c.directory = row.Directory
-	if len(row.History) > 0 {
-		var msgs []ChatMessage
-		if json.Unmarshal(row.History, &msgs) == nil && len(msgs) > 0 {
-			c.setLast(msgs)
-		}
+	if len(msgs) > 0 {
+		c.setLast(msgs)
 	}
+}
+
+// restorableHistory 判断恢复的历史能否安全续链：stored 必须是 incoming 的严格前缀
+// （与 lastMatches 同语义）。历史快照为空时无法验证归属，一律不恢复 —— 宁可重开会话。
+func restorableHistory(stored, incoming []ChatMessage) bool {
+	if len(stored) == 0 {
+		return false
+	}
+	return lcp(stored, incoming) == len(stored)
 }
 
 func NewStore(log *Logger, ttl, sharedTTL time.Duration, max int) *Store {
@@ -245,7 +268,7 @@ func (s *Store) AcquireKey(key string) *Conversation {
 		}
 		found = &Conversation{Key: key, createdAt: time.Now()}
 		s.dir[key] = []*Conversation{found}
-		s.restoreLocked(found)
+		s.restoreLocked(found, nil)
 	}
 	s.mu.Unlock()
 
@@ -306,7 +329,7 @@ func (s *Store) claim(key string, incoming []ChatMessage, forceNew bool) *Conver
 		found = &Conversation{Key: key, createdAt: time.Now()}
 		bucket = append([]*Conversation{found}, bucket...)
 		s.dir[key] = bucket
-		s.restoreLocked(found)
+		s.restoreLocked(found, incoming)
 	}
 	s.mu.Unlock()
 

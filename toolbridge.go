@@ -63,6 +63,7 @@ type pendingCall struct {
 	MCPName  string // 暴露给 agent 的名字（带命名空间）
 	Args     string // JSON 字符串
 	ConvKey  string // 所属会话 key（日志定位用）
+	CallSid  string // park 时工具桥绑定的上游 sessionID（识别跨会话/跨回合的幽灵调用）
 
 	ord    int64 // 到达顺序（parallel=false 时按它逐个返回）
 	result chan ToolResult
@@ -90,8 +91,12 @@ type toolSession struct {
 	mcpName string // 注册到 OpenCode 的 MCP server 名
 	tools   []ToolSpec
 
-	mu      sync.Mutex
-	pending map[string]*pendingCall // MCPName -> pending
+	mu sync.Mutex
+	// 键必须是唯一的 callID：agent 会对同一工具并发发起多个调用（一次助手消息多个
+	// tool_call），按工具名做键会让后到的 park 覆盖先到的 —— 被覆盖的调用既不会回给
+	// 客户端也永远不会 complete，其 MCP JSON-RPC 挂死，agent 卡在 tools/call 上等不到
+	// 结果，客户端表现为无限「等待模型响应」（实测）。
+	pending map[string]*pendingCall // CallID -> pending
 	ordSeq  int64                   // 到达序号
 	waiters []chan struct{}         // 有新 pending 时通知执行器
 	closed  bool
@@ -312,9 +317,10 @@ func (s *toolSession) park(callID, original, mcpName, args string) *pendingCall 
 		p.complete(ToolResult{Content: "bridge: session closed", IsError: true})
 		return p
 	}
+	p.CallSid = s.sessionID // 记录 park 时的上游会话：超时/换绑时识别幽灵调用
 	s.ordSeq++
 	p.ord = s.ordSeq
-	s.pending[mcpName] = p
+	s.pending[callID] = p
 	waiters := s.waiters
 	s.mu.Unlock()
 
@@ -379,7 +385,7 @@ func (s *toolSession) takeOldest() *pendingCall {
 		}
 	}
 	if oldest != nil {
-		delete(s.pending, oldest.MCPName)
+		delete(s.pending, oldest.CallID)
 	}
 	return oldest
 }
@@ -443,10 +449,29 @@ func (s *toolSession) hasWaiter() bool {
 }
 
 // setSessionID 记录当前会话对应的上游 session id（会话重建时更新）。
+// 换绑到新会话时，旧会话遗留的挂起调用全部以错误收尾并移除：它们属于已被
+// 替换/中断的旧回合，永远等不到回填；留着只会在超时后按「当前会话」中断，
+// 把正在服务的新会话杀掉（实测：换主题后旧回合的幽灵调用超时毒害新会话）。
 func (s *toolSession) setSessionID(id string) {
 	s.mu.Lock()
 	s.sessionID = id
+	for cid, p := range s.pending {
+		if p.CallSid != "" && p.CallSid != id {
+			delete(s.pending, cid)
+			p.complete(ToolResult{
+				Content: "bridge: upstream session was replaced; this pending tool call is stale",
+				IsError: true,
+			})
+		}
+	}
 	s.mu.Unlock()
+}
+
+// ownsPendingCall 判断挂起调用是否属于当前绑定的上游会话。CallSid 为空（历史遗留
+// 或会话未绑定时 park）按「属于」处理，保持旧行为。
+func (s *toolSession) ownsPendingCall(p *pendingCall) bool {
+	sid := s.getSessionID()
+	return p.CallSid == "" || p.CallSid == sid
 }
 
 // getSessionID 返回当前会话对应的上游 session id。

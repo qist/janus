@@ -204,17 +204,25 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		if res.TimedOut {
 			pend.markStale()
 			s.metrics.incToolTimeouts()
-			// 标记会话 terminated：下一轮请求的重放保护（同内容 → 499，新内容 → 重建）。
-			if sess.onTimeout != nil {
-				sess.onTimeout()
-			}
-			if sid := sess.getSessionID(); sid != "" {
-				s.log.Warnf("tool result timeout: interrupting upstream %s (%s) to stop orphaned agent", sid, sess.key)
-				go func() {
-					iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
-					defer c()
-					_ = s.up.Interrupt(iCtx, sid)
-				}()
+			// 幽灵调用（来自已被替换的旧回合/旧会话）永远等不到回填，但账不能算到当前
+			// 会话头上：只有调用确实属于当前绑定的上游会话时才中断/标记 terminated，
+			// 否则旧回合的超时会杀死正在服务的新会话（实测：换主题后旧调用超时毒害新会话）。
+			if sess.ownsPendingCall(pend) {
+				// 标记会话 terminated：下一轮请求的重放保护（同内容 → 499，新内容 → 重建）。
+				if sess.onTimeout != nil {
+					sess.onTimeout()
+				}
+				if sid := sess.getSessionID(); sid != "" {
+					s.log.Warnf("tool result timeout: interrupting upstream %s (%s) to stop orphaned agent", sid, sess.key)
+					go func() {
+						iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+						defer c()
+						_ = s.up.Interrupt(iCtx, sid)
+					}()
+				}
+			} else {
+				s.log.Warnf("stale tool call timed out: tool=%s callSid=%s current=%s (conv=%s); dropping without interrupt",
+					pend.ToolName, pend.CallSid, sess.getSessionID(), sess.key)
 			}
 		}
 

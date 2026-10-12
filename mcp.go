@@ -166,21 +166,18 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		if !sess.waitForWaiter(s.cfg.ToolOrphanWait) {
 			// 目标会话没有在飞请求：等够 ToolOrphanWait 还没人接手 → 判孤儿
 			// （客户端在两轮之间离开时就是这样：agent 还在调工具，但没人会回结果）。
-			// 拒绝 + 中断该会话上游，从源头掐掉；会话本就没在跑时中断是无害的。
+			// 只拒绝，不中断：MCP 请求不携带调用方 session id，无法确定调用出自哪个
+			// 上游会话，按「当前绑定」中断会误杀活会话——实测 3 次：垂死 agent 的尾期
+			// 调用被算到正在服务的会话头上；且回合以 tool_calls 交给客户端后 agent
+			// 停在挂起调用上等回填，本来就没有 waiter，同样会被误判成孤儿。孤儿
+			// agent 由其他路径兜底终止：幽灵调用超时中断其宿主会话、工具桥换绑清理、
+			// terminated 重建时的 DeleteSession，以及模型收到连续报错后自行放弃。
 			if ok, suppressed := sess.shouldLogReject(60 * time.Second); ok {
 				if suppressed > 0 {
 					s.log.Warnf("mcp tool call for idle conversation: %s (%s); rejecting (suppressed %d)",
 						original, sess.key, suppressed)
 				} else {
 					s.log.Warnf("mcp tool call for idle conversation: %s (%s); rejecting", original, sess.key)
-				}
-				if sid := sess.getSessionID(); sid != "" {
-					s.log.Warnf("idle conversation tool call: interrupting upstream %s (%s) to stop orphaned agent", sid, sess.key)
-					go func() {
-						iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
-						defer c()
-						_ = s.up.Interrupt(iCtx, sid)
-					}()
 				}
 			}
 			mcpReply(w, req.ID, map[string]any{

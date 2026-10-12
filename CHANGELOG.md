@@ -4,6 +4,28 @@
 
 ---
 
+## [v0.3.38] - 2026-10-12
+
+### 新增
+- **HTTP 访问日志**（`accesslog.go`）：记录每个进入 mux 的请求
+  `method path status dur bytes ip ua`，跳过 `/healthz`、`/metrics`、`/ui` 与静态资源。
+  排查"客户端报 llm response empty stream 但服务端看着正常"这类问题时，没有访问日志
+  就看不到客户端到底发了什么、拿到什么状态码和字节（此前只能靠临时 debug 日志）。
+  流式端点的 `dur` 是"直到流结束"的总耗时，正好用来识别客户端提前断流。
+
+### 修复
+- **`/v1/responses` 回显的 `model` 是上游模型名**（如 `opencode-go/deepseek-v4.1-flash`），
+  而客户端请求的是别名（如 `janus`）。严格校验回显一致性的客户端（实测 Trae 的
+  custom_responses_compatible）会因此判为响应异常。现按已有的 `BRIDGE_MODEL_ECHO=request`
+  回显请求里的原始模型名；默认值 `real` 行为不变。
+
+### 验证
+- 带 tools + system + `hertz` UA 的 Trae 同构请求：`response.created` 无 `output`/`tools`
+  为 `null` 的字段，事件序列完整到 `response.completed`；`model` 回显 `janus`。
+- 访问日志实测捕获 Trae 的三次 POST：全部 `status=200`，字节 17814/16844/6723。
+
+---
+
 ## [v0.3.37] - 2026-10-12
 
 ### 修复

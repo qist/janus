@@ -451,9 +451,10 @@ func (s *Server) Handler() http.Handler {
 	// 其余 /v1/* 一律返回 OpenAI 格式 404（客户端不会因解析失败而崩）
 	mux.HandleFunc("/v1/", s.handleUnknownV1)
 
-	// 顺序：request-id → CORS → 限流 → 业务。
+	// 顺序：request-id → CORS → 限流 → 访问日志 → 业务。
 	// 限流放在 CORS 之后，OPTIONS 预检已在中间件内豁免。
-	return s.withRequestID(s.withCORS(s.withRateLimit(s.withMetrics(mux))))
+	// 访问日志贴近 mux，能记录真实的业务状态码（含流式请求的总耗时）。
+	return s.withRequestID(s.withCORS(s.withRateLimit(s.withMetrics(s.withAccessLog(mux)))))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

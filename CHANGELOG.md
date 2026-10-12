@@ -4,6 +4,19 @@
 
 ---
 
+## [v0.3.35] - 2026-10-12
+
+### 修复
+- **`janus/<role>[@auto|:variant]` 角色形式模型名报 404，客户端表现为"LLM 空流"**：
+  `isJanusAlias` 只认裸名 `janus`，§4.2 设计的角色形式落到通用解析器，被当成
+  `provider="janus"` 直接 404 `unknown provider "janus"`——客户端（/v1/responses 等）
+  把错误体渲染成空流，模型完全不可用（实测裸 `janus`/`default` 正常、所有角色形式
+  全挂）。现在角色形式统一识别为 janus 虚拟模型，解析到 web 选定的默认模型，
+  Chat / Responses / Anthropic 三条路径同时生效；角色档位独立路由仍按 §4.2 属
+  P4 规划。
+
+---
+
 ## [v0.3.34] - 2026-10-12
 
 ### 修复

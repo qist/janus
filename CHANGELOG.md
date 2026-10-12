@@ -4,6 +4,29 @@
 
 ---
 
+## [v0.3.36] - 2026-10-12
+
+### 修复
+- **`/v1/responses` 无锚点请求每轮开冷链，会话完全无记忆**：客户端不发
+  `previous_response_id` 和 `X-Session-ID` 时（实测 CodeBuddy copilot 后端两者都不发，
+  全量历史重发型），回退分支按 `resp:<随机 id>` 建链——**每个请求都是冷启动会话**，
+  模型毫无上文，reasoning 空转不出正文，客户端表现为"LLM 空流"并无限重试
+  （实测 40 秒连开 13 个 session）。现回退分支与 Chat 同源：`conversationKey`
+  历史归属 + 桶内前缀匹配 + **差分增量发送**（全量重灌会把上游 session 撑爆）；
+  `previous_response_id` / `X-Session-ID` 两条显式锚点路径行为不变。
+- **responses 路径从不写 `conv.setLast` 历史快照**：`lastMessages` 永远为空——历史
+  归属链的差分恒为 DiffReset（每轮 reset + 全量重发 + 新 session），`terminatedReplay`
+  防重放在该路径也从未生效。现与 chat 同款在 prompt 成功后 `setLast` + `persistConv`。
+  修复过程中还发现差分必须先于 `ensureSession` 计算：放后面的话新建会话会被
+  DiffReset 的 `resetSession` 清掉，prompt 落到空 sid 上，执行器永远等不到终态
+  （单测实测挂死）。
+
+### 验证
+- 两轮无锚点连续对话：第二轮复用同一 session（session created 计数 1）、仅发增量、
+  模型记得首轮上下文；`janus/<role>@auto` 角色名经 CF 全链路 200。
+
+---
+
 ## [v0.3.35] - 2026-10-12
 
 ### 修复

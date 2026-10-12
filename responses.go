@@ -797,6 +797,11 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	if resp != nil && resp.Data.Time.Created > 0 {
 		promptAt = resp.Data.Time.Created
 	}
+	// 无论成败都快照历史（与 chat 一致）：历史归属链的差分、会话复用、
+	// terminatedReplay 防重放全都依赖它——缺了它 stored 永远为空，
+	// 每轮 DiffReset → 全量重发 → 新 session（实测 40 秒 13 个）。
+	conv.setLast(cloneMessages(inputMsgs))
+	s.persistConv(conv)
 	s.log.Debugf("responses prompt sid=%s key=%s model=%s", conv.snapshotSessionID(), convKey, ref.String())
 
 	setSessionHeaders(w, conv)

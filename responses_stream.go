@@ -347,6 +347,9 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 	final.ID = skeleton.ID
 	final.Status = responsesStatus(t)
 	final.Output = st.items
+	if final.Output == nil {
+		final.Output = []ResponseItem{}
+	}
 	if len(t.tools) == 0 {
 		final.OutputText = t.res.text
 	}

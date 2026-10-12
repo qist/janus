@@ -893,6 +893,8 @@ func (s *Server) newResponsesResponse(req ResponsesRequest, model, convKey strin
 		CreatedAt:         now.Unix(),
 		Status:            "in_progress",
 		Model:             model,
+		Output:            []ResponseItem{},
+		Tools:             []ResponseTool{},
 		ParallelToolCalls: parallelDefault(req.ParallelToolCalls),
 	}
 	if req.Instructions != "" {

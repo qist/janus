@@ -4,6 +4,22 @@
 
 ---
 
+## [v0.3.37] - 2026-10-12
+
+### 修复
+- **Responses 对象的 `output` / `tools` 序列化为 `null`**：`newResponsesResponse` 的骨架
+  和流式结束时的 `response.completed` 用的是 nil 切片，JSON 输出 `"output":null` /
+  `"tools":null`，不符合 OpenAI Responses 规范（这两个字段是数组）。严格解析的客户端
+  （Trae 的 custom_responses_compatible 等）会因此判定流异常，表现为"llm response empty stream"。
+  现骨架与最终对象的 `output` / `tools` 均输出空数组 `[]`，并加回归测试
+  `TestResponsesObjectArraysNotNull` 锁定。
+
+### 验证
+- `response.created` 与 `response.completed` 中无 `"output":null` / `"tools":null`；
+  事件序列 created → output_item.added → content_part → text.delta → completed 完整。
+
+---
+
 ## [v0.3.36] - 2026-10-12
 
 ### 修复

@@ -67,13 +67,13 @@ type ResponsesResponse struct {
 	Output             []ResponseItem     `json:"output"`
 	OutputText         string             `json:"output_text,omitempty"`
 	Usage              *ResponsesUsage    `json:"usage,omitempty"`
-	PreviousResponseID *string            `json:"previous_response_id"`
-	Instructions       *string            `json:"instructions"`
+	PreviousResponseID *string            `json:"previous_response_id,omitempty"`
+	Instructions       *string            `json:"instructions,omitempty"`
 	Metadata           json.RawMessage    `json:"metadata,omitempty"`
 	ParallelToolCalls  bool               `json:"parallel_tool_calls"`
 	ToolChoice         string             `json:"tool_choice,omitempty"`
 	Tools              []ResponseTool     `json:"tools"`
-	Error              *openAIError       `json:"error"`
+	Error              *openAIError       `json:"error,omitempty"`
 	IncompleteDetails  *IncompleteDetails `json:"incomplete_details,omitempty"`
 }
 

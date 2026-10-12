@@ -4,6 +4,53 @@
 
 ---
 
+## [v0.3.39] - 2026-10-12
+
+### 修复
+按 OpenAI 官方 OpenAPI 规范（openai-openapi v2.3.0）逐字段核对 `/v1/responses`
+的 SSE 事件与 Response 对象，补齐严格解析器（实测 Trae 的
+`custom_responses_compatible`）判为"llm response empty stream"的几处不合规：
+
+- **SSE 事件缺规范必填字段 `item_id`**：`response.content_part.added` /
+  `content_part.done` / `output_text.delta` / `output_text.done` /
+  `reasoning_summary_part.added` / `reasoning_summary_part.done` /
+  `reasoning_summary_text.delta` / `reasoning_summary_text.done` 此前都只发
+  `output_index`，没有 `item_id`。规范里这些事件的 `required` 含 `item_id`，
+  客户端据此把增量归到具体输出项；缺失即无法归属，严格解析器整条流判空。
+  现全部补上对应的 `item_id`。
+- **`response.output_text.delta` / `output_text.done` 缺 `logprobs`**：规范
+  `required` 含 `logprobs`（官方流为空数组），现发 `"logprobs":[]`。
+- **`created` 后未发 `response.in_progress`**：OpenAI 官方流在 `response.created`
+  之后紧跟 `response.in_progress`，部分严格解析器据此判断"流已开始"。现按规范补发。
+- **可选字段输出 `null`**：`previous_response_id` / `instructions` / `error`
+  没有 `omitempty`，为 nil 时输出 `"xxx":null`。OpenAI 官方不输出这些空字段，
+  严格解析器按官方格式校验会判为响应异常。现加 `omitempty`。
+
+### 新增
+- **`responses_spec_test.go` 回归套件**，把规范要求锁进 CI，防止再次回归：
+  - `TestResponsesSSEEventFieldsMatchSpec`：逐事件核对 `required` 字段
+    （`item_id` / `logprobs` / `sequence_number` / `type` 等），流式推理项
+    与纯文本两条路径都覆盖。
+  - `TestResponsesSSENoNullOrphanFields`：断言事件里不出现 `"output":null`、
+    `"tools":null`、`"previous_response_id":null`、`"instructions":null`、
+    `"error":null`、`"usage":null`。
+  - `TestResponsesSSESequenceMonotonic`：断言 `sequence_number` 自 0 起严格递增。
+- `responses_null_test.go` 增补：Response 对象可选字段为空时必须省略而非 `null`。
+
+### 移除
+- 临时排障脚手架（`debug_sse.go`）及其开关 `BRIDGE_DEBUG_SSE_DIR`
+  （请求/SSE 落盘）与 `BRIDGE_DEBUG_NO_REASONING`（屏蔽 reasoning 项）。
+  根因已定位并修复，脚手架不再需要；两者从未写入 `janus.env.example` / README。
+
+### 验证
+- `go test ./...` 全绿；新增规范回归套件 3 项均通过。
+- 用 OpenAI 官方 OpenAPI 规范脚本校验真实抓取的 SSE 流：13 个事件、
+  0 个缺必填字段；`janus` 与 `opencode-go/deepseek-v4.1-flash` 两条模型路径
+  事件序列一致（仅 delta 数量不同）。
+- **Trae 连通性测试通过**（"测试并添加"成功返回）。
+
+---
+
 ## [v0.3.38] - 2026-10-12
 
 ### 新增

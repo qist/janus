@@ -141,13 +141,13 @@ func (st *responsesStream) reasoning(t string) {
 		st.items = append(st.items, item)
 		st.event("response.output_item.added", map[string]any{"output_index": st.rIdx, "item": item})
 		st.event("response.reasoning_summary_part.added", map[string]any{
-			"output_index": st.rIdx, "summary_index": 0,
+			"item_id": st.rID, "output_index": st.rIdx, "summary_index": 0,
 			"part": map[string]any{"type": "summary_text", "text": ""}})
 		st.rOpen = true
 	}
 	st.rBuf.WriteString(t)
 	st.event("response.reasoning_summary_text.delta", map[string]any{
-		"output_index": st.rIdx, "summary_index": 0, "delta": t})
+		"item_id": st.rID, "output_index": st.rIdx, "summary_index": 0, "delta": t})
 }
 
 func (st *responsesStream) text(t string) {
@@ -163,14 +163,18 @@ func (st *responsesStream) text(t string) {
 			Content: []ResponseContent{{Type: "output_text", Annotations: []json.RawMessage{}}}}
 		st.items = append(st.items, item)
 		st.event("response.output_item.added", map[string]any{"output_index": st.tIdx, "item": item})
+		// item_id 是规范必填字段：客户端据此把增量文本归到具体输出项。
+		// 缺失时严格解析器拿不到归属，判为"空流"。
 		st.event("response.content_part.added", map[string]any{
-			"output_index": st.tIdx, "content_index": 0,
+			"item_id": st.tID, "output_index": st.tIdx, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
 		st.tOpen = true
 	}
 	st.tBuf.WriteString(t)
+	// logprobs 是规范必填字段（官方示例为 []），缺失会让严格解析器判为非法事件。
 	st.event("response.output_text.delta", map[string]any{
-		"output_index": st.tIdx, "content_index": 0, "delta": t})
+		"item_id": st.tID, "output_index": st.tIdx, "content_index": 0,
+		"delta": t, "logprobs": []any{}})
 }
 
 func (st *responsesStream) closeReasoning() {
@@ -182,9 +186,9 @@ func (st *responsesStream) closeReasoning() {
 	item.Summary[0].Text = txt
 	st.items[st.rIdx] = item
 	st.event("response.reasoning_summary_text.done", map[string]any{
-		"output_index": st.rIdx, "summary_index": 0, "text": txt})
+		"item_id": st.rID, "output_index": st.rIdx, "summary_index": 0, "text": txt})
 	st.event("response.reasoning_summary_part.done", map[string]any{
-		"output_index": st.rIdx, "summary_index": 0,
+		"item_id": st.rID, "output_index": st.rIdx, "summary_index": 0,
 		"part": map[string]any{"type": "summary_text", "text": txt}})
 	st.event("response.output_item.done", map[string]any{"output_index": st.rIdx, "item": st.items[st.rIdx]})
 	st.rOpen = false
@@ -204,9 +208,10 @@ func (st *responsesStream) closeText() {
 	item.Content[0].Annotations = []json.RawMessage{}
 	st.items[st.tIdx] = item
 	st.event("response.output_text.done", map[string]any{
-		"output_index": st.tIdx, "content_index": 0, "text": txt})
+		"item_id": st.tID, "output_index": st.tIdx, "content_index": 0,
+		"text": txt, "logprobs": []any{}})
 	st.event("response.content_part.done", map[string]any{
-		"output_index": st.tIdx, "content_index": 0,
+		"item_id": st.tID, "output_index": st.tIdx, "content_index": 0,
 		"part": map[string]any{"type": "output_text", "text": txt, "annotations": []any{}}})
 	st.event("response.output_item.done", map[string]any{"output_index": st.tIdx, "item": st.items[st.tIdx]})
 	st.tOpen = false
@@ -268,6 +273,10 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 	skeleton := s.newResponsesResponse(req, model, conv.Key, started)
 	st := newResponsesStream(ss)
 	st.event("response.created", map[string]any{"response": skeleton})
+	// 规范要求 created 之后紧跟 in_progress（OpenAI 官方流如此）。
+	// 部分严格解析器（实测 Trae）据此判断"流已开始"。
+	inProg := *skeleton
+	st.event("response.in_progress", map[string]any{"response": &inProg})
 
 	sid := conv.snapshotSessionID()
 	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)

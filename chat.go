@@ -1109,8 +1109,24 @@ func (s *Server) resolveDefaultModel(ctx context.Context, list []OCModel) (OCMod
 
 // isJanusAlias 判断客户端是否在用 janus 虚拟模型（web 里选的默认模型）。
 // 用产品名做别名，避免和已有的 default（指向上游默认）撞名。
+// §4.2 的角色形式 janus/<role>[@auto|:variant] 也算：web 映射可按角色随时切换，
+// 客户端会把角色写进模型名（如 janus/build@auto）。角色档位独立路由是 P4 规划，
+// 当前统一解析到 web 选定的默认模型（与裸 janus 一致），保证接口可用。
 func isJanusAlias(raw string) bool {
-	return strings.EqualFold(strings.TrimSpace(raw), "janus")
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "janus" {
+		return true
+	}
+	rest, ok := strings.CutPrefix(raw, "janus/")
+	if !ok {
+		return false
+	}
+	// 角色段取 @/: 之前的部分；为空或含 '/' 说明不是角色写法（防误伤真 provider/id）
+	role := rest
+	if i := strings.IndexAny(role, "@:"); i >= 0 {
+		role = role[:i]
+	}
+	return role != "" && !strings.Contains(role, "/")
 }
 
 // runtimeDefaultModelRef 尝试解析面板选定的默认模型（可能带 :variant 思考档位）。

@@ -289,6 +289,30 @@ func TestResolveBareUnique(t *testing.T) {
 	}
 }
 
+// TestIsJanusAliasRoleForms：§4.2 角色形式 janus/<role>[@auto|:variant] 必须被识别为
+// janus 虚拟模型——否则落到 ResolveModel 按 provider="janus" 解析直接 404
+// "unknown provider janus"，客户端表现为"LLM 空流"（实测）。
+func TestIsJanusAliasRoleForms(t *testing.T) {
+	cases := map[string]bool{
+		"janus":                   true,
+		"JANUS":                   true,
+		" janus ":                 true,
+		"janus/build":             true,
+		"janus/build@auto":        true,
+		"janus/orchestrator@auto": true,
+		"janus/build:high":        true,
+		"janus/":                  false,
+		"janus/a/b":               false,
+		"janusis":                 false,
+		"default":                 false,
+	}
+	for raw, want := range cases {
+		if got := isJanusAlias(raw); got != want {
+			t.Errorf("isJanusAlias(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
 func TestResolveBareAmbiguous(t *testing.T) {
 	_, err := ResolveModel("dup", testModels())
 	if err == nil {

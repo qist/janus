@@ -474,6 +474,21 @@ func (s *toolSession) ownsPendingCall(p *pendingCall) bool {
 	return p.CallSid == "" || p.CallSid == sid
 }
 
+// ghostInterruptSid 幽灵调用（CallSid ≠ 当前绑定）超时后可安全中断的上游会话 id：
+// 它自己所属的旧会话——孤儿 agent 的宿主。这类 agent 收到超时错误结果后不会停：
+// 手头的验证计划照常执行，无人观看地跑完整个任务（实测静默跑完 42 条消息），
+// 还会跟当前会话抢同一座工具桥（结果按名误配、idle 守卫误杀活会话），必须掐掉。
+//
+// 仅当当前没有 waiters（本会话无在飞请求）才返回 CallSid：有 waiters 说明可能是
+// 并发 bucket-mate（如子代理）的活跃调用——park 时 CallSid 盖的是 park 时刻的
+// 绑定，并发换绑下可能盖错，按它中断会误杀活会话，此时保守不中断。
+func (s *toolSession) ghostInterruptSid(p *pendingCall) string {
+	if p.CallSid == "" || p.CallSid == s.getSessionID() || s.hasWaiter() {
+		return ""
+	}
+	return p.CallSid
+}
+
 // getSessionID 返回当前会话对应的上游 session id。
 func (s *toolSession) getSessionID() string {
 	s.mu.Lock()

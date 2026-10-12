@@ -419,6 +419,35 @@ func TestToolSessionOwnsPendingCall(t *testing.T) {
 	}
 }
 
+// TestGhostCallTimeoutInterruptsOwnSession：幽灵调用超时必须中断它自己所属的
+// 旧会话（孤儿 agent 的宿主）——只丢弃不中断的话，agent 收到超时错误后会继续
+// 把手头任务做完（实测：无人观看静默跑完 42 条消息，还跟新会话抢工具桥）。
+// 但有 waiters（并发 bucket-mate 活跃）时不得按 CallSid 中断，防误杀活会话。
+func TestGhostCallTimeoutInterruptsOwnSession(t *testing.T) {
+	s := &toolSession{key: "k", pending: map[string]*pendingCall{}}
+	s.setSessionID("ses_new")
+	ghost := &pendingCall{CallID: "call_old", ToolName: "LS", CallSid: "ses_old"}
+
+	if got := s.ghostInterruptSid(ghost); got != "ses_old" {
+		t.Fatalf("无 waiters 时应中断旧会话, got %q", got)
+	}
+	// 当前绑定上的调用不是幽灵
+	if got := s.ghostInterruptSid(&pendingCall{CallID: "c", ToolName: "LS", CallSid: "ses_new"}); got != "" {
+		t.Fatalf("当前会话的调用不该走幽灵分支, got %q", got)
+	}
+	// 无 CallSid 的历史遗留调用按「属于当前」处理
+	if got := s.ghostInterruptSid(&pendingCall{CallID: "c", ToolName: "LS"}); got != "" {
+		t.Fatalf("无 CallSid 不该走幽灵分支, got %q", got)
+	}
+	// 有 waiters（并发 bucket-mate 在飞）：保守不中断
+	s.mu.Lock()
+	s.waiters = append(s.waiters, make(chan struct{}))
+	s.mu.Unlock()
+	if got := s.ghostInterruptSid(ghost); got != "" {
+		t.Fatalf("有 waiters 时不得中断, got %q", got)
+	}
+}
+
 // TestRestoreLockedVerifiesHistory：DB 恢复只在前缀匹配时续链 —— 子代理/新话题的
 // 会话不得继承主会话的 sessionID（否则 claim 抖动 + 孤儿删除风暴 + 误删主会话）。
 func TestRestoreLockedVerifiesHistory(t *testing.T) {

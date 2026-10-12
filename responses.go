@@ -607,12 +607,17 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
 	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
 
-	// ---- 会话：previous_response_id > X-Session-ID > 独立链 ----
+	// ---- 会话：previous_response_id > X-Session-ID > 历史归属 ----
 	//
 	// X-Session-ID 与 Chat 共用命名空间（x:<id>），使同一客户端锚点下
 	// Chat Completions 与 Responses 落在同一个 Janus 会话 / OpenCode session。
+	// 两个锚都没有时，按输入历史归属会话（与 Chat 同一套 conversationKey +
+	// 前缀匹配 + 差分）：全量历史重发型客户端（实测 CodeBuddy copilot）不发任何
+	// 锚点，此前每请求开一条 resp:<random> 冷链——模型毫无上文，reasoning 空转
+	// 不出正文，客户端表现为"LLM 空流"并无限重试（实测 40 秒开 13 个 session）。
 	convKey := ""
 	var prev *storedResponse
+	fallback := false
 	if req.PreviousResponseID != "" {
 		if prev = s.responses.get(req.PreviousResponseID); prev == nil {
 			writeOpenAIError(w, http.StatusNotFound, "invalid_request_error",
@@ -624,7 +629,8 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	} else if explicit != "" {
 		convKey = "x:" + explicit
 	} else {
-		convKey = "resp:" + responseIDPrefix + newID()
+		fallback = true
+		convKey = s.conversationKey(r, "", firstSystem(inputMsgs), "", dir, inputMsgs)
 	}
 
 	// 续链时锁定原链的工作目录：增量 input 里通常没有项目路径，重算会漂移。
@@ -632,7 +638,12 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		dir = prev.dir
 	}
 
-	conv := s.store.AcquireKey(convKey)
+	var conv *Conversation
+	if fallback {
+		conv = s.store.Acquire(convKey, inputMsgs)
+	} else {
+		conv = s.store.AcquireKey(convKey)
+	}
 	s.logClientInfo(r, "", dir, convKey, inputMsgs)
 	defer s.store.Release(conv)
 
@@ -652,6 +663,32 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
+
+	// ---- 历史差分（仅无锚点回退链）----
+	// 必须先于 ensureSession：chat 路径同序。放后面的话，新建会话后 DiffReset
+	// 会把刚建好的 session 又 resetSession 清掉，prompt 落到空 sid 上，执行器
+	// 永远等不到终态（实测测试挂死）。
+	var fallbackDelta []ChatMessage
+	if fallback {
+		stored := conv.snapshotLast()
+		mode, delta := Diff(stored, inputMsgs)
+		switch mode {
+		case DiffReset:
+			if conv.snapshotSessionID() != "" {
+				s.log.Infof("responses: history mismatch, resetting session (key=%s)", conv.Key)
+				s.resetSession(conv)
+			}
+			delta = inputMsgs
+		case DiffNone:
+			// 同内容复读：重跑最后一条 user 消息（responses 路径没有 chat 式
+			// 响应缓存可回放），与 chat 的空缓存路径行为一致。
+			delta = lastUserTurn(inputMsgs)
+			if len(delta) == 0 {
+				delta = inputMsgs
+			}
+		}
+		fallbackDelta = delta
+	}
 
 	// ---- 工具 ----
 	if s.cfg.ToolCalling && len(tools) > 0 {
@@ -713,7 +750,18 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, st, typ, msg, "")
 		return
 	}
-	planText := Flatten(inputMsgs)
+	var planText string
+	if fallback {
+		delta := fallbackDelta
+		if conv.snapshotSessionID() == "" {
+			// 新建会话（sessionID 为空）必须发完整历史，否则模型没有上下文。
+			delta = inputMsgs
+		}
+		planText = FlattenDelta(delta)
+	} else {
+		// 锚点链（previous_response_id / X-Session-ID）：input 即增量，原样发送。
+		planText = Flatten(inputMsgs)
+	}
 	planText += s.firstTurnNote(conv, newSession)
 	// 附件：data URI 直传 / http(s) 下载；模型不支持该模态就丢弃并说明。
 	files, failed := ExtractAttachments(ctx, inputMsgs, s.httpc)

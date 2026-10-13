@@ -268,14 +268,23 @@ func responsesToolsToSpecs(raw json.RawMessage) []ToolSpec {
 		// 没有 name 字段。这里把它暴露成名为 web_search 的工具，由桥内部执行
 		// （与 Anthropic 的 web_search 服务端工具同一套，见 anthropic.go）。
 		if strings.HasPrefix(it.Type, "web_search") {
-			out = append(out, ToolSpec{
-				Type: "function",
-				Function: ToolFunction{
-					Name:        webSearchToolName,
-					Description: "搜索网页，返回标题/链接/摘要",
-					Parameters:  webSearchSchema,
-				},
-			})
+			dup := false
+			for _, t := range out {
+				if t.Function.Name == webSearchToolName {
+					dup = true // web_search / web_search_preview 同时声明只暴露一个
+					break
+				}
+			}
+			if !dup {
+				out = append(out, ToolSpec{
+					Type: "function",
+					Function: ToolFunction{
+						Name:        webSearchToolName,
+						Description: "搜索网页，返回标题/链接/摘要",
+						Parameters:  webSearchSchema,
+					},
+				})
+			}
 			continue
 		}
 		name, desc, params := it.Name, it.Description, it.Parameters
@@ -313,6 +322,28 @@ func responsesHasWebSearch(raw json.RawMessage) bool {
 	return false
 }
 
+// prependSystemMsg 把系统提示插到消息序列最前（去重由调用方负责）。
+func prependSystemMsg(msgs []ChatMessage, text string) []ChatMessage {
+	if text == "" {
+		return msgs
+	}
+	return append([]ChatMessage{{Role: "system", Content: MessageContent{Text: text}}}, msgs...)
+}
+
+// responsesInputItem 是 input[] 里的一项。
+type responsesInputItem struct {
+	Type    string          `json:"type"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+	// function_call
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+	// function_call_output：规范是 string，但客户端也可能发结构化形态
+	// （[{type:"output_text",...}] / {"text":...}），见 responsesItemOutputText。
+	Output json.RawMessage `json:"output"`
+}
+
 // responsesInputToMessages 把 input 转成内部消息。
 // 返回需要回填给 MCP 的工具结果（call_id -> output）。
 func responsesInputToMessages(input json.RawMessage) ([]ChatMessage, map[string]ToolResult) {
@@ -330,19 +361,14 @@ func responsesInputToMessages(input json.RawMessage) ([]ChatMessage, map[string]
 		return []ChatMessage{{Role: "user", Content: MessageContent{Text: s}}}, results
 	}
 
-	var items []struct {
-		Type    string          `json:"type"`
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-		// function_call
-		CallID    string `json:"call_id"`
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-		// function_call_output
-		Output string `json:"output"`
-	}
+	// 数组；不是数组时尝试单个 item 对象（部分客户端不发数组）
+	var items []responsesInputItem
 	if err := json.Unmarshal(input, &items); err != nil {
-		return nil, results
+		var one responsesInputItem
+		if err := json.Unmarshal(input, &one); err != nil {
+			return nil, results
+		}
+		items = []responsesInputItem{one}
 	}
 
 	var msgs []ChatMessage
@@ -364,15 +390,49 @@ func responsesInputToMessages(input json.RawMessage) ([]ChatMessage, map[string]
 				}},
 			})
 		case "function_call_output":
+			out := responsesItemOutputText(it.Output)
 			msgs = append(msgs, ChatMessage{
 				Role:       "tool",
 				ToolCallID: it.CallID,
-				Content:    MessageContent{Text: it.Output},
+				Content:    MessageContent{Text: out},
 			})
-			results[it.CallID] = ToolResult{Content: it.Output}
+			results[it.CallID] = ToolResult{Content: out}
 		}
 	}
 	return msgs, results
+}
+
+// responsesItemOutputText 归一化 function_call_output.output。规范定义为
+// string，但有客户端发 [{type:"output_text",text:...}] 或 {"text":...}；
+// 按 string 硬解析会让整包 input 解析失败（400），这里做形状容错。
+func responsesItemOutputText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	if t := responsesContentText(raw); t != "" {
+		return t
+	}
+	var obj struct {
+		Text    string          `json:"text"`
+		Content json.RawMessage `json:"content"`
+		Output  json.RawMessage `json:"output"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		if obj.Text != "" {
+			return obj.Text
+		}
+		if t := responsesContentText(obj.Content); t != "" {
+			return t
+		}
+		if t := responsesItemOutputText(obj.Output); t != "" {
+			return t
+		}
+	}
+	return string(raw)
 }
 
 // responsesContentText 提取 message item 的文本。
@@ -580,6 +640,20 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	tools := responsesToolsToSpecs(req.Tools)
 
+	// ---- instructions：Responses 的标准系统提示入口 ----
+	// chat 的系统提示在 messages[0]，Responses 客户端放在 instructions 字段；
+	// 只回显不注入的话模型完全看不到客户端系统提示。注入规则：
+	//   - 无锚点回退链：恒注入到消息序列，交给 Diff 去重（与 chat 的
+	//     system 消息同语义：不变→只发增量，变更→DiffReset 重开会话）。
+	//   - 锚点链（previous_response_id / X-Session-ID）：input 只是增量，
+	//     每轮注入会把同一段系统提示反复灌进会话，改为在 planText 处按需
+	//     注入（首轮 / 变更 / 新建会话），见下方 planText 组装处。
+	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
+	anchored := req.PreviousResponseID != "" || explicit != ""
+	if req.Instructions != "" && !anchored {
+		inputMsgs = prependSystemMsg(inputMsgs, req.Instructions)
+	}
+
 	// ---- 模型 ----
 	ocModels, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
 	if err != nil {
@@ -605,7 +679,6 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	scopeK, _ := s.scopeOf(r, r.Header.Get("X-OpenCode-Directory"), inputMsgs)
 	dir := s.sessionDir(r.Header.Get("X-OpenCode-Directory"), inputMsgs, scopeK)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
-	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
 
 	// ---- 会话：previous_response_id > X-Session-ID > 历史归属 ----
 	//
@@ -759,10 +832,21 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		planText = FlattenDelta(delta)
 	} else {
-		// 锚点链（previous_response_id / X-Session-ID）：input 即增量，原样发送。
 		planText = Flatten(inputMsgs)
+		// 锚点链增量语义：instructions 只随首轮 / 变更 / 新建会话注入一次，
+		// 避免每轮重复灌同一段系统提示。会话重建（newSession）时重新注入。
+		if req.Instructions != "" &&
+			(newSession || conv.snapshotInstructions() != req.Instructions) {
+			planText = Flatten([]ChatMessage{{Role: "system",
+				Content: MessageContent{Text: req.Instructions}}}) + "\n\n" + planText
+		}
 	}
 	planText += s.firstTurnNote(conv, newSession)
+	// 记录链上已注入的 instructions 版本，供下一轮去重判断（只在新一轮
+	// prompt 路径记录；工具结果回填轮不构建 prompt、不动快照）。
+	if req.Instructions != "" {
+		conv.setInstructions(req.Instructions)
+	}
 	// 附件：data URI 直传 / http(s) 下载；模型不支持该模态就丢弃并说明。
 	files, failed := ExtractAttachments(ctx, inputMsgs, s.httpc)
 	if m := FindModel(ocModels, ref); len(files) > 0 {

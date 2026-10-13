@@ -4,6 +4,39 @@
 
 ---
 
+## [v0.3.40] - 2026-10-13
+
+### 修复
+`/v1/responses` 接口标准化第二轮审查，补齐四处规范/健壮性缺口：
+
+- **`instructions` 只回显、从不注入 prompt（功能性缺陷）**：chat 的系统提示在
+  `messages[0]`，Responses 客户端（实测 Trae / Codex）放在 `instructions` 字段；
+  此前该字段只在响应对象里回显，模型完全看不到客户端系统提示。现按客户端锚定
+  方式注入：
+  - 无锚点回退链：恒注入到消息序列，交给 Diff 去重（与 chat 的 system 消息
+    同语义：不变→只发增量，变更→DiffReset 重开会话）；
+  - 锚点链（`previous_response_id` / `X-Session-ID`）：input 只是增量，在
+    planText 层按需注入（首轮 / instructions 变更 / 会话重建），同值续轮不重复
+    灌入；注入发生在消息层之前，不影响 `terminatedReplay` 的差分比较。
+  - 会话状态新增 instructions 快照（`Conversation.snapshotInstructions`）。
+- **`function_call_output.output` 非字符串形态导致整包 input 解析失败**：规范定义
+  为 string，但有客户端发 `[{type:"output_text",...}]` 或 `{"text":...}`；此前按
+  string 硬解析，任一项形状不符整个 input 数组反序列化失败 → 400。现逐项归一化
+  （`responsesItemOutputText`：string / 数组 / 对象 / 兜底原样序列化）。
+- **`input` 单对象形态 400**：官方为 string 或数组，手拼客户端可能发单个 item
+  对象，现兜底解析。
+- **`web_search` / `web_search_preview` 同时声明时重复注册**：现去重为单个
+  `web_search` 工具。
+
+### 验证
+- `go vet` + `go test ./...` 全绿；新增 5 项回归：
+  `TestResponsesInputStructuredToolOutput` / `TestResponsesInputSingleObject` /
+  `TestResponsesWebSearchDedup` / `TestPrependSystemMsg` /
+  `TestResponsesInstructionsAnchoredChain`（锚点链首轮注入、同值续轮去重、
+  变更重注入三条断言）。
+
+---
+
 ## [v0.3.39] - 2026-10-12
 
 ### 修复

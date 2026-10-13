@@ -93,6 +93,78 @@ func TestResponsesContentText(t *testing.T) {
 	}
 }
 
+// function_call_output.output 的结构化形态（数组 / 对象）：不能让整包 input
+// 解析失败回退成 400（规范是 string，但实测有客户端发结构化形态）。
+func TestResponsesInputStructuredToolOutput(t *testing.T) {
+	raw := json.RawMessage(`[
+	  {"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"call_1",
+	   "output":[{"type":"output_text","text":"晴，24°C"}]},
+	  {"type":"function_call_output","call_id":"call_2",
+	   "output":{"type":"output_text","text":"多云"}},
+	  {"type":"function_call_output","call_id":"call_3","output":"纯字符串"}
+	]`)
+	msgs, results := responsesInputToMessages(raw)
+	if len(msgs) != 4 {
+		t.Fatalf("len = %d: %+v", len(msgs), msgs)
+	}
+	if results["call_1"].Content != "晴，24°C" {
+		t.Errorf("数组形态 output 未提取: %+v", results)
+	}
+	if results["call_2"].Content != "多云" {
+		t.Errorf("对象形态 output 未提取: %+v", results)
+	}
+	if results["call_3"].Content != "纯字符串" {
+		t.Errorf("字符串形态 output 应原样: %+v", results)
+	}
+}
+
+// input 单对象（非数组、非字符串）：手拼客户端可能不发数组，不应 400。
+func TestResponsesInputSingleObject(t *testing.T) {
+	msgs, _ := responsesInputToMessages(json.RawMessage(`{"role":"user","content":"你好"}`))
+	if len(msgs) != 1 || msgs[0].Role != "user" || msgs[0].Content.Text != "你好" {
+		t.Fatalf("%+v", msgs)
+	}
+	msgs, _ = responsesInputToMessages(json.RawMessage(
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`))
+	if len(msgs) != 1 || msgs[0].Content.Text != "hi" {
+		t.Fatalf("%+v", msgs)
+	}
+}
+
+// web_search / web_search_preview 同时声明时只暴露一个 web_search 工具。
+func TestResponsesWebSearchDedup(t *testing.T) {
+	raw := json.RawMessage(`[
+	  {"type":"web_search"},
+	  {"type":"web_search_preview"},
+	  {"type":"function","name":"f","description":"x"}
+	]`)
+	got := responsesToolsToSpecs(raw)
+	n := 0
+	for _, spec := range got {
+		if spec.Function.Name == webSearchToolName {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("web_search 应去重为 1 个，实际 %d: %+v", n, got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("工具数 = %d, want 2: %+v", len(got), got)
+	}
+}
+
+func TestPrependSystemMsg(t *testing.T) {
+	msgs := []ChatMessage{{Role: "user", Content: MessageContent{Text: "hi"}}}
+	got := prependSystemMsg(msgs, "sys")
+	if len(got) != 2 || got[0].Role != "system" || got[0].Content.Text != "sys" {
+		t.Fatalf("%+v", got)
+	}
+	if prependSystemMsg(msgs, "")[0].Role != "user" {
+		t.Fatal("空 instructions 不应改动消息")
+	}
+}
+
 // ---------- 输出转换 ----------
 
 func TestBuildResponsesOutputMessage(t *testing.T) {
@@ -543,6 +615,40 @@ func TestResponsesToolResultContinuation(t *testing.T) {
 	}
 	if got.PreviousResponseID == nil || *got.PreviousResponseID != "resp_prev" {
 		t.Fatalf("previous_response_id = %v", got.PreviousResponseID)
+	}
+}
+
+// 锚点链 instructions 注入：首轮 prompt 必须带 [SYSTEM]，同值续轮不重复注入，
+// 变更后重新注入（增量语义，不能每轮把同一段系统提示灌进会话）。
+func TestResponsesInstructionsAnchoredChain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("依赖空闲判定")
+	}
+	stub, _, prompts := stubChainUpstream(t)
+	srv := chainServer(t, stub)
+
+	post := func(body string) {
+		t.Helper()
+		rec, _ := postResponseWithHeader(t, srv, body, "X-Session-ID", "I1")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	post(`{"model":"default","instructions":"你是代码助手","input":"hi"}`)
+	post(`{"model":"default","instructions":"你是代码助手","input":"next"}`)
+	post(`{"model":"default","instructions":"你是翻译助手","input":"more"}`)
+
+	if len(*prompts) != 3 {
+		t.Fatalf("prompts = %d: %#q", len(*prompts), *prompts)
+	}
+	if !strings.Contains((*prompts)[0], "[SYSTEM]") || !strings.Contains((*prompts)[0], "你是代码助手") {
+		t.Errorf("首轮应注入 instructions: %#q", (*prompts)[0])
+	}
+	if strings.Contains((*prompts)[1], "你是代码助手") {
+		t.Errorf("同值续轮不应重复注入: %#q", (*prompts)[1])
+	}
+	if !strings.Contains((*prompts)[2], "你是翻译助手") {
+		t.Errorf("变更后应重新注入: %#q", (*prompts)[2])
 	}
 }
 

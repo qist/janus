@@ -28,6 +28,7 @@ type Conversation struct {
 	lastMessages []ChatMessage // 上次成功发给上游的完整 messages
 	sessionID    string
 	lastResponse *ChatResponse // DiffNone 时直接复用
+	instructions string        // Responses 链上已注入会话的 instructions（去重用）
 
 	agent     string
 	model     OCModelRef
@@ -111,6 +112,18 @@ func (c *Conversation) snapshotResponse() *ChatResponse {
 func (c *Conversation) setResponse(r *ChatResponse) {
 	c.stateMu.Lock()
 	c.lastResponse = r
+	c.stateMu.Unlock()
+}
+
+func (c *Conversation) snapshotInstructions() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.instructions
+}
+
+func (c *Conversation) setInstructions(s string) {
+	c.stateMu.Lock()
+	c.instructions = s
 	c.stateMu.Unlock()
 }
 

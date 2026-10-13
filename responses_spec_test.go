@@ -83,10 +83,30 @@ func emitSampleStream(t *testing.T, withReasoning bool) string {
 	final := *skel
 	final.Status = "completed"
 	final.Output = st.items
+	final.Usage = &ResponsesUsage{} // 生产路径经 usageOrZero 恒带 usage
 	st.event("response.completed", map[string]any{"response": &final})
 	ss.markClosed()
 
 	return rec.Body.String()
+}
+
+// response.completed 事件里的 response 必带 usage：官方流恒带（工具调用轮也带，
+// 至少 input tokens），缺失会被严格解析器（实测 Trae）判整个事件非法 →
+// 静默丢弃 → 客户端不执行 function_call。
+func TestResponsesSSECompletedCarriesUsage(t *testing.T) {
+	raw := emitSampleStream(t, false)
+	events := parseSSE(t, raw)
+	comp, ok := events["response.completed"]
+	if !ok {
+		t.Fatal("无 response.completed 事件")
+	}
+	resp, ok := comp["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("response 字段类型异常: %T", comp["response"])
+	}
+	if _, present := resp["usage"]; !present {
+		t.Error("response.completed 的 response 缺 usage 字段")
+	}
 }
 
 // TestResponsesSSEEventFieldsMatchSpec 锁死所有 SSE 事件的必填字段，

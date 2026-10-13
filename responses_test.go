@@ -698,6 +698,36 @@ func TestResponsesInstructionsAnchoredChain(t *testing.T) {
 	}
 }
 
+// 中止重置：上一轮被用户中止后发新内容，会话重建且 prompt 末尾带放弃指令；
+// 否则历史重放客户端带来的旧任务上下文会让模型继续执行中断的任务
+// （实测：中断后发新问题，回答仍回到旧任务）。
+func TestResponsesInterruptedResetNote(t *testing.T) {
+	if testing.Short() {
+		t.Skip("依赖空闲判定")
+	}
+	stub, _, prompts := stubChainUpstream(t)
+	srv := chainServer(t, stub)
+
+	conv := srv.store.AcquireKey("x:T1")
+	conv.setSessionID("ses_old")
+	conv.markTerminated()
+	srv.store.Release(conv)
+
+	rec, _ := postResponseWithHeader(t, srv, `{"model":"default","input":"新问题"}`, "X-Session-ID", "T1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*prompts) != 1 {
+		t.Fatalf("prompts = %d", len(*prompts))
+	}
+	if !strings.Contains((*prompts)[0], "[中断重置]") {
+		t.Errorf("中止重置说明未注入: %#q", (*prompts)[0])
+	}
+	if !strings.Contains((*prompts)[0], "新问题") {
+		t.Errorf("新问题未发送: %#q", (*prompts)[0])
+	}
+}
+
 // Chat 与 Responses 用同一个 X-Session-ID 锚点时，必须复用同一个 OpenCode session
 // （统一命名空间 x:<id>），并回吐 X-Janus-Session 头给客户端。
 func TestChatAndResponsesShareSessionAnchor(t *testing.T) {

@@ -346,6 +346,7 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 		s.log.Warnf("responses empty completion: sid=%s code=%s msg=%s", sid, code, msg)
 		failed := *skeleton
 		failed.Status = "failed"
+		failed.Usage = &ResponsesUsage{}
 		e := openAIError{Message: msg, Type: typ, Code: code}
 		failed.Error = &e
 		st.event("response.failed", map[string]any{"response": failed})
@@ -362,10 +363,22 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 	if len(t.tools) == 0 {
 		final.OutputText = t.res.text
 	}
-	final.Usage = usageToResponses(t.res.usage)
+	final.Usage = usageOrZero(t.res.usage)
 	applyIncomplete(final, t)
 	if req.Store == nil || *req.Store {
 		s.responses.put(final, conv.Key, dir)
 	}
 	st.event("response.completed", map[string]any{"response": final})
+}
+
+// usageOrZero 归一化 usage：官方 Response 对象（含 response.completed 事件里
+// 的）恒带 usage，工具调用轮上游还没产出带 token 的消息、统计为全零时也必须
+// 带（补零值对象）。缺失会让严格解析器（实测 Trae custom_responses_compatible）
+// 判整个 completed 事件非法 → 静默丢弃 → 客户端永远不执行 function_call
+// （实测表现：工具调用轮客户端收到后 90s 无任何后续请求，文本轮正常）。
+func usageOrZero(u Usage) *ResponsesUsage {
+	if out := usageToResponses(u); out != nil {
+		return out
+	}
+	return &ResponsesUsage{}
 }

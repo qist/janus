@@ -816,7 +816,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, 499, "api_error", "generation was interrupted by the client; the previous turn will not be re-run automatically", "canceled")
 		return
 	}
+	wasTerminated := false
 	if conv.snapshotTerminated() {
+		wasTerminated = true
 		s.consumeTerminated(conv)
 	}
 
@@ -940,6 +942,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ---- 发 prompt（必须先订阅事件再发，否则丢开头）----
 	planText := FlattenDelta(delta)
 	planText += s.firstTurnNote(conv, newSession)
+	// 会话因上一轮被用户中止而重建：客户端仍会重发旧任务上下文，模型会把
+	// 中断的任务当未完成工作继续执行（实测：中断后发新问题仍回到旧任务）。
+	if wasTerminated {
+		planText += interruptedTaskNote()
+	}
 
 	// 图片：data URI 直传，http(s) 下载转 base64。失败的 URL 以文字说明补进 prompt，
 	// 免得模型以为用户根本没发图（实测会出现"未看到图片"这种误导性回答）。

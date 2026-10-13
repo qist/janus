@@ -709,7 +709,9 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, 499, "api_error", "generation was interrupted by the client; the previous turn will not be re-run automatically", "canceled")
 		return
 	}
+	wasTerminated := false
 	if conv.snapshotTerminated() {
+		wasTerminated = true
 		s.consumeTerminated(conv)
 	}
 
@@ -839,6 +841,12 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			Content: MessageContent{Text: req.Instructions}}}) + "\n\n" + planText
 	}
 	planText += s.firstTurnNote(conv, newSession)
+	// 会话因上一轮被用户中止而重建：历史重放型客户端仍会全量重发旧任务上下文，
+	// 模型会把中断的任务当未完成工作继续执行（实测：中断后发新问题仍回到旧任务）。
+	// 末尾显式告知放弃，末位指令权重最高。
+	if wasTerminated {
+		planText += interruptedTaskNote()
+	}
 	// 记录链上已注入的 instructions 版本，供下一轮去重判断（只在新一轮
 	// prompt 路径记录；工具结果回填轮不构建 prompt、不动快照）。
 	if req.Instructions != "" {
@@ -953,7 +961,7 @@ func (s *Server) finishResponses(ctx context.Context, w http.ResponseWriter, r *
 	respObj.Status = responsesStatus(t)
 	respObj.Output = out
 	respObj.OutputText = text
-	respObj.Usage = usageToResponses(t.res.usage)
+	respObj.Usage = usageOrZero(t.res.usage)
 	applyIncomplete(respObj, t)
 	if respObj.Status == "failed" && t.failure != nil {
 		e := openAIError{Message: t.failure.String(), Type: "api_error"}

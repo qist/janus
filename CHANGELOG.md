@@ -4,6 +4,37 @@
 
 ---
 
+## [v0.3.42] - 2026-10-13
+
+### 修复
+`/v1/responses` 工具调用两处收尾缺陷（Trae `custom_responses_compatible`
+实测定位）：
+
+- **工具轮 `response.completed` 缺 `usage`（"文本通、工具不通"的根因）**：
+  官方流 `completed` 事件恒带 `usage`（工具调用轮也有，至少 input tokens）。
+  此前工具调用轮上游尚未产出带 token 的消息、统计全零时 `usageToResponses`
+  返回 nil → `usage` 整个缺失 → 严格解析器判整个事件非法 → 静默丢弃 →
+  客户端永远不执行 function_call、不回传结果。文本轮带 usage 所以一直正常，
+  症状表现为"客户端收到 function_call 后 90s 无任何后续请求"→ 桥侧工具等待
+  超时 → 会话标记 terminated → 客户端重试相同内容 → 499 防回放护栏。
+  现新增 `usageOrZero`：`completed` / `failed` / 非流式响应恒带 usage
+  （未知时补零值对象）。
+- **中止重置说明**：会话因上一轮被用户手动中止而重建时，历史重放型客户端
+  仍会把旧任务的完整上下文（含半途的工具调用记录）全量重发，模型把中断的
+  任务当未完成工作继续执行（实测：中断后发新问题，回答仍回到旧任务）。
+  现于 prompt 末尾注入 `[中断重置]` 放弃指令（末位指令权重最高），
+  chat / responses 两路径一致。
+
+### 验证
+- `go vet` + `go test ./...` 全绿；新增回归
+  `TestResponsesSSECompletedCarriesUsage`（completed 事件必带 usage）、
+  `TestResponsesInterruptedResetNote`（中止重置注入 + 新问题正常发送）。
+- 180 上线后实测：Trae 经 `/v1/responses` 的工具往返全面恢复
+  （RunCommand / Read / Glob / Grep / SearchReplace / AskUserQuestion 连续
+  投递成功），重启后零 499 / 零超时告警。
+
+---
+
 ## [v0.3.41] - 2026-10-13
 
 ### 修复

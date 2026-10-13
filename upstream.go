@@ -298,6 +298,11 @@ func (u *Upstream) AddMCP(ctx context.Context, directory, name, mcpURL string,
 	cfg := map[string]any{
 		"type": "remote",
 		"url":  mcpURL,
+		// v2 默认 codemode=true：工具经 Code Mode 包装执行，包装路径实测在
+		// 30s 掐断工具调用（v2 文档 execution 默认 12h，但包装层不遵守——
+		// IDE 侧跑 90s 的 go build 时 opencode 连续 4 次 mcp transport error，
+		// 回合卡死）。桥需要工具直透（与 v2 之前的行为一致），显式关闭。
+		"codemode": false,
 	}
 	if len(headers) > 0 {
 		cfg["headers"] = headers

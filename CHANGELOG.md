@@ -4,6 +4,39 @@
 
 ---
 
+## [v0.3.41] - 2026-10-13
+
+### 修复
+`/v1/responses` 工具调用链路两处缺陷（实测复现：历史重放型客户端 MCP 工具
+调不通，回填请求挂死）：
+
+- **无锚点工具结果回填被整体跳过（核心缺陷）**：回填分支此前要求
+  `previous_response_id` 存在（`prev != nil`）。历史重放型客户端（实测
+  CodeBuddy / hertz UA）不发任何锚点，回填请求靠历史归属路由到同一会话，
+  却被挡在回填之外——`function_call_output` 被 Flatten 成新 prompt 发给还
+  停在 MCP `tools/call` 上的上游会话：请求挂死（实测 150s 无响应），挂起
+  调用直到 90s/30m 超时才中断，工具调用永远完不成。现对齐 chat 路径：
+  回填分支移到历史差分之前、条件只看「会话上有挂起调用且 input 携带工具
+  结果」，锚点与历史重放两种客户端都能回填。
+- **回填轮不快照历史**：投递成功后未 `setLast` / `persistConv`，下一轮
+  全量重放的差分把 function_call / tool result 当增量重发（数据回放）。
+  现与 chat 的回填路径一致，投递前快照。
+- **v0.3.40 的 instructions 注入方式回退重构**：注入进消息序列会让
+  instructions 参与 Diff / 前缀匹配——instructions 每次请求变化的客户端会
+  前缀失配 → 每请求新建会话（实测：MCP 重注册风暴、上下文反复丢失、挂起
+  的工具调用随旧会话蒸发）。现统一在 planText 层按需注入（首轮 / 变更 /
+  会话重建），不进消息序列；锚点链的「同值续轮不重复注入」语义保留。
+
+### 验证
+- `go vet` + `go test ./...` 全绿；新增
+  `TestResponsesToolResultNoAnchorContinuation`（无锚点回填端到端：投递
+  到挂起调用、不新建 session）。
+- 180 实测复现闭环：修复前无锚点回填请求挂死 150s；修复后同一请求正常
+  返回（`responses tool results delivered: answered=1/1`），模型基于工具
+  结果给出最终回答。带 `previous_response_id` 的锚点回填回归通过。
+
+---
+
 ## [v0.3.40] - 2026-10-13
 
 ### 修复

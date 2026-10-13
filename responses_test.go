@@ -154,14 +154,60 @@ func TestResponsesWebSearchDedup(t *testing.T) {
 	}
 }
 
-func TestPrependSystemMsg(t *testing.T) {
-	msgs := []ChatMessage{{Role: "user", Content: MessageContent{Text: "hi"}}}
-	got := prependSystemMsg(msgs, "sys")
-	if len(got) != 2 || got[0].Role != "system" || got[0].Content.Text != "sys" {
-		t.Fatalf("%+v", got)
+// 无锚点回填（历史重放型客户端，实测 CodeBuddy / hertz）：不发
+// previous_response_id，靠历史归属把请求路由回同一会话。此前回填分支要求
+// prev != nil，重放客户端的工具结果永远送不到挂起的 MCP 调用上（实测复现：
+// 回填请求被当新 prompt 发给 busy 会话，挂死到超时）。
+func TestResponsesToolResultNoAnchorContinuation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("依赖空闲判定")
 	}
-	if prependSystemMsg(msgs, "")[0].Role != "user" {
-		t.Fatal("空 instructions 不应改动消息")
+	stub, sessions, _ := stubChainUpstream(t)
+	srv := chainServer(t, stub)
+
+	// 构造与 handler 相同的回退链路由：conversationKey 按内容推导
+	inputMsgs := []ChatMessage{
+		{Role: "user", Content: MessageContent{Text: "列出当前目录文件"}},
+		{Role: "assistant", ToolCalls: []ToolCall{{
+			ID: "call_1", Type: "function",
+			Function: &FunctionCall{Name: "list_files", Arguments: `{"path":"."}`},
+		}}},
+		{Role: "tool", ToolCallID: "call_1", Content: MessageContent{Text: "main.go README.md"}},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+	// 与 handler 同源推导 scope / dir / key：裸请求也有 per-scope 工作区，
+	// key 对 dir 敏感，差一步路由就落到别的会话上。
+	scopeK, _ := srv.scopeOf(req, "", inputMsgs)
+	dir := srv.sessionDir("", inputMsgs, scopeK)
+	key := srv.conversationKey(req, "", firstSystem(inputMsgs), "", dir, inputMsgs)
+
+	// 预置：上一轮已挂起 call_1 的会话，stored 历史是 incoming 的前缀
+	conv := srv.store.AcquireKey(key)
+	conv.setSessionID("ses_x")
+	conv.setLast(cloneMessages(inputMsgs[:1]))
+	pc := &pendingCall{CallID: "call_1", ToolName: "list_files", Args: `{"path":"."}`, result: make(chan ToolResult, 1)}
+	conv.setPendingToolCalls([]*pendingCall{pc})
+	srv.store.Release(conv)
+
+	body := `{"model":"default","store":true,"input":[
+	  {"role":"user","content":"列出当前目录文件"},
+	  {"type":"function_call","call_id":"call_1","name":"list_files","arguments":"{\"path\":\".\"}"},
+	  {"type":"function_call_output","call_id":"call_1","output":"main.go README.md"}]}`
+	rec, _ := postResponse(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case res := <-pc.result:
+		if res.Content != "main.go README.md" || res.IsError {
+			t.Fatalf("回填结果不对: %+v", res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("无锚点回填没有被投递到挂起的工具调用")
+	}
+	if n := atomic.LoadInt32(sessions); n != 0 {
+		t.Fatalf("回填不该新建 session，实际 %d", n)
 	}
 }
 

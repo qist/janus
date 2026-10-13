@@ -322,14 +322,6 @@ func responsesHasWebSearch(raw json.RawMessage) bool {
 	return false
 }
 
-// prependSystemMsg 把系统提示插到消息序列最前（去重由调用方负责）。
-func prependSystemMsg(msgs []ChatMessage, text string) []ChatMessage {
-	if text == "" {
-		return msgs
-	}
-	return append([]ChatMessage{{Role: "system", Content: MessageContent{Text: text}}}, msgs...)
-}
-
 // responsesInputItem 是 input[] 里的一项。
 type responsesInputItem struct {
 	Type    string          `json:"type"`
@@ -640,20 +632,6 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	tools := responsesToolsToSpecs(req.Tools)
 
-	// ---- instructions：Responses 的标准系统提示入口 ----
-	// chat 的系统提示在 messages[0]，Responses 客户端放在 instructions 字段；
-	// 只回显不注入的话模型完全看不到客户端系统提示。注入规则：
-	//   - 无锚点回退链：恒注入到消息序列，交给 Diff 去重（与 chat 的
-	//     system 消息同语义：不变→只发增量，变更→DiffReset 重开会话）。
-	//   - 锚点链（previous_response_id / X-Session-ID）：input 只是增量，
-	//     每轮注入会把同一段系统提示反复灌进会话，改为在 planText 处按需
-	//     注入（首轮 / 变更 / 新建会话），见下方 planText 组装处。
-	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
-	anchored := req.PreviousResponseID != "" || explicit != ""
-	if req.Instructions != "" && !anchored {
-		inputMsgs = prependSystemMsg(inputMsgs, req.Instructions)
-	}
-
 	// ---- 模型 ----
 	ocModels, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
 	if err != nil {
@@ -679,6 +657,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	scopeK, _ := s.scopeOf(r, r.Header.Get("X-OpenCode-Directory"), inputMsgs)
 	dir := s.sessionDir(r.Header.Get("X-OpenCode-Directory"), inputMsgs, scopeK)
 	agent := firstNonEmpty(r.Header.Get("X-OpenCode-Agent"), s.cfg.Agent)
+	explicit := firstNonEmpty(r.Header.Get("X-Session-ID"), r.Header.Get("X-OpenCode-Session"))
 
 	// ---- 会话：previous_response_id > X-Session-ID > 历史归属 ----
 	//
@@ -737,6 +716,49 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 
+	// ---- 续链：客户端回填了上轮的工具结果 → 唤醒 agent，不重发 prompt ----
+	//
+	// 必须先于历史差分（chat 同序），且不能要求 previous_response_id：
+	// 历史重放型客户端（实测 CodeBuddy / hertz）不发任何锚点，回填请求靠
+	// conversationKey / scope 归还到同一会话。此前 prev != nil 的条件把它们
+	// 挡在回填之外——工具结果被 Flatten 成新 prompt 发给还停在 MCP
+	// tools/call 上的上游会话，请求挂死，挂起调用直到超时才中断（实测复现：
+	// 回填请求 150s 无响应、模型侧永远等不到结果）。
+	// 条件只看挂起调用：它只能由工具桥创建（ToolCalling 开启时的某一轮），
+	// 它的存在本身就是要件；回填请求甚至可能不再携带 tools 声明。
+	var sub *subscription
+	if conv.snapshotSessionID() != "" &&
+		len(toolResults) > 0 && len(conv.pendingToolCalls()) > 0 {
+		pending := livePending(conv.pendingToolCalls())
+		conv.setPendingToolCalls(nil)
+		if len(pending) == 0 {
+			// 回填来得太晚：上轮工具调用已全部超时，agent 已被释放/中断。
+			// 续跑只会空转后报错，按新的一轮继续。客户端可能一次回填整批积压
+			// 旧结果（含早已消费过的），必须剥掉，否则被 Flatten 进新 prompt、
+			// agent 把旧数据当新上下文用（数据回放）。
+			s.log.Warnf("responses tool results arrived after all pending calls timed out (conv=%s); treating as new turn",
+				conv.Key)
+			inputMsgs = stripStaleToolResults(inputMsgs)
+		} else {
+			// 快照历史（与 chat 的回填路径一致）：下一轮全量重放的差分
+			// 依赖它，缺了会把 function_call / tool result 当增量重发（数据回放）。
+			conv.setLast(cloneMessages(inputMsgs))
+			s.persistConv(conv)
+			if _, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs); err != nil {
+				st, typ, msg := s.mapUpstreamError(err)
+				writeOpenAIError(w, st, typ, msg, "")
+				return
+			}
+			sub = s.bus.Subscribe(conv.snapshotSessionID(), 512)
+			defer sub.cancel()
+			promptAt := time.Now().UnixMilli()
+			s.deliverToolResults(conv, pending, toolResults, inputMsgs)
+			setSessionHeaders(w, conv)
+			s.finishResponses(ctx, w, r, req, ref, conv, sub, promptAt, dir)
+			return
+		}
+	}
+
 	// ---- 历史差分（仅无锚点回退链）----
 	// 必须先于 ensureSession：chat 路径同序。放后面的话，新建会话后 DiffReset
 	// 会把刚建好的 session 又 resetSession 清掉，prompt 落到空 sid 上，执行器
@@ -786,36 +808,6 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ---- 续链：先回填上一轮的工具结果，再放行 ----
-	var sub *subscription
-	if prev != nil && len(conv.pendingToolCalls()) > 0 && len(toolResults) > 0 {
-		pending := livePending(conv.pendingToolCalls())
-		conv.setPendingToolCalls(nil)
-		if len(pending) == 0 {
-			// 回填来得太晚：上轮工具调用已全部超时，agent 已被释放/中断。
-			// 续跑只会空转后报错，按新的一轮继续。客户端可能一次回填整批积压
-			// 旧结果（含早已消费过的），必须剥掉，否则被 Flatten 进新 prompt、
-			// agent 把旧数据当新上下文用（数据回放）。
-			s.log.Warnf("responses tool results arrived after all pending calls timed out (conv=%s); treating as new turn",
-				conv.Key)
-			inputMsgs = stripStaleToolResults(inputMsgs)
-		} else {
-			// 先确保会话存在
-			if _, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs); err != nil {
-				st, typ, msg := s.mapUpstreamError(err)
-				writeOpenAIError(w, st, typ, msg, "")
-				return
-			}
-			sub = s.bus.Subscribe(conv.snapshotSessionID(), 512)
-			defer sub.cancel()
-			promptAt := time.Now().UnixMilli()
-			s.deliverToolResults(conv, pending, toolResults, inputMsgs)
-			setSessionHeaders(w, conv)
-			s.finishResponses(ctx, w, r, req, ref, conv, sub, promptAt, dir)
-			return
-		}
-	}
-
 	// ---- 新的一轮：把 input 作为 prompt 发出 ----
 	newSession, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs)
 	if err != nil {
@@ -832,14 +824,19 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		planText = FlattenDelta(delta)
 	} else {
+		// 锚点链（previous_response_id / X-Session-ID）：input 即增量，原样发送。
 		planText = Flatten(inputMsgs)
-		// 锚点链增量语义：instructions 只随首轮 / 变更 / 新建会话注入一次，
-		// 避免每轮重复灌同一段系统提示。会话重建（newSession）时重新注入。
-		if req.Instructions != "" &&
-			(newSession || conv.snapshotInstructions() != req.Instructions) {
-			planText = Flatten([]ChatMessage{{Role: "system",
-				Content: MessageContent{Text: req.Instructions}}}) + "\n\n" + planText
-		}
+	}
+	// instructions：Responses 的标准系统提示入口（chat 的系统提示在 messages[0]）。
+	// 只回显不注入的话模型完全看不到客户端系统提示。统一在 planText 层按需注入
+	// （首轮 / 变更 / 会话重建），绝不进消息序列：instructions 参与 Diff /
+	// 前缀匹配后，instructions 每次请求变化的客户端会前缀失配 → 每请求新建
+	// 会话（实测：MCP 重注册风暴、上下文反复丢失、挂起的工具调用随会话蒸发）。
+	// 锚点链的增量语义下同值续轮也不重复注入，避免反复灌同一段系统提示。
+	if req.Instructions != "" &&
+		(newSession || conv.snapshotInstructions() != req.Instructions) {
+		planText = Flatten([]ChatMessage{{Role: "system",
+			Content: MessageContent{Text: req.Instructions}}}) + "\n\n" + planText
 	}
 	planText += s.firstTurnNote(conv, newSession)
 	// 记录链上已注入的 instructions 版本，供下一轮去重判断（只在新一轮

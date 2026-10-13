@@ -386,7 +386,9 @@ func LoadConfig() (Config, error) {
 		CORSOrigin: loader.str("BRIDGE_CORS_ORIGIN", ""),
 		LogLevel:   loader.str("BRIDGE_LOG_LEVEL", "info"),
 
-		ToolAnnotations:  loader.boolean("BRIDGE_TOOL_ANNOTATIONS", true),
+		// 默认关闭：注释是桥自己生成的内容，拼进正文违反透传原则
+		// （模型输出不含任何非模型文本）。需要进展可视化的纯聊天客户端显式开启。
+		ToolAnnotations:  loader.boolean("BRIDGE_TOOL_ANNOTATIONS", false),
 		MaxConversations: loader.integer("BRIDGE_MAX_CONVERSATIONS", 256),
 		MaxBodyBytes:     8 << 20,
 

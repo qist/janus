@@ -4,6 +4,37 @@
 
 ---
 
+## [v0.3.45] - 2026-10-14
+
+### 修复
+**会话重置后工具桥被"旧纪元残留"毒死（agent 判定工具通道断了并放弃任务）**。
+实测事故链：Trae 中止生成 → 重试 499 → 新内容重开会话 → agent 的全部工具
+调用连续失败 ~9 分钟后放弃并输出"请重连"（客户端还收不到这段文本，表现成
+无限"思考中"）。三个叠加缺陷：
+
+- **stale-token 调用按工具名重路由**：会话重置/工具集换指纹后，opencode
+  配置里残留旧 server（URL token 已失效），而全量重放型客户端（Trae）的
+  历史里带着旧纪元工具名，agent 依样调用 → 此前一律报
+  `stale (session was reset)`。现在 unknown token 的 tools/call 先按工具名
+  内嵌的会话命名空间（`ob_<key>_<tool>`）反查活会话，能对上就正常挂起执行，
+  兜底才报 stale。
+- **janitor 多目录对账**：MCP 注册按会话各自工作区目录写入（分桶会话在
+  `WorkspacesDir/<scope>` 下），此前只扫默认目录，残留永不清理。现在扫
+  默认目录 + 活跃会话目录 + `WorkspacesDir` 直接子目录（覆盖已被 GC 的
+  会话与 janus 重启后的残留）。
+- **孤儿守卫拒绝消息劝停 + abort 补 markStale**：旧拒绝文案结尾
+  "call a tool exposed for your current conversation" 被模型当成重试暗示，
+  实测连续换着花样调了 5 轮、每轮白等 30s。现按状态分流：已有挂起调用时
+  明确说"已在等客户端回填"，没有在飞请求时说明原因，都要求停止调工具并
+  收尾。另外上游主动掐断 tools/call 连接（opencode 侧超时/重启，实测挂起
+  5m56s 后 abort）此前不 markStale，挂起调用残留 live——现与超时路径一致。
+
+### 验证
+- `go vet` + `go test ./...` 全绿；新增 stale-token 重路由、stale 兜底、
+  拒绝消息分流、`Store.Directories` 去重四组测试。
+
+---
+
 ## [v0.3.44] - 2026-10-13
 
 ### 变更

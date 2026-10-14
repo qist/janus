@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -89,25 +91,47 @@ func (s *Server) removeTools(ctx context.Context, conv *Conversation, dir string
 }
 
 // sweepTools 清理"会话已经不在 store 里"的 MCP 注册，避免上游越积越多。
+//
+// 注册按会话各自的工作区目录写入：分桶会话在 WorkspacesDir/<scope> 下，同机
+// 会话在 BRIDGE_DIRECTORY 本身。只扫默认目录会漏掉分桶会话的残留（实测：残留
+// server 被上游持续暴露给模型，agent 调旧工具名全部报 stale 错误后放弃任务）。
+// 除 store 里的活跃目录外，再扫 WorkspacesDir 的直接子目录兜底——会话被 GC 或
+// janus 重启后，store 查不到对应目录，残留只能靠文件系统枚举。
 func (s *Server) sweepTools(ctx context.Context) {
-	names, err := s.up.ListMCP(ctx, s.cfg.Directory)
-	if err != nil {
-		return
+	dirs := map[string]bool{s.cfg.Directory: true}
+	for _, d := range s.store.Directories() {
+		dirs[d] = true
 	}
-	for _, n := range names {
-		if !strings.HasPrefix(n, mcpNamePrefix) {
+	if s.cfg.WorkspacesDir != "" {
+		if ents, err := os.ReadDir(s.cfg.WorkspacesDir); err == nil {
+			for _, e := range ents {
+				if e.IsDir() {
+					dirs[filepath.Join(s.cfg.WorkspacesDir, e.Name())] = true
+				}
+			}
+		}
+	}
+	live := map[string]bool{}
+	for _, n := range s.tools.RegisteredNames() {
+		live[n] = true
+	}
+	for dir := range dirs {
+		names, err := s.up.ListMCP(ctx, dir)
+		if err != nil {
 			continue
 		}
-		if s.tools.sessionByName(n) != nil {
-			continue // 还活着
-		}
-		if err := s.up.RemoveMCP(ctx, s.cfg.Directory, n); err == nil {
-			s.log.Infof("janitor removed stale mcp server %s", n)
+		for _, n := range names {
+			if !strings.HasPrefix(n, mcpNamePrefix) || live[n] {
+				continue
+			}
+			if err := s.up.RemoveMCP(ctx, dir, n); err == nil {
+				s.log.Infof("janitor removed stale mcp server %s (dir=%s)", n, dir)
+			}
 		}
 	}
 }
 
-// sessionByName 供 sweep 判断某个 MCP server 是否属于活跃会话。
+// sessionByName 按注册名查会话（byName 对账；测试也用）。
 func (b *ToolBridge) sessionByName(name string) *toolSession {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

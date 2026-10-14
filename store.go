@@ -420,6 +420,30 @@ func (s *Store) Count() int {
 	return n
 }
 
+// Directories 返回所有活跃会话的非空工作区目录（去重）。
+// janitor 对账 MCP 注册用：注册按会话各自目录写入，只扫默认目录会漏掉
+// 分桶会话（WorkspacesDir/<scope>）的残留。正在服务的会话跳过，下一轮再扫。
+func (s *Store) Directories() []string {
+	seen := map[string]bool{}
+	var out []string
+	s.mu.Lock()
+	for _, bucket := range s.dir {
+		for _, c := range bucket {
+			if !c.mu.TryLock() {
+				continue
+			}
+			d := c.directory
+			c.mu.Unlock()
+			if d != "" && !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
+	}
+	s.mu.Unlock()
+	return out
+}
+
 // GC 清掉长期不活动的会话，返回其上游 sessionID 供删除。
 // TryLock 保证不会卡在正在服务的请求上。
 func (s *Store) GC() []string {

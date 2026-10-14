@@ -9,6 +9,29 @@ import (
 	"time"
 )
 
+// Directories 汇总活跃会话的工作区目录（去重、跳过空值），供 janitor 多目录对账。
+func TestStoreDirectories(t *testing.T) {
+	s := NewStore(NewLogger("error"), 0, time.Hour, 8)
+	// Acquire 返回已加锁的会话，必须 Release，否则 Directories 的 TryLock 全部跳过
+	setDir := func(key, dir string) {
+		c := s.Acquire(key, []ChatMessage{m("user", "x")})
+		c.directory = dir
+		s.Release(c)
+	}
+	setDir("f:a", "/ws/a")
+	setDir("f:b", "/ws/b")
+	setDir("f:c", "/ws/a") // 与 a 同目录：必须去重
+	setDir("f:d", "")      // 无目录：不进结果
+
+	got := map[string]bool{}
+	for _, d := range s.Directories() {
+		got[d] = true
+	}
+	if len(got) != 2 || !got["/ws/a"] || !got["/ws/b"] {
+		t.Fatalf("Directories() = %v, want [/ws/a /ws/b]", got)
+	}
+}
+
 func TestNormalizeIDE(t *testing.T) {
 	cases := map[string]string{
 		"hertz":                                "trae",
@@ -130,6 +153,7 @@ func TestSessionDir(t *testing.T) {
 		t.Fatalf("header missing + msg found: got %q want %q", got, exists)
 	}
 }
+
 // ---------- 出向路径改写 ----------
 
 // TestPathRewriter 覆盖：完整替换、多匹配、不同 scope 不误伤、跨 delta 切断、终态 flush。
@@ -228,7 +252,7 @@ func TestSetPathRewrite(t *testing.T) {
 }
 
 // TestExecutorRewrite 验证 delta 流经 executor 时被改写、serverText 保持上游原文
-//（对账基准不受扰动）、终态 snapshot 补发扣住尾部且流式顺序正确。
+// （对账基准不受扰动）、终态 snapshot 补发扣住尾部且流式顺序正确。
 func TestExecutorRewrite(t *testing.T) {
 	from := "/var/lib/janus/workspaces/9a1138b442f6519"
 	to := "/home/dev/proj"

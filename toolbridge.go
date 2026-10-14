@@ -50,6 +50,7 @@ type ToolResult struct {
 	Content  string
 	IsError  bool
 	TimedOut bool // 客户端在 ToolCallWait 内没回结果（通常意味着客户端已离开）
+	Aborted  bool // 上游（OpenCode）自己掐断了 tools/call 连接（其侧超时/重启）
 }
 
 // serverToolFunc 是"由桥自己执行"的工具（如 Claude Code 的 web_search 服务端工具）。
@@ -224,6 +225,24 @@ func (b *ToolBridge) ByKey(key string) *toolSession {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.byKey[key]
+}
+
+// ResolveToolName 按暴露给 agent 的工具名（ob_<key>_<tool>）反查活跃会话。
+//
+// 用途：上游拿着已失效 token 的 MCP 配置（会话重置/工具集换指纹后的残留 server）
+// 发起 tools/call 时，URL token 对不上号，但工具名内嵌的会话命名空间仍指向活会话
+// ——按名字把调用救活，而不是回 "stale (session was reset)"。实测该场景成批出现：
+// 全量重放型客户端（Trae）的历史里带着旧纪元的工具名，agent 依样调用，全部失败后
+// 会认定"工具通道断了"并放弃任务。
+func (b *ToolBridge) ResolveToolName(mcpName string) (*toolSession, string, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, s := range b.byKey {
+		if original, ok := s.originalName(mcpName); ok {
+			return s, original, true
+		}
+	}
+	return nil, "", false
 }
 
 // Alias 为会话登记一个"实际注册到 OpenCode 的名字"。
@@ -597,7 +616,7 @@ func (b *ToolBridge) waitResult(ctx context.Context, p *pendingCall) ToolResult 
 	case r := <-p.result:
 		return r
 	case <-ctx.Done():
-		return ToolResult{Content: "bridge: tool call aborted: " + ctx.Err().Error(), IsError: true}
+		return ToolResult{Content: "bridge: tool call aborted: " + ctx.Err().Error(), IsError: true, Aborted: true}
 	case <-t.C:
 		if b.log != nil {
 			b.log.Warnf("tool call timed out: client did not return a result within %s (tool=%s conv=%s); releasing agent",

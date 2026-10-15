@@ -31,6 +31,12 @@ type Config struct {
 	AutostartUpstream bool
 	OpencodeBin       string
 
+	// OpencodeClient 是 janus 拉起的 OpenCode 对外声明的客户端身份
+	// （OPENCODE_CLIENT，显式转发给子进程）。OpenCode 用它填上游请求头
+	// x-opencode-client 与 User-Agent 尾段（opencode/latest/<ver>/<client>）。
+	// 空 = 不设置，交给 OpenCode 自己的默认（cli）。
+	OpencodeClient string
+
 	// ReuseExternal：是否复用已在跑的外部 OpenCode（OPENCODE_REUSE_EXTERNAL，默认 true）。
 	// 设为 false 时 janus 总是自己拉起一个，从而能通过 OPENCODE_CONFIG_CONTENT
 	// 注入自己生成的 agent 配置（复用外部实例时注入不生效）。
@@ -364,6 +370,7 @@ func LoadConfig() (Config, error) {
 
 		AutostartUpstream: loader.boolean("OPENCODE_AUTOSTART", true),
 		OpencodeBin:       loader.str("OPENCODE_BIN", ""),
+		OpencodeClient:    loader.str("OPENCODE_CLIENT", ""),
 		ReuseExternal:     loader.boolean("OPENCODE_REUSE_EXTERNAL", true),
 		UpstreamCleanup:   loader.boolean("BRIDGE_UPSTREAM_CLEANUP", true),
 

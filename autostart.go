@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -69,6 +70,41 @@ func randomPassword() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// opencodeEnv 组装拉起 OpenCode 用的子进程环境。
+//
+// 注意：janus.env 是当**配置文件**读的（JANUS_CONFIG），内容只在 janus 进程内
+// 解析成 Config，不会进 os.Environ()。因此凡是需要让子进程看到的项，都必须在这里
+// 显式追加——否则子进程只拿到 systemd 给的那几个变量。
+func opencodeEnv(cfg *Config, serverPassword string) []string {
+	// 先剔除继承来的同名项：这几个键由本函数权威决定。同名两份时子进程取值
+	// 未定义（Go 的 exec 保留最后一个，但不该依赖），显式去重更稳。
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, kv := range os.Environ() {
+		switch {
+		case strings.HasPrefix(kv, "OPENCODE_SERVER_PASSWORD="),
+			strings.HasPrefix(kv, managedUpstreamEnv+"="),
+			strings.HasPrefix(kv, opencodeConfigContentEnv+"="),
+			strings.HasPrefix(kv, "OPENCODE_CLIENT="):
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "OPENCODE_SERVER_PASSWORD="+serverPassword)
+	// 托管标记：退出清理、孤儿识别都靠它（详见 discover.go）。
+	env = append(env, managedUpstreamEnv+"="+managedUpstreamEnvValue)
+	// 自动注入 janus 需要的 agent 定义（内联配置，优先级高于全局/项目配置），
+	// 不再依赖手写 ~/.config/opencode/opencode.jsonc。
+	if content := opencodeInlineConfig(cfg); content != "" {
+		env = append(env, opencodeConfigContentEnv+"="+content)
+	}
+	// 客户端身份：OpenCode 用它填上游请求头 x-opencode-client 与 User-Agent
+	// 尾段（opencode/latest/<ver>/<client>）。空 = 交给 OpenCode 自己的默认（cli）。
+	if v := strings.TrimSpace(cfg.OpencodeClient); v != "" {
+		env = append(env, "OPENCODE_CLIENT="+v)
+	}
+	return env
+}
+
 // SpawnOpenCode 以随机端口拉起一个 `opencode serve`，等它就绪后返回端点。
 //
 // 进程用 Setsid 独立会话启动，stdout/stderr 丢弃；但 systemd 下它仍在
@@ -93,15 +129,7 @@ func SpawnOpenCode(ctx context.Context, log *Logger, cfg *Config) (*Endpoint, er
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	cmd := exec.Command(path, "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port))
-	env := append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+pass)
-	// 托管标记：退出清理、孤儿识别都靠它（详见 discover.go）。
-	env = append(env, managedUpstreamEnv+"="+managedUpstreamEnvValue)
-	// 自动注入 janus 需要的 agent 定义（内联配置，优先级高于全局/项目配置），
-	// 不再依赖手写 ~/.config/opencode/opencode.jsonc。
-	if content := opencodeInlineConfig(cfg); content != "" {
-		env = append(env, opencodeConfigContentEnv+"="+content)
-	}
-	cmd.Env = env
+	cmd.Env = opencodeEnv(cfg, pass)
 	cmd.Stdout = nil // /dev/null
 	cmd.Stderr = nil
 	detachProcess(cmd)

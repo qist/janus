@@ -4,6 +4,37 @@
 
 ---
 
+## [v0.3.48] - 2026-10-15
+
+### 新增
+- **`OPENCODE_CLIENT`**：指定 janus 拉起的 OpenCode 对外声明的客户端身份，
+  显式转发给子进程。OpenCode 用它填上游请求头 `x-opencode-client` 与
+  `User-Agent` 尾段（`opencode/latest/<ver>/<client>`）。空=交给 OpenCode
+  自己的默认（`cli`）。
+
+  为什么必须显式转发：`janus.env` 是当**配置文件**读的（`JANUS_CONFIG`），
+  内容只在 janus 进程内解析成 Config，**不会**进 `os.Environ()`。而 `SpawnOpenCode`
+  用 `os.Environ()` 组装子进程环境，所以只把变量写进 `janus.env` 不起作用——
+  子进程只拿到 systemd 给的那几个变量。现在由 `opencodeEnv()` 显式追加。
+
+  环境组装同时抽成 `opencodeEnv()` 并去重：`OPENCODE_SERVER_PASSWORD`、
+  `JANUS_MANAGED_UPSTREAM`、`OPENCODE_CONFIG_CONTENT`、`OPENCODE_CLIENT`
+  这几个由本函数权威决定的键，先剔除继承来的同名项再追加，避免同名两份、
+  子进程取值不定。
+
+### 测试
+- `autostart_test.go`：锁定 `OPENCODE_CLIENT` 的转发、空值不设置、
+  恰好多一份、以及原有密码/托管标记不被弄丢。
+
+### 验证
+- `go test ./...` 全绿（新增 2 项回归测试通过）。
+- 实测 `OPENCODE_CLIENT=desktop` 后，托管 opencode 进程的 `/proc/<pid>/environ`
+  含 `OPENCODE_CLIENT=desktop`；本机 opencode 为 v2.0.22，上游将看到
+  `opencode/latest/2.0.22/desktop` + `x-opencode-client: desktop`。
+- 流式请求 HTTP 200、字节 7631，会话创建正常。
+
+---
+
 ## [v0.3.47] - 2026-10-15
 
 ### 修复

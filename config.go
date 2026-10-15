@@ -67,6 +67,13 @@ type Config struct {
 	// 客户端项目路径在 janus 主机上不存在时，用它当会话目录，避免误认成别的项目。
 	WorkspacesDir string
 
+	// MCPTransport 决定工具桥注册到 OpenCode 的传输形态（BRIDGE_MCP_TRANSPORT）：
+	//   local（默认）：注册为 local(stdio) MCP server——opencode 拉起内嵌桥脚本，
+	//     stdio ↔ janus HTTP。绕开 Bun fetch 对 remote 请求的 ~360s 总时长硬顶
+	//     （长工具调用必死，实测复现）。
+	//   remote：旧行为，直连 janus 的 /mcp/<token> HTTP 端点（受上述硬顶制约）。
+	MCPTransport string
+
 	SessionTTL        time.Duration // 会话空闲回收
 	SharedSessionTTL  time.Duration // 共享（scope）会话空闲回收；<0 = 永不回收
 	RequestTimeout    time.Duration // 单次补全超时
@@ -420,6 +427,7 @@ func LoadConfig() (Config, error) {
 		ToolCompanions:   loader.boolean("BRIDGE_TOOL_COMPANIONS", true),
 		ToolOrphanWait:   loader.dur("BRIDGE_TOOL_ORPHAN_WAIT", 30*time.Second),
 		MCPPublicURL:     strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
+		MCPTransport:     loader.str("BRIDGE_MCP_TRANSPORT", "local"),
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),

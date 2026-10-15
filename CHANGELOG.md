@@ -4,6 +4,38 @@
 
 ---
 
+## [v0.3.46] - 2026-10-15
+
+### 修复
+**长工具调用（编译/测试/发布类命令，客户端执行 >6 分钟）必被掐死**。根因在
+opencode 的运行时 Bun：其 `fetch` 对 remote 请求有 **~360 秒总时长硬顶**——
+无视调用方 AbortSignal（30m signal 照样 360.3s 死）、无视数据流动（20s 心跳
+保活照样死，均实测复现），且无环境变量可调。janus 下发的
+`timeout.execution=30m` 只到达 SDK 的 setTimeout 层，永远轮不到它生效。
+症状：模型发起编译 → 客户端执行数分钟 → opencode 360s 掐断挂起调用 →
+agent 视为超时开始重试 → 全部撞孤儿守卫 → 客户端最终带着一堆已过期结果
+回来 → 被判新话题重开会话，任务反复断开（实测 75 次 TimeoutError）。
+
+**修复：工具桥默认改为 local(stdio) 注册**（`BRIDGE_MCP_TRANSPORT=local`，
+可设 `remote` 回退旧行为）：
+- janus 内嵌桥脚本 `mcpbridge.js`（stdio ↔ janus HTTP 代理），注册为
+  local(stdio) MCP server，由 opencode 以内嵌 Bun 运行时拉起；
+- 桥脚本自己的 fetch 显式传 Bun 非标准 `timeout` 选项（实测可覆盖 360s 硬顶，
+  ToolCallWait 30m + 30s 余量），单次调用存活期不再受 6 分钟制约；
+- 脚本落点：workspace 会话写进 scope 目录（workspace 驱动的子进程只见沙箱内
+  路径，实测 /tmp 不可见）；同机项目会话写中央数据目录，不弄脏用户项目；
+- 注册失败（老版本 opencode 不认 local 类型等）自动退回 remote，工具链路
+  始终可用；codemode=false 与工具集指纹改名机制对 local 同样生效。
+
+### 验证
+- Bun 1.4.2 三组实证：默认 360.3s 掐断、keepalive 无效（总时长性质）、
+  `timeout` 选项覆盖后 600s 请求存活。
+- local 注册实测：opencode `mcp connected tools=1`，codemode=false 生效。
+- `go vet` + `go test ./...` 全绿；新增脚本落点决策、幂等写入、注册配置
+  断言三组测试；>360s 真实工具往返验证见部署冒烟。
+
+---
+
 ## [v0.3.45] - 2026-10-14
 
 ### 修复

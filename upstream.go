@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -319,6 +320,44 @@ func (u *Upstream) AddMCP(ctx context.Context, directory, name, mcpURL string,
 	if err != nil {
 		// 上游这个接口出错时常常是 500 + 空 body，包一层上下文才有可读性
 		return fmt.Errorf("register MCP server %q for directory %q: %w", name, directory, err)
+	}
+	return nil
+}
+
+// AddMCPStdio 以 local(stdio) 形态注册 MCP server：opencode 自己拉起桥脚本
+// （内嵌 Bun 运行时），stdio ↔ janus HTTP 端点。
+//
+// 为什么不用 remote：Bun fetch 对 remote 请求有 ~360s 总时长硬顶（无视
+// AbortSignal 与数据流动，实测复现），长工具调用（客户端侧编译/测试/发布）
+// 必然被掐死。stdio 由桥脚本自管 fetch 超时绕开。
+func (u *Upstream) AddMCPStdio(ctx context.Context, directory, name, ocBin, scriptPath, mcpURL string, execTimeout time.Duration) error {
+	q := url.Values{}
+	if directory != "" {
+		q.Set("location[directory]", directory)
+	}
+	fetchTimeout := execTimeout + 30*time.Second // 让 janus 的超时先到，脚本后死
+	cfg := map[string]any{
+		"type":    "local",
+		"command": []string{ocBin, scriptPath},
+		"environment": map[string]string{
+			"BUN_BE_BUN":              "1",
+			"JANUS_MCP_URL":           mcpURL,
+			"JANUS_MCP_FETCH_TIMEOUT": strconv.FormatInt(fetchTimeout.Milliseconds(), 10),
+		},
+		// 与 remote 相同：v2 默认 codemode=true 会经 Code Mode 包装（30s 掐断），必须直透
+		"codemode": false,
+	}
+	if execTimeout > 0 {
+		cfg["timeout"] = map[string]any{
+			"startup":   15000,
+			"catalog":   15000,
+			"execution": execTimeout.Milliseconds(),
+		}
+	}
+	err := u.do(ctx, http.MethodPut, "/api/experimental/mcp/"+url.PathEscape(name), q,
+		map[string]any{"config": cfg}, nil)
+	if err != nil {
+		return fmt.Errorf("register stdio MCP server %q for directory %q: %w", name, directory, err)
 	}
 	return nil
 }

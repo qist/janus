@@ -48,7 +48,7 @@ func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string
 	}
 
 	url := s.mcpEndpoint(sess.token)
-	if err := s.up.AddMCP(ctx, dir, name, url, nil, s.cfg.ToolCallWait); err != nil {
+	if err := s.registerBridge(ctx, dir, name, url); err != nil {
 		return err
 	}
 	// 工具集变化时清掉上一个名字（删不掉也没关系，janitor 会扫残留）。
@@ -69,6 +69,31 @@ func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string
 	s.metrics.incToolReg()
 	s.log.Infof("tool bridge %s: server=%s tools=%d dir=%s", verb, name, len(sess.snapshotTools()), dir)
 	return nil
+}
+
+// registerBridge 把工具桥注册到 OpenCode。
+//
+// local(stdio) 是默认形态：opencode 拉起内嵌桥脚本，stdio ↔ janus HTTP——绕开
+// Bun fetch 对 remote 请求的 ~360s 总时长硬顶（无视 AbortSignal 与数据流动，
+// 长工具调用必死，实测复现）。注册失败（如老版本 opencode 不认 local 类型、
+// 脚本写不进沙箱）自动退回 remote，保证工具链路始终可用。
+func (s *Server) registerBridge(ctx context.Context, dir, name, mcpURL string) error {
+	if s.cfg.MCPTransport == "remote" {
+		return s.up.AddMCP(ctx, dir, name, mcpURL, nil, s.cfg.ToolCallWait)
+	}
+	script, err := ensureBridgeScript(s.cfg.WorkspacesDir, dir)
+	if err == nil {
+		var ocBin string
+		ocBin, err = findOpenCodeBinary(s.cfg.OpencodeBin)
+		if err == nil {
+			err = s.up.AddMCPStdio(ctx, dir, name, ocBin, script, mcpURL, s.cfg.ToolCallWait)
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	s.log.Warnf("stdio bridge unavailable (%v); falling back to remote mcp", err)
+	return s.up.AddMCP(ctx, dir, name, mcpURL, nil, s.cfg.ToolCallWait)
 }
 
 // removeTools 注销当前会话的 MCP server（客户端不再声明 tools 时调用）。

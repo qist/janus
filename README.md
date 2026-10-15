@@ -276,7 +276,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `OPENCODE_REUSE_EXTERNAL` | `true` | 是否复用已在跑的外部 OpenCode。`false`=总是自己拉起（这样才能注入 janus 自动生成的 agent 配置） |
 | `BRIDGE_UPSTREAM_CLEANUP` | `true` | janus 退出（SIGTERM/SIGINT）时收掉「自己拉起的」OpenCode，并在拉起前清扫上一轮 `kill -9`/崩溃留下的孤儿。`false`=留着不清理（老行为）。外部实例（如桌面端）不受影响 |
 | `OPENCODE_BIN` | 空 | 显式指定 `opencode` 可执行文件；空=自动查找（PATH、`~/.opencode/bin/opencode`） |
-| `OPENCODE_CLIENT` | 空 | janus 拉起的 OpenCode 对外声明的客户端身份（透传子进程）。OpenCode 用它填上游请求头 `x-opencode-client` 与 `User-Agent` 尾段（`opencode/latest/<ver>/<client>`）。空=交给 OpenCode 自己的默认（`cli`） |
+| `OPENCODE_CLIENT` | 空 | janus 拉起的 OpenCode 对外声明的客户端身份（透传子进程）。OpenCode 用它填上游请求头 `x-opencode-client` 与 `User-Agent` 尾段（`opencode/latest/<ver>/<client>`）。空=交给 OpenCode 自己的默认（`cli`）。`janus.env.example` 模板默认给 `desktop` |
 | `OPENCODE_USERNAME` | `opencode` | 上游 Basic 用户名 |
 | `OPENCODE_PASSWORD` | 空 | 上游密码（优先） |
 | `OPENCODE_SERVER_PASSWORD` | 空 | 上游密码别名（与 `OPENCODE_PASSWORD` 二选一） |

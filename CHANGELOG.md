@@ -4,6 +4,20 @@
 
 ---
 
+## [v0.3.49] - 2026-10-15
+
+### 变更
+- **`janus.env.example` 默认启用 `OPENCODE_CLIENT=desktop`**：janus 是「代客户端
+  发起调用」的桥，模板里默认按桌面端来源上报（上游请求头 `x-opencode-client:
+  desktop`、`User-Agent: opencode/latest/<ver>/desktop`）。想恢复 OpenCode
+  自己的默认（`cli`）就删掉这行或置空。
+
+  代码默认值不变（空 = `cli`）：模板的职责是给推荐值（同理 `BRIDGE_ADDR` 在
+  模板里是 `127.0.0.1:2810`，而代码默认是 `0.0.0.0:2810`）。README 配置表同步
+  标注模板默认。
+
+---
+
 ## [v0.3.48] - 2026-10-15
 
 ### 新增

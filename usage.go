@@ -213,6 +213,8 @@ type UsageClient struct {
 	mu       sync.Mutex
 	cached   *UsageReport
 	cachedAt time.Time
+	err      error     // 上次失败原因
+	errAt    time.Time // 上次失败时间（负缓存窗口内不再重试）
 
 	// request-logs 短缓存 + 失败负缓存：UI 自动刷新/重复调用时避免每次都打
 	// console（该接口可能被限速或超时，连不上时更要避免每次卡满超时）。
@@ -235,7 +237,16 @@ func NewUsageClient(cfg Config, log *Logger) *UsageClient {
 	}
 }
 
+// usageErrTTL 是 Report 的失败负缓存窗口：console 超时/限速时窗口内不重试，
+// 有旧数据就返回旧数据（宁旧不卡），UI 靠 fetched_at 辨别新旧。
+// var 仅为可测性（测试里临时缩短）；运行期视为常量。
+var usageErrTTL = 60 * time.Second
+
 // Report 返回缓存的用量报告。
+//
+// 失败负缓存（与 RequestLogs 同策略）：console 侧超时/限速的窗口期里不再重试
+// （UI 每 60s 自动刷新，没这层的话每次都卡满 15s 超时、面板整块报错），
+// 有旧数据就返回旧数据（宁旧不卡），没有旧数据才把错误报出去。
 func (c *UsageClient) Report(ctx context.Context) (*UsageReport, error) {
 	c.mu.Lock()
 	if c.cached != nil && time.Since(c.cachedAt) < c.ttl {
@@ -243,15 +254,37 @@ func (c *UsageClient) Report(ctx context.Context) (*UsageReport, error) {
 		c.mu.Unlock()
 		return r, nil
 	}
+	// 失败负缓存窗口内：不重试，给旧数据或上次的错误
+	if !c.errAt.IsZero() && time.Since(c.errAt) < usageErrTTL {
+		var (
+			r   *UsageReport
+			err error
+		)
+		if c.cached != nil {
+			r = c.cached
+		} else {
+			err = c.err
+		}
+		c.mu.Unlock()
+		return r, err
+	}
 	c.mu.Unlock()
 
 	rep, err := c.fetch(ctx)
 	if err != nil {
+		c.mu.Lock()
+		c.err, c.errAt = err, time.Now()
+		stale := c.cached
+		c.mu.Unlock()
+		if stale != nil {
+			return stale, nil
+		}
 		return nil, err
 	}
 
 	c.mu.Lock()
 	c.cached, c.cachedAt = rep, time.Now()
+	c.err, c.errAt = nil, time.Time{}
 	c.mu.Unlock()
 	return rep, nil
 }

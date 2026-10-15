@@ -27,6 +27,14 @@ func opencodeInlineConfig(cfg *Config) string {
 	// orchestrator：给 mode B/C 用。白名单而非黑名单——
 	// 黑名单会随 OpenCode 版本改工具名而失效（实测 v2 就漏过）。
 	//   * deny            → 禁掉所有内置工具
+	//   read allow        → 免费档必需：opencode.ai 的免费档（opencode/*-free）
+	//                       只放行"看起来像 OpenCode 客户端"的请求，判定依据是请求里
+	//                       带标准内置工具；工具集为空时一律 403 FreeTierError
+	//                       （"free tier can only be used from within OpenCode"）。
+	//                       实测 deny* 只 allow read 即可放行；execute/ob-*/bash/
+	//                       edit/write/glob/grep 都不行（v0.3.50 定位）。
+	//                       不使用 read 即不受影响；用它换免费档可用，其余文件/命令
+	//                       操作仍必须由客户端声明的 ob-* 工具执行。
 	//   execute allow     → 必须放行，否则 Code Mode 里一个 MCP 工具都看不到
 	//   <mcpNamePrefix>*  → 只放行 janus 工具桥注册的客户端工具（ob-*）
 	agents["orchestrator"] = map[string]any{
@@ -35,6 +43,7 @@ func opencodeInlineConfig(cfg *Config) string {
 		"mode": "primary",
 		"permissions": []map[string]string{
 			{"action": "*", "resource": "*", "effect": "deny"},
+			{"action": "read", "resource": "*", "effect": "allow"},
 			{"action": "execute", "resource": "*", "effect": "allow"},
 			{"action": mcpNamePrefix + "*", "resource": "*", "effect": "allow"},
 		},

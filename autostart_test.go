@@ -48,9 +48,51 @@ func TestOpenCodeInlineConfig(t *testing.T) {
 	if err := json.Unmarshal([]byte(s), &m); err != nil {
 		t.Fatalf("invalid json: %v\n%s", err, s)
 	}
-	for _, want := range []string{`"orchestrator"`, `"effect":"deny"`, `"execute"`, `"ob-*"`} {
+	for _, want := range []string{`"orchestrator"`, `"effect":"deny"`, `"execute"`, `"ob-*"`, `"read"`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %s in %s", want, s)
+		}
+	}
+}
+
+// orchestrator 必须放行内置 read：opencode.ai 的免费档（opencode/*-free）
+// 只放行带标准内置工具的请求，工具集为空时恒定 403 FreeTierError
+// （"free tier can only be used from within OpenCode"）。
+// 回归点：read 被删掉 → 免费档经 janus 全量 403（实测 v0.3.49 行为）。
+func TestOrchestratorAllowsReadForFreeTier(t *testing.T) {
+	s := opencodeInlineConfig(&Config{ToolCalling: true})
+	var cfg struct {
+		Agents map[string]struct {
+			Permissions []struct {
+				Action string `json:"action"`
+				Effect string `json:"effect"`
+			} `json:"permissions"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(s), &cfg); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	perms := cfg.Agents["orchestrator"].Permissions
+	if len(perms) == 0 {
+		t.Fatalf("orchestrator has no permissions: %s", s)
+	}
+	// 先全量 deny，再逐条 allow；首条必须是 deny *。
+	if perms[0].Action != "*" || perms[0].Effect != "deny" {
+		t.Fatalf("first rule must be deny *, got %+v", perms[0])
+	}
+	allowed := map[string]bool{}
+	for _, p := range perms {
+		if p.Effect == "allow" {
+			allowed[p.Action] = true
+		}
+	}
+	if !allowed["read"] {
+		t.Fatalf("orchestrator must allow built-in read; allowed=%v", allowed)
+	}
+	// 除 read 外不得放行任何写/执行类内置工具，保持「宿主机只读、其余走客户端」。
+	for _, forbidden := range []string{"bash", "write", "edit", "patch"} {
+		if allowed[forbidden] {
+			t.Fatalf("orchestrator must not allow %s; allowed=%v", forbidden, allowed)
 		}
 	}
 }

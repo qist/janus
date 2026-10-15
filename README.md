@@ -338,7 +338,7 @@ BRIDGE_DIRECTORY=/path/to/project   # 必需：原生工具在此目录下执行
 禁用 OpenCode 自带工具，agent 只调用**客户端在请求里声明的 `tools`**；janus 用内置 MCP server 把它们暴露给 agent，工具实际在**客户端**执行。
 
 ```ini
-BRIDGE_AGENT=orchestrator    # janus 自动生成的 agent：禁用全部内置工具（见下）
+BRIDGE_AGENT=orchestrator    # janus 自动生成的 agent：只放行只读 read + 客户端工具（见下）
 BRIDGE_TOOL_CALLING=true     # 打开工具桥（默认值）
 ```
 
@@ -350,7 +350,8 @@ BRIDGE_TOOL_CALLING=true     # 打开工具桥（默认值）
     "orchestrator": {
       "mode": "primary",
       "permissions": [
-        { "action": "*",       "resource": "*", "effect": "deny"  },  // 禁掉所有内置工具
+        { "action": "*",       "resource": "*", "effect": "deny"  },  // 禁掉其余内置工具
+        { "action": "read",    "resource": "*", "effect": "allow" },  // 免费档必需，见下
         { "action": "execute", "resource": "*", "effect": "allow" },  // Code Mode 必需，否则 MCP 工具全看不到
         { "action": "ob-*",    "resource": "*", "effect": "allow" }   // 只放行 janus 工具桥注册的客户端工具
       ]
@@ -360,6 +361,8 @@ BRIDGE_TOOL_CALLING=true     # 打开工具桥（默认值）
 ```
 
 > 为什么用白名单而不是逐个 deny：黑名单会随 OpenCode 版本改工具名而失效（实测 v2 就漏过 `execute`/`search` 之类）。
+>
+> **为什么放行内置 `read`**：opencode.ai 的**免费档**（`opencode/*-free`）有服务端风控——请求里不带标准内置工具时恒回 `403 FreeTierError`（"free tier can only be used from within OpenCode"），与 `OPENCODE_CLIENT`/User-Agent 无关。实测 `deny *` 下只 allow `read` 即可放行，`execute`/`ob-*`/`bash`/`edit`/`write` 等都不行。所以 orchestrator 由「禁全部内置工具」放宽为「只留只读 `read`」；写/执行仍必须走客户端 `ob-*`。要恢复强隔离就删掉这条 `read`（代价：免费档经 janus 全量 403；订阅档 `opencode-go/*` 不受影响）。详见 `docs/DESIGN.md` §5.7.2。
 >
 > **前提**：注入只对 **janus 自己拉起的** OpenCode 生效。若本机另有 OpenCode 在跑，janus 默认会复用它、注入不生效 —— 设 `OPENCODE_REUSE_EXTERNAL=false` 让 janus 总是自管上游即可（见配置表）。
 
@@ -371,7 +374,7 @@ BRIDGE_TOOL_CALLING=true     # 打开工具桥（默认值）
 agent 不做任何读写/命令，只用模型知识回答：
 
 ```ini
-BRIDGE_AGENT=orchestrator    # janus 自动生成的 orchestrator（无内置工具）
+BRIDGE_AGENT=orchestrator    # janus 自动生成的 orchestrator（不暴露客户端工具，仅 read）
 BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没工具
 ```
 

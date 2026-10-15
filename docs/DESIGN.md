@@ -628,6 +628,7 @@ desktop 端等其他会话一律不碰。
       "mode": "primary",
       "permissions": [
         { "action": "*",       "resource": "*", "effect": "deny"  },  // 禁掉所有内置工具
+        { "action": "read",    "resource": "*", "effect": "allow" },  // 免费档必需，见下
         { "action": "execute", "resource": "*", "effect": "allow" },  // Code Mode 必需
         { "action": "ob-*",    "resource": "*", "effect": "allow" }   // 只放行工具桥的客户端工具
       ]
@@ -641,6 +642,28 @@ v2 就漏过 `execute`/`search` 之类的新动作，导致 orchestrator 仍能�
 `execute` 必须放行（V2 里客户端 MCP 工具挂在 Code Mode 的 `execute` 下，deny 掉它
 模型一个 MCP 工具都看不到）；`ob-*` 是 janus 工具桥注册的 MCP server 名前缀
 （`mcpNamePrefix`）。内置工具被 `*` deny 覆盖。
+
+**为什么额外放行内置 `read`（v0.3.50）**：opencode.ai 的**免费档**模型
+（`opencode/*-free`）带服务端风控 —— 只放行"看起来像 OpenCode 客户端"的请求，
+判定依据是请求里是否带**标准内置工具**。工具集为空时一律回
+`403 FreeTierError`（"free tier can only be used from within OpenCode"），
+与 `OPENCODE_CLIENT`/User-Agent 无关（改成 `desktop` 也一样 403，实测）。
+
+隔离实测（同一份凭据、同一台机器）：
+
+| orchestrator permissions | 免费档结果 |
+| --- | --- |
+| `deny *` 单条（工具集空） | ❌ 403 |
+| `deny *` + allow `execute` / `ob-*`（v0.3.49 现状） | ❌ 403 |
+| `deny *` + allow `bash`/`edit`/`write`/`glob`/`grep`/`task`/`webfetch` | ❌ 403 |
+| `deny *` + allow 内置 **`read`** | ✅ 放行 |
+
+即：放一条 `read` 就够（也已确认 `build` 等内置 agent 一直可用）。因此
+orchestrator 由"完全禁内置工具"放宽为"禁一切**写/执行**类内置工具，只留只读
+`read`"。要恢复"宿主机只读都不给"的强隔离，删掉这条 `read` 即可 —— 代价是
+免费档经 janus 全量 403（订阅档 `opencode-go/*` 不受影响）。回归测试见
+`TestOrchestratorAllowsReadForFreeTier`。
+
 
 **前提**：注入只对 **janus 自己拉起的** OpenCode 生效。若本机另有 OpenCode 在跑，
 默认会复用它、注入不生效 —— 设 `OPENCODE_REUSE_EXTERNAL=false` 让 janus 总是自管上游。

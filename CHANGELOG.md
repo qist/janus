@@ -4,6 +4,29 @@
 
 ---
 
+## [v0.3.50] - 2026-10-15
+
+### 修复
+- **经 janus 调用 opencode.ai 免费档模型（`opencode/*-free`）恒定 `403
+  FreeTierError`**（"OpenCode's free tier can only be used from within
+  OpenCode"）。根因不是客户端身份，而是 janus 注入的 `orchestrator` agent 把内置
+  工具全 deny 了：上游风控要求请求里带标准内置工具，工具集为空即判定"非 OpenCode
+  客户端"。
+
+  实测（同一凭据、同一台机器）：`deny *` 下只 allow 内置 `read` 即放行；
+  `execute`/`ob-*`/`bash`/`edit`/`write`/`glob`/`grep`/`task`/`webfetch` 都不行；
+  把 `OPENCODE_CLIENT`/User-Agent 改成 `desktop` 同样 403。`build` 等内置 agent
+  一直可用。
+
+### 变更
+- `orchestrator` 的 permissions 由「禁全部内置工具」放宽为「只留只读 `read`」，
+  写/执行仍必须走客户端 `ob-*` 工具桥。要恢复强隔离可删掉这条 `read` —— 代价是
+  免费档经 janus 全量 403（订阅档 `opencode-go/*` 不受影响）。
+- 新增回归测试 `TestOrchestratorAllowsReadForFreeTier`，并在 `TestOpenCodeInlineConfig`
+  中断言 `read` 存在。README「工具执行模式」方式 B/C 与 `docs/DESIGN.md` §5.7.2 同步。
+
+---
+
 ## [v0.3.49] - 2026-10-15
 
 ### 变更

@@ -523,7 +523,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	if filter.Empty() {
 		if ref, err := s.resolveJanusModel(r.Context(), list); err == nil {
 			if def := FindModel(list, ref); def != nil {
-				obj := ToOpenAI(*def)
+				obj := toOpenAIWithCredits(*def, s.cfg.OpenCodeContext)
 				obj.ID = "janus"
 				obj.OwnedBy = "janus"
 				out.Data = append(out.Data, obj)
@@ -533,7 +533,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 		if ref, err := s.resolveDefaultModel(r.Context(), list); err == nil {
 			if def := FindModel(list, ref); def != nil {
-				obj := ToOpenAI(*def)
+				obj := toOpenAIWithCredits(*def, s.cfg.OpenCodeContext)
 				obj.ID = "default"
 				obj.OwnedBy = def.ProviderID
 				out.Data = append(out.Data, obj)
@@ -545,7 +545,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	for _, m := range list {
 		if filter.Match(m) {
-			out.Data = append(out.Data, ToOpenAI(m))
+			out.Data = append(out.Data, toOpenAIWithCredits(m, s.cfg.OpenCodeContext))
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -619,6 +619,14 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 	for _, m := range list {
 		if m.ProviderID == ref.ProviderID && m.ID == ref.ID {
 			detail := ToDetail(m)
+			if c := wbCreditsFor(m.ProviderID, m.ID); c != "" {
+				detail.WorkBuddyCredits = c
+			}
+			if ctx := wbContextOverride(m.ProviderID, m.ID); ctx > 0 {
+				detail.ContextLength = ctx
+			} else if s.cfg.OpenCodeContext > 0 && m.ProviderID != "workbuddy" {
+				detail.ContextLength = s.cfg.OpenCodeContext
+			}
 			if strings.EqualFold(strings.TrimSpace(id), "default") {
 				detail.ID = "default"
 			}
@@ -705,6 +713,15 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 			"cannot read usage: "+err.Error(), "usage_unavailable")
 		return
 	}
+	// WorkBuddy 积分（可选）：失败/未启用时字段缺省，绝不拖垮主报告。
+	// Recent（最近请求）每次现取，不随积分缓存。
+	if wbRuntime != nil {
+		if c := wbRuntime.creditsSnapshot(ctx); c != nil {
+			cc := *c
+			cc.Recent = wbRuntime.recentRequests()
+			rep.WorkBuddy = &cc
+		}
+	}
 	writeJSON(w, http.StatusOK, rep)
 }
 
@@ -753,7 +770,8 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGetSettings 返回运行时可改的设置（目前只有 default_model）。
+// handleGetSettings 返回运行时可改的设置（default_model / workbuddy_context）
+// 与 UI 偏好（ui_prefs：面板的标签页与渠道选择，浏览器刷新后恢复）。
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if err := s.checkAuth(r); err != nil {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
@@ -762,11 +780,34 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"default_model":            s.runtimeDefaultModel(),
 		"configured_default_model": s.cfg.DefaultModel, // env 兜底，只读
+		"workbuddy_enabled":        wbRuntime != nil,
+		"workbuddy_context":        s.cfg.WorkBuddyContext,
+		"opencode_context":         s.cfg.OpenCodeContext,
+		"ui_prefs":                 s.uiPrefs(),
 	})
 }
 
-// handleSetSettings 设置运行时默认模型：body {"default_model":"provider/id[:variant]"}。
-// 空字符串表示清除（回落到 BRIDGE_DEFAULT_MODEL / 上游默认）。
+// uiPrefs 读持久化的 UI 偏好（无/坏值返回 null，由前端兜底）。
+func (s *Server) uiPrefs() map[string]any {
+	if s.db == nil {
+		return nil
+	}
+	raw, ok := s.db.getSetting("ui_prefs")
+	if !ok || raw == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// handleSetSettings 设置运行时设置：body 可带任意子集——
+//
+//	{"default_model": "provider/id[:variant]"}   运行时默认模型（空=清除）
+//	{"workbuddy_context": "max"|"default"}        WorkBuddy 上下文预算档位
+//	{"ui_prefs": {"tab": "models", "chan": "…"}}  面板 UI 偏好（刷新/重启后恢复）
 func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	if err := s.checkAuth(r); err != nil {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
@@ -778,28 +819,82 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		DefaultModel *string `json:"default_model"`
+		DefaultModel     *string        `json:"default_model"`
+		WorkBuddyContext *string        `json:"workbuddy_context"`
+		OpenCodeContext  *int           `json:"opencode_context"`
+		UIPrefs          map[string]any `json:"ui_prefs"`
 	}
-	if err := json.Unmarshal(body, &in); err != nil || in.DefaultModel == nil {
+	if err := json.Unmarshal(body, &in); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
-			`body must be {"default_model": "<provider/id[:variant]>"}`, "invalid_request")
+			"invalid JSON body: "+err.Error(), "invalid_request")
 		return
 	}
-	v := strings.TrimSpace(*in.DefaultModel)
-	if v != "" {
-		list, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
-		if err != nil {
-			writeOpenAIError(w, http.StatusBadGateway, "api_error", "cannot list models: "+err.Error(), "")
-			return
-		}
-		if _, err := ResolveModel(v, list); err != nil {
-			writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
-			return
-		}
+	if in.DefaultModel == nil && in.WorkBuddyContext == nil && in.OpenCodeContext == nil && in.UIPrefs == nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
+			`body must contain default_model / workbuddy_context / opencode_context / ui_prefs`, "invalid_request")
+		return
 	}
-	s.setRuntimeDefaultModel(v)
-	s.log.Infof("runtime default model set to %q", v)
-	writeJSON(w, http.StatusOK, map[string]any{"default_model": v})
+	out := map[string]any{}
+	if in.DefaultModel != nil {
+		v := strings.TrimSpace(*in.DefaultModel)
+		if v != "" {
+			list, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
+			if err != nil {
+				writeOpenAIError(w, http.StatusBadGateway, "api_error", "cannot list models: "+err.Error(), "")
+				return
+			}
+			if _, err := ResolveModel(v, list); err != nil {
+				writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
+				return
+			}
+		}
+		s.setRuntimeDefaultModel(v)
+		s.log.Infof("runtime default model set to %q", v)
+		out["default_model"] = v
+	}
+	if in.WorkBuddyContext != nil {
+		v := strings.TrimSpace(*in.WorkBuddyContext)
+		if v != "max" && v != "default" {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
+				`workbuddy_context must be "max" or "default"`, "invalid_request")
+			return
+		}
+		// 生效点在 OpenCode 拉起时的内联配置注入（modelConfigs），运行中改
+		// 只影响下次拉起；先落库再同步运行时对象，重启后自动带上。
+		s.cfg.WorkBuddyContext = v
+		if wbRuntime != nil && wbRuntime.cfg != nil {
+			wbRuntime.cfg.WorkBuddyContext = v
+		}
+		if s.db != nil {
+			s.db.setSetting("workbuddy_context", v)
+		}
+		s.log.Infof("workbuddy context budget set to %q (takes effect on next janus restart)", v)
+		out["workbuddy_context"] = v
+	}
+	if in.OpenCodeContext != nil {
+		v := *in.OpenCodeContext
+		if v < 0 {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
+				`opencode_context must be >= 0 (0 = 跟随目录默认)`, "invalid_request")
+			return
+		}
+		// 只影响 /v1/models 的展示预算，立即生效并持久化。
+		s.cfg.OpenCodeContext = v
+		if s.db != nil {
+			s.db.setSetting("opencode_context", strconv.Itoa(v))
+		}
+		s.log.Infof("opencode context budget override set to %d", v)
+		out["opencode_context"] = v
+	}
+	if in.UIPrefs != nil {
+		if s.db != nil {
+			if b, err := json.Marshal(in.UIPrefs); err == nil {
+				s.db.setSetting("ui_prefs", string(b))
+			}
+		}
+		out["ui_prefs"] = in.UIPrefs
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleUnknownV1(w http.ResponseWriter, r *http.Request) {

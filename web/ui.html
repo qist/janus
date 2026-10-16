@@ -90,6 +90,11 @@ h2 .tag{font-weight:400;color:var(--dim);font-size:12px}
 .tabs button.on{background:#2c3d6b;border-color:#4f7dff;color:#fff}
 .tabpane{display:none}
 .tabpane.on{display:block}
+/* 顶层渠道导航（主）与渠道内子标签（次） */
+#chanBar{margin:2px 0 4px}
+#chanBar button{padding:9px 24px;font-size:14px;font-weight:650;border-radius:10px}
+#chanBar button.on{background:linear-gradient(135deg,#33477f,#2a3a6b);border-color:#5b8cff;color:#fff;box-shadow:0 2px 12px #5b8cff2e}
+#tabs{margin-top:0}
 /* 思考档位按钮组 */
 .effseg{display:flex;gap:4px;flex-wrap:wrap}
 .effseg button{padding:3px 10px;font-size:12px;border-radius:7px}
@@ -116,6 +121,13 @@ td .bar{margin-top:3px}
 .num{font-variant-numeric:tabular-nums}
 .muted{color:var(--muted)} .dim{color:var(--dim)}
 .right{text-align:right}
+
+/* ---------- 分组表头行 ---------- */
+tr.prov-row td{background:#182242;cursor:pointer;font-weight:650;color:#cfe0ff;padding:8px 12px;border-top:1px solid #2c3a66;user-select:none}
+tr.prov-row:hover td{background:#1d2a4f}
+.prov-caret{display:inline-block;width:15px;color:var(--accent);font-size:11px}
+tr.prov-row .dim{font-weight:400}
+tr.prov-sub td{background:#101728;font-weight:600;color:var(--muted);border-top:1px solid #232e52;font-size:12px;padding:7px 12px}
 
 /* ---------- 支持的模型 ---------- */
 .filter{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-bottom:10px}
@@ -172,7 +184,6 @@ td .bar{margin-top:3px}
       <div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M4 17V9M9 17V5M14 17v-6M19 17V7" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg></div>
       <div>
         <h1>用量面板 <span class="dim" style="font-size:12px;font-weight:400">Janus</span></h1>
-        <div class="sub" id="source">–</div>
       </div>
     </div>
     <div class="actions">
@@ -191,6 +202,8 @@ td .bar{margin-top:3px}
 
   <div class="banner" id="banner"></div>
 
+  <nav class="tabs" id="chanBar" title="选择渠道：下面显示该渠道自己的数据与模型"></nav>
+
   <nav class="tabs" id="tabs">
     <button data-tab="usage" class="on">用量</button>
     <button data-tab="requests">最近请求</button>
@@ -199,6 +212,7 @@ td .bar{margin-top:3px}
   </nav>
 
   <div class="tabpane on" data-pane="usage">
+  <div id="opUsageOnly">
   <section>
     <h2>账户余额 <span class="tag" id="billingMode"></span></h2>
     <div class="grid cards" id="billingCards"></div>
@@ -244,6 +258,28 @@ td .bar{margin-top:3px}
   </section>
 
   <section>
+    <h2>渠道用量 <span class="tag" id="provTag"></span></h2>
+    <div class="panel tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>渠道</th>
+            <th data-pk="requests" class="num">请求</th>
+            <th data-pk="input_tokens" class="num">输入</th>
+            <th data-pk="output_tokens" class="num">输出</th>
+            <th data-pk="cache_read_tokens" class="num">缓存读取</th>
+            <th data-pk="cost_usd" class="num">花费</th>
+            <th>花费占比</th>
+          </tr>
+        </thead>
+        <tbody id="provBody"></tbody>
+        <tfoot id="provFoot" style="display:none"><tr id="provFootRow"></tr></tfoot>
+      </table>
+      <div class="chart-empty" id="provEmpty">暂无数据</div>
+    </div>
+  </section>
+
+  <section>
     <h2>模型用量 <span class="tag" id="modelTag"></span></h2>
     <div class="panel tbl-wrap">
       <table>
@@ -266,9 +302,44 @@ td .bar{margin-top:3px}
       <div class="chart-empty" id="modelEmpty">暂无数据</div>
     </div>
   </section>
+  </div><!-- /opUsageOnly -->
+
+  <div id="wbUsageOnly" style="display:none">
+  <section>
+    <h2>WorkBuddy 积分 <span class="tag" id="wbCreditsTag"></span></h2>
+    <div class="grid cards" id="wbCards"></div>
+    <div class="panel" style="margin-top:12px">
+      <div class="k muted" style="font-size:12px;margin-bottom:8px">套餐明细</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>套餐</th><th class="num">剩余</th><th class="num">已用</th><th class="num">容量</th><th class="num">到期时间</th></tr>
+          </thead>
+          <tbody id="wbAcctBody"></tbody>
+        </table>
+        <div class="chart-empty" id="wbAcctEmpty">暂无套餐数据</div>
+      </div>
+      <div class="dim" style="font-size:12px;margin-top:8px" id="wbExpiryNote"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>WorkBuddy 最近请求 <span class="tag">janus 自记 · 最近 100 条</span></h2>
+    <div class="panel tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>时间</th><th>模型</th><th class="num">状态</th><th class="num">上游耗时</th></tr>
+        </thead>
+        <tbody id="wbReqBody"></tbody>
+      </table>
+      <div class="chart-empty" id="wbReqEmpty">还没有 workbuddy 请求记录</div>
+    </div>
+  </section>
+  </div><!-- /wbUsageOnly -->
   </div><!-- /usage -->
 
   <div class="tabpane" data-pane="requests">
+  <div id="opReqOnly">
   <section>
     <h2>最近请求（缓存命中率）<span class="tag" id="reqTag"></span></h2>
     <div class="panel tbl-wrap">
@@ -315,6 +386,21 @@ td .bar{margin-top:3px}
       <div class="chart-empty" id="reqEmpty">暂无数据</div>
     </div>
   </section>
+  </div><!-- /opReqOnly -->
+  <div id="wbReqOnly" style="display:none">
+  <section>
+    <h2>WorkBuddy 最近请求 <span class="tag">janus 自记 · 最近 100 条</span></h2>
+    <div class="panel tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>时间</th><th>模型</th><th class="num">状态</th><th class="num">上游耗时</th></tr>
+        </thead>
+        <tbody id="wbReqBody2"></tbody>
+      </table>
+      <div class="chart-empty" id="wbReqEmpty2">还没有 workbuddy 请求记录</div>
+    </div>
+  </section>
+  </div><!-- /wbReqOnly -->
   </div><!-- /requests -->
 
   <div class="tabpane" data-pane="models">
@@ -330,6 +416,8 @@ td .bar{margin-top:3px}
             <option value="free">仅免费</option>
             <option value="paid">仅收费</option>
           </select>
+          <span id="wbCtxSel" class="effseg" style="display:none" title="注入 OpenCode 的上下文预算档位（保存立即生效并持久化）"></span>
+          <span id="ocCtxSel" class="effseg" style="display:none" title="OpenCode 渠道模型的上下文预算覆盖（tokens，留空=目录默认；保存立即生效并持久化）"></span>
         </div>
         <span class="dim" id="catalogNote"></span>
       </div>
@@ -340,6 +428,7 @@ td .bar{margin-top:3px}
             <th data-ck="provider">Provider</th>
             <th data-ck="context" class="num">上下文</th>
             <th data-ck="output" class="num">最大输出</th>
+            <th data-ck="credits" class="num">倍率</th>
             <th>输入模态</th>
             <th>思考档位</th>
           </tr>
@@ -386,8 +475,16 @@ td .bar{margin-top:3px}
 var KEY='bridge.usage.key', AUTOKEY='bridge.usage.auto';
 var state={report:null,metrics:null,requests:null,key:localStorage.getItem(KEY)||'',timer:null,
   metric:'cost_usd',days:30,sortKey:'cost_usd',sortDir:-1,
+  provSortKey:'cost_usd',provSortDir:-1,chan:'opencode',wbEnabled:false,
   reqQuery:'',reqSortKey:'time',reqSortDir:-1,reqGroup:'list',
-  catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1,defModel:'',defVar:''};
+  catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1,catCollapsed:{},defModel:'',defVar:'',
+  prefsLoaded:false,uiP:null,wbCtx:'max',ocCtx:0};
+
+// inChan 判断模型/请求归属哪个渠道视图：workbuddy 渠道只看 workbuddy，
+// OpenCode 渠道看其余全部（opencode / opencode-go / janus 虚拟模型…）。
+function inChan(prov){
+  return state.chan==='workbuddy' ? prov==='workbuddy' : prov!=='workbuddy';
+}
 
 function $(s){return document.querySelector(s);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
@@ -615,9 +712,63 @@ function renderChart(){
   box.innerHTML=svg;
 }
 
-/* ---------- 渲染：模型表格 ---------- */
+/* ---------- 渲染：渠道用量（按 provider 汇总） ---------- */
+function provAgg(){
+  var ms=(state.report&&state.report.models)||[], m={};
+  for(var i=0;i<ms.length;i++){
+    var r=ms[i]||{}, g=r.provider||'–';
+    if(!inChan(g)) continue;
+    var a=m[g]; if(!a){ a=m[g]={provider:g,requests:0,input_tokens:0,output_tokens:0,cache_read_tokens:0,cost_usd:0,models:0}; }
+    a.requests+=Number(r.requests)||0; a.input_tokens+=Number(r.input_tokens)||0;
+    a.output_tokens+=Number(r.output_tokens)||0; a.cache_read_tokens+=Number(r.cache_read_tokens)||0;
+    a.cost_usd+=Number(r.cost_usd)||0; a.models++;
+  }
+  return Object.keys(m).map(function(k){ return m[k]; });
+}
+function renderProviders(){
+  var rows=provAgg(), k=state.provSortKey||'cost_usd', d=state.provSortDir||-1;
+  rows.sort(function(a,b){ return ((Number(a[k])||0)-(Number(b[k])||0))*d; });
+  el('provEmpty').style.display=rows.length?'none':'block';
+  el('provTag').textContent=rows.length?(rows.length+' 个渠道 · 点行查看该渠道模型'):'';
+  var maxCost=rows.reduce(function(a,r){return Math.max(a,Number(r.cost_usd)||0);},0)||1;
+  el('provBody').innerHTML=rows.map(function(p){
+    var cost=Number(p.cost_usd)||0;
+    return '<tr data-prov="'+esc(p.provider)+'" style="cursor:pointer" title="查看 '+esc(p.provider)+' 的模型">'+
+      '<td><div class="mname" style="color:var(--accent)">'+esc(p.provider)+'</div><div class="mprov">'+p.models+' 个模型</div></td>'+
+      '<td class="num">'+fmtInt(p.requests)+'</td>'+
+      '<td class="num">'+fmtInt(p.input_tokens)+'</td>'+
+      '<td class="num">'+fmtInt(p.output_tokens)+'</td>'+
+      '<td class="num">'+fmtInt(p.cache_read_tokens)+'</td>'+
+      '<td class="num">'+fmtUSD(cost,true)+'<div class="bar"><i style="width:'+(Math.min(100,cost/maxCost*100)).toFixed(1)+'%"></i></div></td>'+
+      '</tr>';
+  }).join('');
+  var foot=el('provFoot'), fr=el('provFootRow');
+  if(rows.length){
+    var t=(state.report&&state.report.totals)||{};
+    foot.style.display='';
+    fr.innerHTML='<th style="cursor:default">合计</th>'+
+      '<td class="num">'+fmtInt(t.requests)+'</td>'+
+      '<td class="num">'+fmtInt(t.input_tokens)+'</td>'+
+      '<td class="num">'+fmtInt(t.output_tokens)+'</td>'+
+      '<td class="num">'+fmtInt(t.cache_read_tokens)+'</td>'+
+      '<td class="num">'+fmtUSD(t.cost_usd,true)+'</td>';
+  }else{ foot.style.display='none'; }
+  // 排序箭头
+  var pths=document.querySelectorAll('th[data-pk]');
+  for(var i=0;i<pths.length;i++){
+    var th=pths[i], ar=th.querySelector('.ar');
+    if(ar) ar.remove();
+    if(th.getAttribute('data-pk')===k){
+      var sp=document.createElement('span'); sp.className='ar';
+      sp.textContent=d<0?' ▼':' ▲'; th.appendChild(sp);
+    }
+  }
+}
+
+/* ---------- 渲染：模型表格（按渠道分组 + 渠道小计） ---------- */
 function modelRows(){
   var rows=(state.report&&state.report.models)||[];
+  rows=rows.filter(function(m){ return inChan(m.provider||''); });
   rows=rows.map(function(m){
     var inp=Number(m.input_tokens)||0, cr=Number(m.cache_read_tokens)||0;
     var o={}; for(var k in m) o[k]=m[k];
@@ -635,27 +786,47 @@ function modelRows(){
   });
   return rows;
 }
+function modelRowHTML(m,maxCost){
+  var name=(m.model||'');
+  var prov=(m.provider||'');
+  var cost=Number(m.cost_usd)||0;
+  var share=Math.min(100,cost/maxCost*100);
+  return '<tr>'+
+    '<td><div class="mname">'+esc(name)+'</div><div class="mprov"><span data-chan="'+esc(prov)+'" style="cursor:pointer;color:var(--accent)" title="进入 '+esc(prov)+' 渠道视图">'+esc(prov)+'</span></div></td>'+
+    '<td class="num">'+fmtInt(m.requests)+'</td>'+
+    '<td class="num">'+fmtInt(m.input_tokens)+'</td>'+
+    '<td class="num">'+fmtInt(m.output_tokens)+'</td>'+
+    '<td class="num">'+fmtInt(m.cache_read_tokens)+'</td>'+
+    '<td class="num">'+fmtPct(m.hit)+'</td>'+
+    '<td class="num">'+fmtUSD(cost,true)+'<div class="bar"><i style="width:'+share.toFixed(1)+'%"></i></div></td>'+
+    '</tr>';
+}
 function renderModels(){
   var rows=modelRows();
   el('modelEmpty').style.display=rows.length?'none':'block';
   var maxCost=rows.reduce(function(a,r){return Math.max(a,Number(r.cost_usd)||0);},0)||1;
-  var body=rows.map(function(m){
-    var name=(m.model||'');
-    var prov=(m.provider||'');
-    var cost=Number(m.cost_usd)||0;
-    var share=Math.min(100,cost/maxCost*100);
-    return '<tr>'+
-      '<td><div class="mname">'+esc(name)+'</div><div class="mprov">'+esc(prov)+'</div></td>'+
-      '<td class="num">'+fmtInt(m.requests)+'</td>'+
-      '<td class="num">'+fmtInt(m.input_tokens)+'</td>'+
-      '<td class="num">'+fmtInt(m.output_tokens)+'</td>'+
-      '<td class="num">'+fmtInt(m.cache_read_tokens)+'</td>'+
-      '<td class="num">'+fmtPct(m.hit)+'</td>'+
-      '<td class="num">'+fmtUSD(cost,true)+'<div class="bar"><i style="width:'+share.toFixed(1)+'%"></i></div></td>'+
-      '</tr>';
+  // 按渠道分组：组头带渠道小计，组按花费降序，组内保持当前排序
+  var groups={},order=[];
+  rows.forEach(function(m){
+    var g=m.provider||'–';
+    if(!groups[g]){ groups[g]={rows:[],req:0,inp:0,out:0,cr:0,cost:0}; order.push(g); }
+    var s=groups[g]; s.rows.push(m);
+    s.req+=Number(m.requests)||0; s.inp+=Number(m.input_tokens)||0; s.out+=Number(m.output_tokens)||0;
+    s.cr+=Number(m.cache_read_tokens)||0; s.cost+=Number(m.cost_usd)||0;
+  });
+  order.sort(function(a,b){ return groups[b].cost-groups[a].cost; });
+  el('modelBody').innerHTML=order.map(function(g){
+    var s=groups[g];
+    var head='<tr class="prov-sub"><td>'+esc(g)+' · '+s.rows.length+' 个模型</td>'+
+      '<td class="num">'+fmtInt(s.req)+'</td>'+
+      '<td class="num">'+fmtInt(s.inp)+'</td>'+
+      '<td class="num">'+fmtInt(s.out)+'</td>'+
+      '<td class="num">'+fmtInt(s.cr)+'</td>'+
+      '<td class="num">–</td>'+
+      '<td class="num">'+fmtUSD(s.cost,true)+'</td></tr>';
+    return head+s.rows.map(function(m){ return modelRowHTML(m,maxCost); }).join('');
   }).join('');
-  el('modelBody').innerHTML=body;
-  el('modelTag').textContent=rows.length?(rows.length+' 个模型'):'';
+  el('modelTag').textContent=rows.length?(rows.length+' 个模型 / '+order.length+' 个渠道'):'';
 
   // 表头排序箭头
   var ths=document.querySelectorAll('th[data-k]');
@@ -683,6 +854,66 @@ function renderModels(){
   }else{ foot.style.display='none'; }
 }
 
+/* ---------- 渲染：WorkBuddy 渠道视图（积分 + 自记请求） ---------- */
+function renderWbUsage(){
+  var wbMode=state.chan==='workbuddy';
+  el('opUsageOnly').style.display=wbMode?'none':'';
+  el('wbUsageOnly').style.display=wbMode?'':'none';
+  el('opReqOnly').style.display=wbMode?'none':'';
+  el('wbReqOnly').style.display=wbMode?'':'none';
+  if(!wbMode) return;
+  var wb=(state.report&&state.report.workbuddy)||null;
+  if(!wb){
+    el('wbCreditsTag').textContent='';
+    el('wbCards').innerHTML='<div class="card"><div class="k">WorkBuddy</div><div class="v">–</div><div class="s">积分数据不可用（凭据失效或上游异常，看 janus 日志）</div></div>';
+    el('wbAcctBody').innerHTML=''; el('wbAcctEmpty').style.display='block';
+    el('wbExpiryNote').textContent='';
+    renderWbRecent(null);
+    return;
+  }
+  el('wbCreditsTag').textContent='· '+(wb.region==='global'?'国际版':'国内版');
+  var cards=[
+    {k:'剩余积分',v:wb.unlimited?'无上限':fmtCompact(wb.total),s:(wb.unlimited?'不限额套餐':'全部套餐求和'),cls:'accent'},
+    {k:'已消耗',v:wb.unlimited?'–':fmtCompact(wb.total_used||0),s:'周期内已用合计',cls:'violet'},
+    {k:'套餐数',v:fmtInt((wb.accounts||[]).length),s:'',cls:'teal'},
+    {k:'7 天内到期',v:fmtCompact((wb.expiry&&wb.expiry.within_7d&&wb.expiry.within_7d.total)||0),s:'含 24h / 3 天窗口',cls:'amber'}
+  ];
+  el('wbCards').innerHTML=cards.map(cardHTML).join('');
+  var accts=wb.accounts||[];
+  el('wbAcctEmpty').style.display=accts.length?'none':'block';
+  el('wbAcctBody').innerHTML=accts.map(function(a){
+    var end=a.end_time_ms?new Date(a.end_time_ms).toLocaleString():'–';
+    return '<tr><td>'+esc(a.package||'–')+(a.unlimited?' <span class="pill free">无上限</span>':'')+'</td>'+
+      '<td class="num">'+(a.unlimited?'–':fmtCompact(a.remain))+'</td>'+
+      '<td class="num">'+(a.unlimited?'–':fmtCompact(a.used||0))+'</td>'+
+      '<td class="num">'+(a.unlimited||!a.size?'–':fmtCompact(a.size))+'</td>'+
+      '<td class="num">'+end+'</td></tr>';
+  }).join('');
+  var ex=wb.expiry,notes=[];
+  if(ex&&ex.within_24h&&ex.within_3d&&ex.within_7d){
+    if(ex.within_24h.total>0) notes.push('24h 内到期 '+fmtCompact(ex.within_24h.total));
+    if(ex.within_3d.total>0) notes.push('3 天内到期 '+fmtCompact(ex.within_3d.total));
+    if(ex.within_7d.total>0) notes.push('7 天内到期 '+fmtCompact(ex.within_7d.total));
+  }
+  el('wbExpiryNote').textContent=notes.length?('⚠ '+notes.join('；')):'';
+  renderWbRecent(wb.recent||[]);
+}
+function renderWbRecent(list){
+  var has=list&&list.length;
+  ['wbReqBody','wbReqBody2'].forEach(function(id,ix){
+    var tb=el(id); if(!tb) return;
+    tb.innerHTML=(list||[]).map(function(r){
+      var ok=r.status===200;
+      return '<tr><td>'+esc(r.time||'')+'</td>'+
+        '<td>'+esc(r.model||'–')+'</td>'+
+        '<td class="num" style="color:'+(ok?'var(--ok)':'var(--err)')+'">'+fmtInt(r.status)+'</td>'+
+        '<td class="num">'+(r.dur_ms?(r.dur_ms/1000).toFixed(1)+'s':'')+'</td></tr>';
+    }).join('');
+    var empty=el(ix===0?'wbReqEmpty':'wbReqEmpty2');
+    if(empty) empty.style.display=has?'none':'block';
+  });
+}
+
 /* ---------- 渲染：支持的模型 ---------- */
 function usedModelSet(){
   var used={},ms=(state.report&&state.report.models)||[];
@@ -698,11 +929,13 @@ function catalogRows(){
   var q=(state.catQuery||'').trim().toLowerCase(),rows=[];
   for(var i=0;i<list.length;i++){
     var m=list[i]||{},id=String(m.id||''),prov=String(m.owned_by||'');
+    if(!inChan(prov)) continue;
     if(state.catProvider&&prov!==state.catProvider) continue;
     if(state.catFree==='free'&&!m.free) continue;
     if(state.catFree==='paid'&&m.free) continue;
     if(q&&(id+' '+prov).toLowerCase().indexOf(q)<0) continue;
     rows.push({id:id,provider:prov,free:!!m.free,
+      credits:String(m.x_workbuddy_credits||''),
       context:Number(m.context_length)||0,
       output:Number(m.max_output_tokens)||0,
       modalities:m.input_modalities||[],
@@ -816,11 +1049,70 @@ function loadSettings(){
     state.defModel=(o&&o.default_model)||'';
     var i=state.defModel.indexOf(':');
     state.defVar=i>=0?state.defModel.slice(i+1):'';
-    renderCatalog();
+    state.wbCtx=(o&&o.workbuddy_context)||'max';
+    state.ocCtx=Number((o&&o.opencode_context)||0);
+    state.wbEnabled=!!(o&&o.workbuddy_enabled);
+    // UI 偏好只在首次拉到时应用（后续自动刷新不回退本地刚做的选择）
+    if(!state.prefsLoaded&&o&&o.ui_prefs) state.uiP=o.ui_prefs;
+    renderChanSeg(); renderWbCtx(); renderOcCtx(); renderCatalog();
   }).catch(function(){ /* 设置不可用不影响模型目录 */ });
 }
+/* ---------- UI 偏好：服务端持久化（刷新/重启/跨设备都恢复） ---------- */
+function applyPrefsOnce(){
+  if(state.prefsLoaded||!state.uiP) return;
+  var p=state.uiP;
+  // 渠道偏好归一：workbuddy 且已启用才进 workbuddy 视图，其余一律 OpenCode
+  if(p.chan==='workbuddy'&&state.wbEnabled) state.chan='workbuddy';
+  else state.chan='opencode';
+  if(p.tab) showTab(String(p.tab),true);
+  state.prefsLoaded=true;
+  renderChanSeg(); renderCatalog(); renderProviders(); renderModels(); renderRequests(); renderWbUsage(); renderWbCtx(); renderOcCtx();
+}
+var prefsTimer=null,uiPrefs={};
+function savePrefs(part){
+  for(var k in part) uiPrefs[k]=part[k];
+  if(prefsTimer) clearTimeout(prefsTimer);
+  prefsTimer=setTimeout(function(){
+    apiJSON('POST','/v1/settings',{ui_prefs:uiPrefs}).catch(function(){});
+  },400);
+}
+/* ---------- WorkBuddy / OpenCode 上下文预算入口（按当前渠道显示各自的） ---------- */
+function renderWbCtx(){
+  var s=el('wbCtxSel');
+  if(!s) return;
+  // WorkBuddy 的上下文档位入口只在自己渠道的视图里出现
+  var has=state.chan==='workbuddy'&&(state.catalog||[]).some(function(m){return (m.owned_by||'')==='workbuddy';});
+  if(!has){ s.style.display='none'; return; }
+  s.style.display='';
+  s.innerHTML='<span class="dim" style="font-size:12px;align-self:center">WorkBuddy 上下文：</span>'+
+    '<button class="effbtn'+(state.wbCtx!=='default'?' on':'')+'" data-wctx="max">最大档</button>'+
+    '<button class="effbtn'+(state.wbCtx==='default'?' on':'')+'" data-wctx="default">上游默认</button>';
+}
+function renderOcCtx(){
+  var s=el('ocCtxSel');
+  if(!s) return;
+  // OpenCode 渠道视图显示自己的预算覆盖入口
+  if(state.chan==='workbuddy'){ s.style.display='none'; return; }
+  s.style.display='';
+  s.innerHTML='<span class="dim" style="font-size:12px;align-self:center">OpenCode 上下文：</span>'+
+    '<input id="ocCtxInput" type="number" min="0" step="1000" placeholder="目录默认" '+
+    'style="width:120px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:4px 8px;font-size:12px;font-family:inherit" '+
+    'value="'+(state.ocCtx>0?state.ocCtx:'')+'">'+
+    '<button class="effbtn" data-occtx="save">保存</button>';
+}
+function fetchCatalog(){
+  return api('/v1/models').then(function(obj){
+    state.catalog=(obj&&obj.data)||[];
+    el('catalogNote').textContent='';
+    renderChanSeg(); renderWbCtx(); renderOcCtx(); applyPrefsOnce(); renderCatalog();
+  }).catch(function(err){
+    el('catalogNote').textContent='模型列表加载失败：'+((err&&err.message)||err);
+    if(!state.catalog) el('catalogEmpty').style.display='block';
+  });
+}
 function renderCatalog(){
-  var list=state.catalog||[],provs={},i;
+  var all=state.catalog||[],list=[],provs={},i;
+  for(i=0;i<all.length;i++){ if(inChan(String((all[i]||{}).owned_by||''))) list.push(all[i]); }
   for(i=0;i<list.length;i++){ var p=(list[i]||{}).owned_by; if(p) provs[p]=true; }
   if(state.catProvider&&!provs[state.catProvider]) state.catProvider='';
   var opts=['<option value="">全部 Provider</option>'];
@@ -832,36 +1124,55 @@ function renderCatalog(){
   var rows=catalogRows(),total=list.length;
   el('catalogTag').textContent=total?(rows.length+(rows.length!==total?(' / '+total):'')+' 个模型'):'';
   el('catalogEmpty').style.display=rows.length?'none':'block';
-  el('catalogBody').innerHTML=rows.map(function(r){
-    var tags=(r.id==='default'?'<span class="pill def">默认别名</span>':'')+(r.id==='janus'?'<span class="pill def">janus 别名</span>':'')+(r.isCurDefault?'<span class="pill def">janus 当前</span>':'')+(r.free?'<span class="pill free">免费</span>':'')+(r.used?'<span class="pill used">已用</span>':'');
-    var defBtn;
-    if(r.id==='default'||r.id==='auto'||r.id==='janus'||r.isCurDefault){
-      defBtn='';
-    }else{
-      defBtn='<button class="copybtn setdefbtn" data-setdef="'+esc(r.id)+'" title="设为 janus 默认：客户端模型名填 janus 时用它">设为 janus</button>';
-    }
-    var mods=r.modalities.length?r.modalities.join(' / '):'–';
-    var effCell;
-    if(r.efforts.length){
-      // 思考档位：点选即设（高亮当前）。点「默认」= 不带档位。
-      var eo=['<button class="effbtn'+((r.isCurDefault&&!state.defVar)?' on':'')+'" data-model="'+esc(r.id)+'" data-eff="">默认</button>'];
-      r.efforts.forEach(function(e){ eo.push('<button class="effbtn'+((r.isCurDefault&&e===state.defVar)?' on':'')+'" data-model="'+esc(r.id)+'" data-eff="'+esc(e)+'">'+esc(e)+'</button>'); });
-      effCell='<div class="effseg">'+eo.join('')+'</div>';
-    }else{
-      effCell='<span class="muted">–</span>';
-    }
-    return '<tr>'+
-      '<td><div class="mname">'+esc(r.id)+tags+
-        '<button class="copybtn" data-copy="'+esc(r.id)+'" title="复制模型名（粘到 CC 的 ANTHROPIC_MODEL 或客户端 model 字段）">⧉ 复制</button>'+
-        defBtn+
-        '</div></td>'+
-      '<td>'+esc(r.provider||'–')+'</td>'+
-      '<td class="num"'+(r.context?(' title="'+r.context+' tokens"'):'')+'>'+(r.context?fmtCompact(r.context):'–')+'</td>'+
-      '<td class="num"'+(r.output?(' title="'+r.output+' tokens"'):'')+'>'+(r.output?fmtCompact(r.output):'–')+'</td>'+
-      '<td class="muted">'+esc(mods)+'</td>'+
-      '<td>'+effCell+'</td>'+
-      '</tr>';
-  }).join('');
+
+  // 按渠道分组渲染：渠道名做可折叠小节头，避免一页过长难选模型。
+  var groups={},order=[];
+  rows.forEach(function(r){
+    var g=r.provider||'–';
+    if(!groups[g]){ groups[g]=[]; order.push(g); }
+    groups[g].push(r);
+  });
+  order.sort();
+  var html='';
+  order.forEach(function(g){
+    var items=groups[g], collapsed=!!state.catCollapsed[g];
+    html+='<tr class="prov-row" data-prov="'+esc(g)+'"><td colspan="7">'+
+      '<span class="prov-caret">'+(collapsed?'▸':'▾')+'</span>'+esc(g)+
+      ' <span class="dim">· '+items.length+' 个模型</span></td></tr>';
+    if(collapsed) return;
+    html+=items.map(function(r){
+      var tags=(r.id==='default'?'<span class="pill def">默认别名</span>':'')+(r.id==='janus'?'<span class="pill def">janus 别名</span>':'')+(r.isCurDefault?'<span class="pill def">janus 当前</span>':'')+(r.free?'<span class="pill free">免费</span>':'')+(r.used?'<span class="pill used">已用</span>':'');
+      var defBtn;
+      if(r.id==='default'||r.id==='auto'||r.id==='janus'||r.isCurDefault){
+        defBtn='';
+      }else{
+        defBtn='<button class="copybtn setdefbtn" data-setdef="'+esc(r.id)+'" title="设为 janus 默认：客户端模型名填 janus 时用它">设为 janus</button>';
+      }
+      var mods=r.modalities.length?r.modalities.join(' / '):'–';
+      var effCell;
+      if(r.efforts.length){
+        // 思考档位：点选即设（高亮当前）。点「默认」= 不带档位。
+        var eo=['<button class="effbtn'+((r.isCurDefault&&!state.defVar)?' on':'')+'" data-model="'+esc(r.id)+'" data-eff="">默认</button>'];
+        r.efforts.forEach(function(e){ eo.push('<button class="effbtn'+((r.isCurDefault&&e===state.defVar)?' on':'')+'" data-model="'+esc(r.id)+'" data-eff="'+esc(e)+'">'+esc(e)+'</button>'); });
+        effCell='<div class="effseg">'+eo.join('')+'</div>';
+      }else{
+        effCell='<span class="muted">–</span>';
+      }
+      return '<tr>'+
+        '<td><div class="mname">'+esc(r.id)+tags+
+          '<button class="copybtn" data-copy="'+esc(r.id)+'" title="复制模型名（粘到 CC 的 ANTHROPIC_MODEL 或客户端 model 字段）">⧉ 复制</button>'+
+          defBtn+
+          '</div></td>'+
+        '<td>'+esc(r.provider||'–')+'</td>'+
+        '<td class="num"'+(r.context?(' title="'+r.context+' tokens"'):'')+'>'+(r.context?fmtCompact(r.context):'–')+'</td>'+
+        '<td class="num"'+(r.output?(' title="'+r.output+' tokens"'):'')+'>'+(r.output?fmtCompact(r.output):'–')+'</td>'+
+        '<td class="num">'+(r.credits?('<span class="pill'+(r.free?' free':'')+'">'+esc(r.credits)+'</span>'):'<span class="muted">–</span>')+'</td>'+
+        '<td class="muted">'+esc(mods)+'</td>'+
+        '<td>'+effCell+'</td>'+
+        '</tr>';
+    }).join('');
+  });
+  el('catalogBody').innerHTML=html;
 
   var cths=document.querySelectorAll('th[data-ck]');
   for(i=0;i<cths.length;i++){
@@ -937,19 +1248,11 @@ function load(){
   var setP=loadSettings();
   // 模型目录独立加载：即使用量接口不可用（凭据过期 / console 故障），
   // 也照常展示 /v1/models 支持的模型。
-  var catalogP=api('/v1/models').then(function(obj){
-    state.catalog=(obj&&obj.data)||[];
-    el('catalogNote').textContent='';
-    renderCatalog();
-  }).catch(function(err){
-    el('catalogNote').textContent='模型列表加载失败：'+((err&&err.message)||err);
-    if(!state.catalog) el('catalogEmpty').style.display='block';
-  });
+  var catalogP=fetchCatalog();
 
   return api('/v1/usage').then(function(rep){
     state.report=rep; hideBanner(); renderKeyBadge(false);
-    el('source').textContent=(rep.source||'')+(rep.fetched_at?(' · 数据时间 '+new Date(rep.fetched_at).toLocaleString()):'');
-    renderBilling(rep.billing); renderGo(rep.go); renderTotals(rep.totals); renderChart(); renderModels();
+    renderChanSeg(); applyPrefsOnce(); renderBilling(rep.billing); renderGo(rep.go); renderTotals(rep.totals); renderChart(); renderProviders(); renderModels(); renderWbUsage();
     el('footTime').textContent='页面刷新于 '+new Date().toLocaleTimeString();
     return fetchText('/metrics').then(function(t){
       renderLive(parseMetrics(t));
@@ -976,14 +1279,50 @@ function restartAuto(){
   if(sec>0) state.timer=setInterval(load,sec*1000);
 }
 
+/* ---------- 顶层渠道导航：OpenCode / WorkBuddy（配置了才显示） ---------- */
+function renderChanSeg(){
+  var html='<button data-chan="opencode"'+(state.chan!=='workbuddy'?' class="on"':'')+'>'+
+    '<svg viewBox="0 0 24 24" fill="none" style="width:14px;height:14px;vertical-align:-2px;margin-right:5px"><path d="M4 17V9M9 17V5M14 17v-6M19 17V7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>OpenCode</button>';
+  if(state.wbEnabled){
+    html+='<button data-chan="workbuddy"'+(state.chan==='workbuddy'?' class="on"':'')+'>WorkBuddy</button>';
+  }
+  el('chanBar').innerHTML=html;
+  renderTabs();
+}
+// 子标签按渠道切换：OpenCode 渠道=原有四块原样；WorkBuddy 渠道=它自己的三块
+var CHAN_TABS={
+  opencode:['usage','requests','models','runtime'],
+  workbuddy:['usage','requests','models']
+};
+var TAB_LABEL={usage:'用量',requests:'最近请求',models:'模型',runtime:'运行'};
+function renderTabs(){
+  var set=CHAN_TABS[state.chan]||CHAN_TABS.opencode;
+  var cur=el('tabs').querySelector('button.on');
+  var curTab=cur?cur.getAttribute('data-tab'):'usage';
+  if(set.indexOf(curTab)<0) curTab='usage';
+  el('tabs').innerHTML=set.map(function(t){
+    return '<button data-tab="'+t+'"'+(t===curTab?' class="on"':'')+'>'+TAB_LABEL[t]+'</button>';
+  }).join('');
+  showTab(curTab,true);
+}
+function setChan(p){
+  var v=(p==='workbuddy'&&state.wbEnabled)?'workbuddy':'opencode';
+  if(v===state.chan) { renderChanSeg(); return; }
+  state.chan=v;
+  // 模型页的 Provider 下拉跟随渠道
+  state.catProvider='';
+  savePrefs({chan:state.chan});
+  renderChanSeg(); renderCatalog(); renderProviders(); renderModels(); renderRequests(); renderWbUsage(); renderWbCtx(); renderOcCtx();
+}
+
 /* ---------- 标签页 ---------- */
 var TABKEY='janus.ui.tab';
-function showTab(name){
+function showTab(name,skipSave){
   var btns=el('tabs').querySelectorAll('button');
   for(var i=0;i<btns.length;i++) btns[i].className=(btns[i].getAttribute('data-tab')===name)?'on':'';
   var panes=document.querySelectorAll('.tabpane');
   for(var j=0;j<panes.length;j++) panes[j].className='tabpane'+((panes[j].getAttribute('data-pane')===name)?' on':'');
-  try{ localStorage.setItem(TABKEY,name); }catch(e){}
+  if(!skipSave){ try{ localStorage.setItem(TABKEY,name); }catch(e){} savePrefs({tab:name}); }
   // 切回用量页时重画图表（隐藏时宽度为 0，画出来会不对）
   if(name==='usage'&&typeof renderChart==='function'){ try{ renderChart(); }catch(e){} }
 }
@@ -1029,7 +1368,37 @@ function bind(){
   el('catalogSearch').addEventListener('input',function(){ state.catQuery=el('catalogSearch').value; renderCatalog(); });
   el('catalogProvider').addEventListener('change',function(){ state.catProvider=el('catalogProvider').value; renderCatalog(); });
   el('catalogFree').addEventListener('change',function(){ state.catFree=el('catalogFree').value; renderCatalog(); });
+  // WorkBuddy 上下文预算切换：持久化到 settings，重启 janus 后对新拉起的会话生效
+  el('wbCtxSel').addEventListener('click',function(e){
+    var b=e.target.closest('button[data-wctx]'); if(!b) return;
+    var v=b.getAttribute('data-wctx');
+    if(v===state.wbCtx) return;
+    apiJSON('POST','/v1/settings',{workbuddy_context:v}).then(function(){
+      state.wbCtx=v; renderWbCtx(); fetchCatalog();
+      toast('WorkBuddy 上下文预算：'+(v==='max'?'最大档':'上游默认')+'（已保存并立即生效）');
+    }).catch(function(err){ toast('保存失败：'+((err&&err.message)||err)); });
+  });
+  // OpenCode 上下文预算覆盖：tokens 数字，0/空 = 目录默认；立即生效并持久化
+  el('ocCtxSel').addEventListener('click',function(e){
+    var b=e.target.closest('button[data-occtx]'); if(!b) return;
+    var n=parseInt((el('ocCtxInput')||{}).value,10);
+    if(isNaN(n)||n<0) n=0;
+    var cur=Number(state.ocCtx)||0;
+    if(n===cur){ toast('OpenCode 上下文预算未变化'); return; }
+    apiJSON('POST','/v1/settings',{opencode_context:n}).then(function(){
+      state.ocCtx=n; fetchCatalog();
+      toast('OpenCode 上下文预算：'+(n>0?fmtCompact(n)+' tokens':'目录默认')+'（已保存并立即生效）');
+    }).catch(function(err){ toast('保存失败：'+((err&&err.message)||err)); });
+  });
+  // 渠道小节头：点按折叠/展开该渠道分组；其余为档位/复制/设默认的行内操作
   el('catalogBody').addEventListener('click',function(e){
+    var pr=e.target.closest?e.target.closest('.prov-row'):null;
+    if(pr){
+      var g=pr.getAttribute('data-prov');
+      state.catCollapsed[g]=!state.catCollapsed[g];
+      renderCatalog();
+      return;
+    }
     // 思考档位：点选即设（高亮当前）
     var eb=e.target.closest?e.target.closest('.effbtn'):null;
     if(eb){
@@ -1060,7 +1429,7 @@ function bind(){
     (function(th){ th.addEventListener('click',function(){
       var k=th.getAttribute('data-ck');
       if(state.catSortKey===k) state.catSortDir=-state.catSortDir;
-      else { state.catSortKey=k; state.catSortDir=(k==='id'||k==='provider')?1:-1; }
+      else { state.catSortKey=k; state.catSortDir=(k==='id'||k==='provider'||k==='credits')?1:-1; }
       renderCatalog();
     }); })(cths[ci]);
   }
@@ -1086,6 +1455,30 @@ function bind(){
       renderModels();
     }); })(ths[i]);
   }
+  var pths=document.querySelectorAll('th[data-pk]');
+  for(var pi=0;pi<pths.length;pi++){
+    (function(th){ th.addEventListener('click',function(){
+      var k=th.getAttribute('data-pk');
+      if(state.provSortKey===k) state.provSortDir=-state.provSortDir;
+      else { state.provSortKey=k; state.provSortDir=(k==='cost_usd')?-1:1; }
+      renderProviders();
+    }); })(pths[pi]);
+  }
+  // 顶层渠道导航：点渠道进入该渠道视图（各自的用量/最近请求/模型）
+  el('chanBar').addEventListener('click',function(e){
+    var b=e.target.closest('button[data-chan]'); if(!b) return;
+    setChan(b.getAttribute('data-chan'));
+  });
+  // 渠道用量表：点渠道行进入该渠道视图
+  el('provBody').addEventListener('click',function(e){
+    var tr=e.target.closest?e.target.closest('tr[data-prov]'):null;
+    if(tr) setChan(tr.getAttribute('data-prov'));
+  });
+  // 模型用量行里的渠道名也可点
+  el('modelBody').addEventListener('click',function(e){
+    var c=e.target.closest?e.target.closest('[data-chan]'):null;
+    if(c) setChan(c.getAttribute('data-chan'));
+  });
 }
 
 function boot(){

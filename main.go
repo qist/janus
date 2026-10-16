@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -21,6 +23,10 @@ func main() {
 		case "models":
 			// 列出上游可用模型，帮用户挑 BRIDGE_DEFAULT_MODEL
 			runModels(os.Args[2:])
+			return
+		case "workbuddy-decrypt":
+			// 在装有 WorkBuddy 桌面版的机器上把 5.6 加密凭据解成明文
+			runWorkBuddyDecrypt(os.Args[2:])
 			return
 		}
 	}
@@ -39,6 +45,23 @@ func main() {
 
 	// WorkBuddy provider：必须在 EnsureUpstream 之前初始化——OpenCode 拉起时
 	// 生成的内联配置要包含 workbuddy provider（模型目录此刻就得就绪）。
+	// 上下文档位（workbuddy_context）持久化在 DB 里，也必须赶在内联配置
+	// 注入前读到，否则重启后回到 env 默认值。
+	if !dbMemoryDSN(cfg.DBPath) {
+		if d, err := openDB(cfg.DBPath); err == nil {
+			if v, ok := d.getSetting("workbuddy_context"); ok && (v == "max" || v == "default") {
+				cfg.WorkBuddyContext = v
+			}
+			if v, ok := d.getSetting("opencode_context"); ok {
+				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+					cfg.OpenCodeContext = n
+				}
+			}
+			if sqlDB, err := d.db.DB(); err == nil {
+				_ = sqlDB.Close()
+			}
+		}
+	}
 	initWorkBuddy(&cfg, log)
 
 	// 本次进程拉起的 upstream PID（退出时回收，见 stopManagedUpstream）。

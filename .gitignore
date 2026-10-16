@@ -13,3 +13,6 @@ __pycache__/
 
 # 发布产物
 /dist/
+
+# 第三方插件源码分析（本地参考材料，转录结论已进 workbuddy*.go 注释）
+/.wb-analysis/

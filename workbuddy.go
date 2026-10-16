@@ -422,7 +422,46 @@ type wbModel struct {
 	ContextWindow  int    `json:"contextWindow,omitempty"`
 	MaxOutputToken int    `json:"maxOutputTokens,omitempty"`
 	SupportsImages bool   `json:"supportsImages,omitempty"`
+	// Credits 是计费倍率的展示形态（如 "x0.79"）。上游目录行顶层 credits，
+	// 有的行带单位词（"x0.79 credits"）——统一去掉单位词，与插件的
+	// normalizeCredits 行为一致。
+	Credits string `json:"credits,omitempty"`
+
+	// Reasoning 元数据（行顶层 supportsReasoning / onlyReasoning + reasoning 对象）。
+	// SupportedEfforts 为 nil 表示上游未声明档位——此时不注入 variants，
+	// 让 OpenCode 保持通用默认档；非推理模型则注入空 variants 压掉自动档，
+	// 避免客户端选到上游会 400 的档位（实测：通用档 low/medium/high 不是
+	// 每个模型都收）。
+	Reasoning          bool     `json:"reasoning,omitempty"`
+	SupportedEfforts   []string `json:"supportedEfforts,omitempty"`
+	DefaultEffort      string   `json:"defaultEffort,omitempty"`
+	CanDisableThinking bool     `json:"canDisableThinking,omitempty"`
+	OnlyReasoning      bool     `json:"onlyReasoning,omitempty"`
+
+	// SupportedContexts 是上游声明的上下文档位（contextWindow.supportedLengths）。
+	// ContextWindow 只是默认预算（实测常为 300k），模型硬上限是 maxInputTokens；
+	// 上游不收 context 字段，选大档位 = 注入 OpenCode 的 limit.context 放宽
+	// 客户端预算（见 WORKBUDDY_CONTEXT）。
+	SupportedContexts []int `json:"supportedContexts,omitempty"`
 }
+
+// wbMaxContext 返回上下文注入值：mode=max 时取声明档位的最大值（至少不低于
+// 默认预算），否则用默认预算。
+func (m wbModel) wbMaxContext(mode string) int {
+	if mode != "max" || len(m.SupportedContexts) == 0 {
+		return m.ContextWindow
+	}
+	best := m.ContextWindow
+	for _, v := range m.SupportedContexts {
+		if v > best {
+			best = v
+		}
+	}
+	return best
+}
+
+// wbEffortValues 是 WorkBuddy 线上承认的思考强度拼写（与插件 EFFORT_VALUES 一致）。
+var wbEffortValues = map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true}
 
 // wbParseCatalog 解析 /v3/config 文档（兼容裸文档与 {code,msg,data} 信封两种形态）。
 // 目录的权威顺序取自 agents 里 name=="cli" 的 models 列表，再按 id 从 models 行补齐。
@@ -476,9 +515,37 @@ func wbParseCatalog(doc map[string]any) ([]wbModel, error) {
 			if n := wbNum(cw["defaultLength"]); n > 0 {
 				m.ContextWindow = n
 			}
+			if lens, ok := cw["supportedLengths"].([]any); ok {
+				for _, v := range lens {
+					if n := wbNum(v); n > 0 {
+						m.SupportedContexts = append(m.SupportedContexts, n)
+					}
+				}
+			}
 		}
 		if rm["supportsImages"] == true && rm["disabledMultimodal"] != true {
 			m.SupportsImages = true
+		}
+		// 计费倍率：行顶层 credits（实测 billing 为 null，倍率不在里面）。
+		m.Credits = wbNormalizeCredits(wbStr(rm["credits"]))
+		// 思考元数据：行顶层 supportsReasoning/onlyReasoning + reasoning 对象
+		// （转录自插件 resolveUpstreamReasoning；档位只认已知拼写）。
+		m.Reasoning = rm["supportsReasoning"] == true
+		m.OnlyReasoning = rm["onlyReasoning"] == true
+		if r, ok := rm["reasoning"].(map[string]any); ok {
+			if efforts, ok := r["supportedEfforts"].([]any); ok {
+				for _, e := range efforts {
+					if s, ok := e.(string); ok && wbEffortValues[s] {
+						m.SupportedEfforts = append(m.SupportedEfforts, s)
+					}
+				}
+			}
+			if s := wbStr(r["defaultEffort"]); wbEffortValues[s] {
+				m.DefaultEffort = s
+			} else if s := wbStr(r["effort"]); wbEffortValues[s] {
+				m.DefaultEffort = s
+			}
+			m.CanDisableThinking = r["canDisableThinking"] == true
 		}
 		byID[id] = m
 	}
@@ -492,6 +559,387 @@ func wbParseCatalog(doc map[string]any) ([]wbModel, error) {
 		return nil, errors.New("目录解析后模型列表为空")
 	}
 	return out, nil
+}
+
+// ---------- 计费（积分余额） ----------
+
+// wbNormalizeCredits 把目录里的计费倍率字符串规范成裸倍率（"x0.79 credits" →
+// "x0.79"）。与插件的 normalizeCredits 一致：去首尾空白、去掉结尾的单位词
+// credits/credit（大小写不敏感）、只剩单位词或空串视为没有倍率。
+func wbNormalizeCredits(s string) string {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return ""
+	}
+	lowered := strings.ToLower(t)
+	if lowered == "credits" || lowered == "credit" {
+		return ""
+	}
+	for _, suffix := range []string{" credits", " credit"} {
+		if strings.HasSuffix(lowered, suffix) {
+			t = strings.TrimSpace(t[:len(t)-len(suffix)])
+			break
+		}
+	}
+	if strings.EqualFold(t, "credits") || strings.EqualFold(t, "credit") {
+		return ""
+	}
+	return t
+}
+
+// wbCreditAccount 是一个计费套餐的剩余额度（个人账户的 Accounts 行，或
+// 企业账户展开出的单行）。
+type wbCreditAccount struct {
+	Package   string  `json:"package"`
+	Remain    float64 `json:"remain"`
+	Used      float64 `json:"used,omitempty"` // 周期已用（周期制）或 容量-剩余（总量制）
+	Size      float64 `json:"size,omitempty"`
+	EndTimeMs int64   `json:"end_time_ms,omitempty"` // 0 = 未知
+	Unlimited bool    `json:"unlimited,omitempty"`   // 上游 -1 = 无上限
+}
+
+// wbCreditExpiryBucket 是一个到期时间窗内的待失效积分汇总。
+type wbCreditExpiryBucket struct {
+	Total    float64 `json:"total"`
+	Packages int     `json:"packages"`
+}
+
+// wbCreditExpiry 是「即将过期」的三个时间窗（面板横幅用）。
+type wbCreditExpiry struct {
+	Within24h wbCreditExpiryBucket `json:"within_24h"`
+	Within3d  wbCreditExpiryBucket `json:"within_3d"`
+	Within7d  wbCreditExpiryBucket `json:"within_7d"`
+}
+
+// wbReqLog 是一次 WorkBuddy 上游调用的极简记录（面板「最近请求」用）。
+// console 的 request-logs 只统计 Zen 渠道，workbuddy 请求 janus 自己记。
+type wbReqLog struct {
+	Time   string `json:"time"`
+	Model  string `json:"model"`
+	Status int    `json:"status"` // janus 侧响应码（200=成功）
+	DurMs  int64  `json:"dur_ms"`
+}
+
+// wbCredits 是一次积分查询的聚合结果。与插件 WorkBuddyCredits 同构。
+type wbCredits struct {
+	Total          float64           `json:"total"`
+	TotalUsed      float64           `json:"total_used,omitempty"` // 已消耗积分合计
+	Unlimited      bool              `json:"unlimited,omitempty"`
+	Accounts       []wbCreditAccount `json:"accounts,omitempty"`
+	Expiry         *wbCreditExpiry   `json:"expiry,omitempty"`
+	CycleResetTime string            `json:"cycle_reset_time,omitempty"` // 仅 CN 企业账户
+	Region         string            `json:"region"`
+	FetchedAt      time.Time         `json:"fetched_at"`
+	// Recent 是面板展示用的最近请求（handleUsage 组装时附加，非上游字段）。
+	Recent []wbReqLog `json:"recent,omitempty"`
+}
+
+// wbFlexFloat 宽松取数：接受 JSON number，也接受数字字符串（不同版本上游
+// 金额字段偶有字符串形态，插件按 number 实测，这里放宽一点不伤语义）。
+func wbFlexFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case string:
+		var f float64
+		if _, err := fmt.Sscanf(strings.TrimSpace(n), "%g", &f); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+func wbFlexFloatOr(v any, def float64) float64 {
+	if n, ok := wbFlexFloat(v); ok {
+		return n
+	}
+	return def
+}
+
+// wbBillingBase 计费端点基址（国际版与 chat 同域；国内版在 codebuddy.cn）。
+func (c *wbCredential) wbBillingBase() string {
+	if c.region() == "global" {
+		return wbGlobalBase
+	}
+	return wbCnBillBase
+}
+
+// wbBillingHeaders 计费请求头（与插件 billingHeaders 一致：Bearer token +
+// 账号身份；企业号带 X-Enterprise-Id/X-Tenant-Id）。
+func wbBillingHeaders(cred *wbCredential) http.Header {
+	h := http.Header{}
+	h.Set("Authorization", "Bearer "+cred.AccessToken)
+	h.Set("Accept", "application/json")
+	h.Set("Content-Type", "application/json")
+	if cred.UID != "" {
+		h.Set("X-User-Id", cred.UID)
+	}
+	if cred.EnterpriseID != "" {
+		h.Set("X-Enterprise-Id", cred.EnterpriseID)
+		h.Set("X-Tenant-Id", cred.EnterpriseID)
+	}
+	if cred.Domain != "" {
+		h.Set("X-Domain", cred.Domain)
+	}
+	return h
+}
+
+// fetchCredits 拉取账号剩余积分。CN 企业账户走单周期配额端点，其余走套餐列表
+// 端点（转录自插件 fetchCredits / fetchEnterpriseCredits，行为逐条对齐）。
+func (c *workbuddyClient) fetchCredits(ctx context.Context) (*wbCredits, error) {
+	cred := c.credential()
+	if cred.region() == "cn" && cred.EnterpriseID != "" {
+		return c.fetchEnterpriseCredits(ctx, cred)
+	}
+	return c.fetchPersonalCredits(ctx, cred)
+}
+
+// fetchPersonalCredits 是套餐列表端点：返回有效期内（Status 0/3）的 p_tcaca
+// 套餐及其周期余量。remain 选取：有周期容量用周期余量；否则看周期字段是否
+// 出现过；再否则退回总量余量。负数按 0 计。
+func (c *workbuddyClient) fetchPersonalCredits(ctx context.Context, cred *wbCredential) (*wbCredits, error) {
+	base := cred.wbBillingBase()
+	if c.baseOverride != "" {
+		base = c.baseOverride
+	}
+	now := time.Now()
+	body := map[string]any{
+		"PageNumber":               1,
+		"PageSize":                 100,
+		"ProductCode":              "p_tcaca",
+		"Status":                   []int{0, 3},
+		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
+		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
+	}
+	raw, err := c.billingPost(ctx, base+"/v2/billing/meter/get-user-resource", cred, body)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("计费响应不是 JSON: %s", shrink(raw, 200))
+	}
+	// 信封：{code,data:{Response:{Data:{Accounts}}}}（与插件逐层一致；兼容
+	// 无 data/Response 的扁平形态）。
+	root := doc
+	if d, ok := doc["data"].(map[string]any); ok {
+		root = d
+	}
+	resp, _ := root["Response"].(map[string]any)
+	if resp == nil {
+		resp = root
+	}
+	data, _ := resp["Data"].(map[string]any)
+	if data == nil {
+		data = resp
+	}
+	rows, _ := data["Accounts"].([]any)
+	out := &wbCredits{Region: cred.region(), FetchedAt: time.Now().UTC()}
+	for _, row := range rows {
+		acc, ok := row.(map[string]any)
+		if !ok {
+			continue
+		}
+		size := wbFlexFloatOr(acc["CycleCapacitySize"], 0)
+		cycleRemain := wbFlexFloatOr(acc["CycleCapacityRemain"], 0)
+		cycleUsed := wbFlexFloatOr(acc["CycleCapacityUsed"], 0)
+		var remain float64
+		switch {
+		case size > 0:
+			remain = cycleRemain
+		case cycleRemain > 0 || cycleUsed > 0:
+			remain = cycleRemain
+		default:
+			remain = wbFlexFloatOr(acc["CapacityRemain"], 0)
+		}
+		if remain < 0 {
+			remain = 0
+		}
+		entry := wbCreditAccount{
+			Package:   firstNonEmpty(wbStr(acc["PackageName"]), "(unnamed)"),
+			Remain:    remain,
+			Size:      size,
+			EndTimeMs: wbParseCycleEndTimeMs(acc["CycleEndTime"]),
+		}
+		if entry.Size == 0 {
+			entry.Size = wbFlexFloatOr(acc["CapacitySize"], 0)
+		}
+		// 已用：容量-剩余 推导（实测国际版端点的 CycleCapacityUsed 恒 0，
+		// 消耗真实体现在 remain 上）；无容量信息时才退回 CycleCapacityUsed。
+		switch {
+		case entry.Size > 0:
+			entry.Used = entry.Size - remain
+		case cycleUsed > 0:
+			entry.Used = cycleUsed
+		}
+		if entry.Used < 0 {
+			entry.Used = 0
+		}
+		out.Total += remain
+		out.TotalUsed += entry.Used
+		out.Accounts = append(out.Accounts, entry)
+	}
+	out.Expiry = wbSummariseExpiry(out.Accounts, time.Now())
+	return out, nil
+}
+
+// fetchEnterpriseCredits 是 CN 企业账户端点：body 空对象，身份只走 header，
+// 返回单周期配额（limitNum/limit_num + credit/used_num 双拼写都认）。
+// limit=-1 是上游的「无上限」标记，必须显式携带不能当余额渲染。
+func (c *workbuddyClient) fetchEnterpriseCredits(ctx context.Context, cred *wbCredential) (*wbCredits, error) {
+	base := cred.wbBillingBase()
+	if c.baseOverride != "" {
+		base = c.baseOverride
+	}
+	raw, err := c.billingPost(ctx, base+"/v2/billing/meter/get-enterprise-user-usage", cred, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("计费响应不是 JSON: %s", shrink(raw, 200))
+	}
+	// 与插件一致：候选读位 = data.data、data、信封本身，取第一个带配额字段的。
+	var sources []map[string]any
+	for _, candidate := range []any{doc["data"], doc} {
+		rec, ok := candidate.(map[string]any)
+		if !ok {
+			continue
+		}
+		if inner, ok := rec["data"].(map[string]any); ok {
+			sources = append(sources, inner)
+		}
+		sources = append(sources, rec)
+	}
+	var limit, used float64
+	var haveLimit, haveUsed bool
+	var resetTime string
+	for _, src := range sources {
+		l, ok := wbFlexFloat(src["limitNum"])
+		if !ok {
+			l, ok = wbFlexFloat(src["limit_num"])
+		}
+		if !ok {
+			continue
+		}
+		limit = l
+		haveLimit = true
+		u, ok := wbFlexFloat(src["credit"])
+		if !ok {
+			u, ok = wbFlexFloat(src["used_num"])
+		}
+		if ok {
+			used = u
+			haveUsed = true
+		}
+		if s := wbStr(src["cycleResetTime"]); s != "" {
+			resetTime = s
+		}
+		break
+	}
+	if !haveLimit {
+		return nil, fmt.Errorf("企业计费响应没有可识别的配额字段（期望 limitNum/limit_num + credit/used_num）: %s", shrink(raw, 200))
+	}
+	out := &wbCredits{Region: cred.region(), FetchedAt: time.Now().UTC(), CycleResetTime: resetTime}
+	if limit == -1 {
+		out.Unlimited = true
+		out.Accounts = []wbCreditAccount{{Package: "enterprise", Unlimited: true}}
+		return out, nil
+	}
+	if !haveUsed {
+		return nil, fmt.Errorf("企业计费响应有配额上限但没有可识别的用量字段（期望 credit/used_num）: %s", shrink(raw, 200))
+	}
+	remain := limit - used
+	if remain < 0 {
+		remain = 0
+	}
+	out.Total = remain
+	out.TotalUsed = used
+	out.Accounts = []wbCreditAccount{{Package: "enterprise", Remain: remain, Used: used, Size: limit}}
+	return out, nil
+}
+
+// billingPost 发一次计费 POST 并校验信封 code==0。
+func (c *workbuddyClient) billingPost(ctx context.Context, url string, cred *wbCredential, body any) ([]byte, error) {
+	bctx, cancel := context.WithTimeout(ctx, wbJSONTimeout)
+	defer cancel()
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(bctx, http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	req.Header = wbBillingHeaders(cred)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("计费请求 http %d: %s", resp.StatusCode, shrink(raw, 200))
+	}
+	// 信封校验容错：个别形态可能没有 code 字段（按成功处理），有且非 0 才拒绝。
+	var probe map[string]any
+	if err := json.Unmarshal(raw, &probe); err == nil {
+		if code, ok := probe["code"].(float64); ok && int(code) != 0 {
+			return nil, fmt.Errorf("计费被拒 code=%d: %s", int(code), wbStr(probe["msg"]))
+		}
+	}
+	return raw, nil
+}
+
+// wbParseCycleEndTimeMs 解析套餐到期时间（"YYYY-MM-DD HH:mm:ss" 本地时区）。
+// 形态不对返回 0（未知），与插件的 parseCycleEndTime 语义一致。
+func wbParseCycleEndTimeMs(v any) int64 {
+	s := strings.TrimSpace(wbStr(v))
+	if s == "" {
+		return 0
+	}
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.Local); err == nil {
+		return t.UnixMilli()
+	}
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, time.Local); err == nil {
+		return t.UnixMilli()
+	}
+	return 0
+}
+
+// wbSummariseExpiry 汇总三个时间窗内将失效的积分。只算正余额与未来的到期
+// （已过去的套餐不算「即将过期」），与插件 summariseExpiry 一致。
+func wbSummariseExpiry(accounts []wbCreditAccount, now time.Time) *wbCreditExpiry {
+	hasEnd := false
+	for _, a := range accounts {
+		if a.EndTimeMs != 0 {
+			hasEnd = true
+			break
+		}
+	}
+	if !hasEnd {
+		return nil
+	}
+	day := 24 * time.Hour
+	bucket := func(horizon time.Duration) wbCreditExpiryBucket {
+		var b wbCreditExpiryBucket
+		for _, a := range accounts {
+			if a.Remain <= 0 || a.EndTimeMs == 0 {
+				continue
+			}
+			end := time.UnixMilli(a.EndTimeMs)
+			if end.After(now) && !end.After(now.Add(horizon)) {
+				b.Total += a.Remain
+				b.Packages++
+			}
+		}
+		return b
+	}
+	return &wbCreditExpiry{
+		Within24h: bucket(day),
+		Within3d:  bucket(3 * day),
+		Within7d:  bucket(7 * day),
+	}
 }
 
 // ---------- 客户端 ----------

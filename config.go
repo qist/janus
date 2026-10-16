@@ -91,6 +91,14 @@ type Config struct {
 	WorkBuddyEnabled    bool   // BRIDGE_WORKBUDDY_ENABLED，默认 false
 	WorkBuddyAuthFile   string // WORKBUDDY_AUTH_FILE：明文凭据文件路径（必填）
 	WorkBuddyAppVersion string // WORKBUDDY_APP_VERSION：桌面版版本号（UA 用），空=兜底 5.5.6
+	// WorkBuddyContext：注入 OpenCode 的上下文预算档位（WORKBUDDY_CONTEXT）。
+	// max（默认）= 用上游声明档位的最大值（如 1M，替代过小的默认预算 300k）；
+	// default = 用上游默认预算。上游不收 context 字段，这只放宽客户端预算。
+	WorkBuddyContext string
+	// OpenCodeContext：OpenCode 渠道（opencode/opencode-go）模型的上下文预算
+	// 覆盖（OPENCODE_CONTEXT，tokens；0 = 跟随目录值）。只影响 /v1/models
+	// 的展示预算，运行时可改并持久化。
+	OpenCodeContext int
 
 	SessionTTL        time.Duration // 会话空闲回收
 	SharedSessionTTL  time.Duration // 共享（scope）会话空闲回收；<0 = 永不回收
@@ -452,6 +460,8 @@ func LoadConfig() (Config, error) {
 		WorkBuddyEnabled:    loader.boolean("BRIDGE_WORKBUDDY_ENABLED", false),
 		WorkBuddyAuthFile:   loader.str("WORKBUDDY_AUTH_FILE", ""),
 		WorkBuddyAppVersion: loader.str("WORKBUDDY_APP_VERSION", ""),
+		WorkBuddyContext:    loader.str("WORKBUDDY_CONTEXT", "max"),
+		OpenCodeContext:     loader.integer("OPENCODE_CONTEXT", 0),
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),

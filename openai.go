@@ -221,6 +221,10 @@ type ModelObject struct {
 
 	// Free 标记该模型所有价格档位都是 0（上游的免费模型）。
 	Free bool `json:"free,omitempty"`
+
+	// WorkBuddyCredits 是 WorkBuddy 模型的计费倍率（如 "x0.79"，来自上游目录
+	// billing.credits）。非 workbuddy provider 的条目不带；x_ 前缀表明非标扩展。
+	WorkBuddyCredits string `json:"x_workbuddy_credits,omitempty"`
 }
 
 type ModelList struct {

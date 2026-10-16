@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 明文凭据两种形态都能解析；加密文件（无字符串 accessToken）明确报错。
@@ -237,4 +239,237 @@ func TestWorkBuddyProviderRoutes(t *testing.T) {
 		t.Fatalf("新 token 未生效: %q", c2.credential().AccessToken)
 	}
 	_ = context.Background()
+}
+
+// 倍率规范化：带单位词 / 纯单位词 / 大小写不敏感 / 空值。
+func TestWBNormalizeCredits(t *testing.T) {
+	cases := map[string]string{
+		"x0.79 credits": "x0.79",
+		"x0.79 Credits": "x0.79",
+		"x0.79 credit":  "x0.79",
+		"  x0.14  ":     "x0.14",
+		"x0.00":         "x0.00",
+		"credits":       "",
+		"Credit":        "",
+		"":              "",
+		"   ":           "",
+	}
+	for in, want := range cases {
+		if got := wbNormalizeCredits(in); got != want {
+			t.Fatalf("wbNormalizeCredits(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// 目录解析带出计费倍率（行顶层 credits）与思考元数据。
+func TestWBParseCatalogCredits(t *testing.T) {
+	doc := map[string]any{
+		"code": 0,
+		"data": map[string]any{
+			"models": []any{
+				map[string]any{"id": "m1", "credits": "x0.79 credits", "supportsReasoning": true,
+					"reasoning": map[string]any{"supportedEfforts": []any{"low", "high", "max", "bogus"},
+						"defaultEffort": "high", "canDisableThinking": true}},
+				map[string]any{"id": "m2", "credits": "x0.00", "supportsReasoning": true,
+					"reasoning": map[string]any{"effort": "medium", "canDisableThinking": false}},
+				map[string]any{"id": "m3"},
+				map[string]any{"id": "m4", "supportsReasoning": true, "onlyReasoning": true,
+					"reasoning": map[string]any{"supportedEfforts": []any{"high"}}},
+			},
+			"agents": []any{
+				map[string]any{"name": "cli", "models": []any{"m1", "m2", "m3", "m4"}},
+			},
+		},
+	}
+	models, err := wbParseCatalog(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if models[0].Credits != "x0.79" || models[1].Credits != "x0.00" || models[2].Credits != "" {
+		t.Fatalf("倍率解析不符: %+v", models)
+	}
+	// m1：声明档位过滤掉未知拼写，default/canDisable 带出。
+	if !models[0].Reasoning || len(models[0].SupportedEfforts) != 3 ||
+		models[0].DefaultEffort != "high" || !models[0].CanDisableThinking {
+		t.Fatalf("m1 思考元数据不符: %+v", models[0])
+	}
+	// m2：老形态 effort 字段兜底。
+	if models[1].DefaultEffort != "medium" || models[1].CanDisableThinking {
+		t.Fatalf("m2 思考元数据不符: %+v", models[1])
+	}
+	// m3：无思考元数据。
+	if models[2].Reasoning || models[2].SupportedEfforts != nil {
+		t.Fatalf("m3 应无思考元数据: %+v", models[2])
+	}
+	// m4：onlyReasoning 标记。
+	if !models[3].OnlyReasoning || len(models[3].SupportedEfforts) != 1 {
+		t.Fatalf("m4 思考元数据不符: %+v", models[3])
+	}
+}
+
+// variants 注入语义：声明档位注入/off 按 canDisable、非推理模型空表压档。
+func TestWBModelConfigsVariants(t *testing.T) {
+	rt := &workbuddyRuntime{
+		client: newWorkBuddyClient(&wbCredential{AccessToken: "at", Domain: ""}, ""),
+		models: []wbModel{
+			{ID: "declared", Name: "D", Reasoning: true, SupportedEfforts: []string{"low", "high", "max"}, DefaultEffort: "high", CanDisableThinking: true},
+			{ID: "nodeclare", Name: "N", Reasoning: true},
+			{ID: "plain", Name: "P"},
+			{ID: "onlyre", Name: "O", Reasoning: true, SupportedEfforts: []string{"high"}, CanDisableThinking: true, OnlyReasoning: true},
+		},
+	}
+	cfg := rt.modelConfigs()
+	d := cfg["declared"].(map[string]any)
+	v := d["variants"].(map[string]any)
+	if _, ok := v["low"]; !ok {
+		t.Fatalf("declared 缺 low 档: %v", v)
+	}
+	if v["low"].(map[string]any)["reasoningEffort"] != "low" {
+		t.Fatalf("low 档 settings 不符: %v", v["low"])
+	}
+	if _, ok := v["off"]; !ok {
+		t.Fatalf("canDisableThinking 应有 off 档: %v", v)
+	}
+	if _, ok := cfg["nodeclare"].(map[string]any)["variants"]; ok {
+		t.Fatalf("未声明档位不应注入 variants")
+	}
+	p := cfg["plain"].(map[string]any)
+	if em, ok := p["variants"].(map[string]any); !ok || len(em) != 0 {
+		t.Fatalf("非推理模型应注入空 variants 压档: %v", p["variants"])
+	}
+	// CN 端 onlyReasoning：off 线上必拒，不给。
+	o := cfg["onlyre"].(map[string]any)["variants"].(map[string]any)
+	if _, ok := o["off"]; ok {
+		t.Fatalf("onlyReasoning 不应给 off 档: %v", o)
+	}
+}
+
+// 积分查询（个人套餐路径）：信封逐层、remain 选取、到期分桶、身份头与请求体。
+func TestWBFetchPersonalCredits(t *testing.T) {
+	var gotAuth, gotUser, gotTenant, gotDomain, gotBody string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/billing/meter/get-user-resource" {
+			t.Errorf("路径不对: %s", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		gotUser = r.Header.Get("X-User-Id")
+		gotTenant = r.Header.Get("X-Tenant-Id")
+		gotDomain = r.Header.Get("X-Domain")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		// 两个套餐：一个周期制（size>0 → 取 CycleCapacityRemain），一个总量制。
+		// 到期时间取 now+6h，保证 24h/3d/7d 分桶在任意运行日期都稳定命中。
+		endTime := time.Now().Add(6 * time.Hour).Format("2006-01-02 15:04:05")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"code": 0,
+			"data": map[string]any{
+				"Response": map[string]any{
+					"Data": map[string]any{
+						"Accounts": []any{
+							map[string]any{
+								"PackageName":         "月度套餐",
+								"CycleCapacitySize":   1000,
+								"CycleCapacityUsed":   300,
+								"CycleCapacityRemain": 700,
+								"CycleEndTime":        endTime,
+							},
+							map[string]any{
+								"PackageName":    "永久包",
+								"CapacitySize":   500,
+								"CapacityRemain": 250,
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer up.Close()
+
+	// 全局版个人账户（不带企业号，走套餐列表端点）。
+	cred := &wbCredential{AccessToken: "at", UID: "u1", Domain: "workbuddy.ai"}
+	c := newWorkBuddyClient(cred, "")
+	c.baseOverride = up.URL
+	credits, err := c.fetchCredits(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer at" || gotUser != "u1" || gotTenant != "" || gotDomain != "workbuddy.ai" {
+		t.Fatalf("计费身份头不符: auth=%q user=%q tenant=%q domain=%q", gotAuth, gotUser, gotTenant, gotDomain)
+	}
+	if !strings.Contains(gotBody, `"ProductCode":"p_tcaca"`) {
+		t.Fatalf("请求体缺 ProductCode: %s", gotBody)
+	}
+	if credits.Total != 950 {
+		t.Fatalf("总额应 700+250=950: %+v", credits)
+	}
+	if len(credits.Accounts) != 2 || credits.Accounts[0].Remain != 700 || credits.Accounts[1].Remain != 250 {
+		t.Fatalf("套餐明细不符: %+v", credits.Accounts)
+	}
+	if credits.Accounts[0].Size != 1000 || credits.Accounts[1].Size != 500 {
+		t.Fatalf("容量不符: %+v", credits.Accounts)
+	}
+	// 到期分桶：唯一带到期时间的套餐落在所有窗口内，永久包不参与。
+	if credits.Expiry == nil || credits.Expiry.Within24h.Packages != 1 || credits.Expiry.Within24h.Total != 700 {
+		t.Fatalf("24h 到期分桶不符: %+v", credits.Expiry)
+	}
+	if credits.Expiry.Within7d.Total != 700 || credits.Expiry.Within3d.Total != 700 {
+		t.Fatalf("3d/7d 到期分桶不符: %+v", credits.Expiry)
+	}
+}
+
+// 积分查询（CN 企业路径）：limit/used 双拼写、-1 无上限、缺用量字段硬报错。
+func TestWBFetchEnterpriseCredits(t *testing.T) {
+	cred := &wbCredential{AccessToken: "at", UID: "u1", EnterpriseID: "e1"}
+	c := newWorkBuddyClient(cred, "")
+
+	// ① 正常：data.data 读位 + limit_num/used_num 拼写。
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/billing/meter/get-enterprise-user-usage" {
+			t.Errorf("路径不对: %s", r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"code": 0,
+			"data": map[string]any{
+				"data":           map[string]any{"limit_num": 1000, "used_num": 400, "cycleResetTime": "2026-11-01 00:00:00"},
+				"cycleResetTime": "",
+			},
+		})
+	}))
+	c.baseOverride = up.URL
+	credits, err := c.fetchCredits(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	up.Close()
+	if credits.Total != 600 || len(credits.Accounts) != 1 || credits.Accounts[0].Package != "enterprise" {
+		t.Fatalf("企业余量不符: %+v", credits)
+	}
+	if credits.CycleResetTime != "2026-11-01 00:00:00" {
+		t.Fatalf("重置时间不符: %+v", credits)
+	}
+
+	// ② -1 = 无上限。
+	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "data": map[string]any{"limitNum": -1}})
+	}))
+	c.baseOverride = up2.URL
+	credits, err = c.fetchCredits(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	up2.Close()
+	if !credits.Unlimited || credits.Total != 0 {
+		t.Fatalf("无上限形态不符: %+v", credits)
+	}
+
+	// ③ 有上限无用量 → 硬报错（宁可报错也不渲染 0）。
+	up3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "data": map[string]any{"limitNum": 1000}})
+	}))
+	c.baseOverride = up3.URL
+	if _, err = c.fetchCredits(context.Background()); err == nil {
+		t.Fatal("缺用量字段应报错")
+	}
+	up3.Close()
 }

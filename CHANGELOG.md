@@ -4,6 +4,64 @@
 
 ---
 
+## [v0.3.55] - 2026-10-16
+
+### 新增
+**WorkBuddy 凭据解密子命令**：`janus workbuddy-decrypt` 把 WorkBuddy 桌面版
+5.6 的加密凭据文件（`{$wbEncrypted:1}` 信封）解成明文，供 `WORKBUDDY_AUTH_FILE`
+使用——不再必须装 dsh-workbuddy-connect 插件。
+
+- 密钥经桌面版自己的 Electron 二进制（`ELECTRON_RUN_AS_NODE=1`）解封
+  `atRestSecretKey`；protectorKey = sha256(secret)，keyId 与信封自校验。
+- 凭据文件/桌面版二进制按平台自动发现（Windows 自动探测国内版与
+  WorkBuddyAI 两处默认安装位置）；`-bin` / `-in` / `-variant` / `-o` 可覆盖。
+- 解出的明文 refreshToken 可无限续期，导一次长期可用。
+
+**WorkBuddy 积分余额展示**（协议转录自 dsh-workbuddy-connect 的
+fetchCredits / fetchEnterpriseCredits）：
+
+- `workbuddyClient.fetchCredits`：个人账户 `POST /v2/billing/meter/
+  get-user-resource`（套餐明细 + remain 选取 + 24h/3d/7d 到期分桶）；
+  CN 企业账户走 `get-enterprise-user-usage` 单周期配额（limitNum/limit_num +
+  credit/used_num 双拼写，`-1` 显式为无上限，缺用量字段硬报错不渲染 0）。
+- `GET /v1/usage` 响应附带 `workbuddy` 字段（缓存 5 分钟；失败 60s 负缓存 +
+  旧数据回落，绝不拖垮用量主报告）。
+- `/v1/models` 的 workbuddy 模型条目带 `x_workbuddy_credits` 计费倍率
+  （目录 `billing.credits` 规范化，与插件 normalizeCredits 一致）。
+
+**WorkBuddy 思考强度档位精确透传**（180 上 opencode v2.0.27 实测 variants 语义）：
+
+- 目录行思考元数据解析（行顶层 `supportsReasoning`/`onlyReasoning` +
+  `reasoning` 对象，转录自插件 resolveUpstreamReasoning；档位只认
+  low/medium/high/xhigh/max）。
+- modelConfigs 注入 variants：声明档位的推理模型按声明注入
+  `{effort: {reasoningEffort}}`（替换 OpenCode 自作主张的通用档）；off 档
+  只在 `canDisableThinking` 时提供（CN 端 onlyReasoning 模型线上必拒 off，
+  不给）；非推理模型注入空 variants 压掉自动档（选不到就不会发出上游必
+  400 的 effort）；未声明档位的推理模型保持 OpenCode 通用默认。
+- `/v1/models` 的 workbuddy 条目 `supported_reasoning_efforts` 即上游声明
+  的真实档位（如 glm-5.3-flash → low/high/max/off，hy4-preview → high）。
+- 启动改为**同步**刷新目录：variants 在拉起 opencode 时随内联配置一次性
+  注入，后台刷新来不及（缓存旧形态会整体退化成无档）；刷新失败仍有缓存
+  兜底。
+- credits 读取位置修正：线上行 `billing` 为 null，倍率在行顶层 `credits`。
+- `workbuddy-decrypt` Windows 端自动发现补充 WorkBuddyAI 默认安装位置
+  （`%LOCALAPPDATA%\Programs\WorkBuddyAI\WorkBuddyAI.exe`）。
+- `/v1/usage` 移除顶部数据来源行（多数据源后不再单指 console）。
+
+### 修复
+- workbuddy-decrypt 的 keyId 自校验公式：`sha256(protectorKey)` 双重哈希
+  （与插件封格式/交叉实现测试向量一致），原单重哈希对真实数据必误报
+  「凭据被另一处安装封存」。
+
+### 验证
+- `go vet` + `go test ./...` 全绿（新增：倍率规范化/目录倍率与思考元数据
+  解析/variants 注入语义/个人与企业积分查询假上游含身份头与请求体断言；
+  解密链 E2E 修复后通过）。UI JS 经 node --check 语法校验；180 实测：
+  渠道视图切换、档位与上下文立即生效、持久化跨重启、积分与请求记录。
+
+---
+
 ## [v0.3.54] - 2026-10-16
 
 ### 新增

@@ -31,7 +31,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,6 +46,133 @@ type workbuddyRuntime struct {
 	client *workbuddyClient
 	models []wbModel
 	store  string // 缓存目录（凭据副本 / 模型目录）
+
+	// 积分余额缓存：新鲜窗口内直接复用；失败后进入负缓存窗口（不重试，
+	// 有旧数据回落旧数据），对齐用量接口的失败负缓存策略。
+	creditsMu      sync.Mutex
+	creditsCache   *wbCredits
+	creditsFreshAt time.Time
+	creditsFailAt  time.Time
+
+	// reqLog 是 workbuddy 上游调用的内存环形记录（最近 100 条，面板展示）。
+	reqMu  sync.Mutex
+	reqLog []wbReqLog
+}
+
+// wbReqLogCap 是 workbuddy 最近请求的内存保留条数。
+const wbReqLogCap = 100
+
+// recordWBReq 追加一条请求记录（最新在前，超限截断）。
+func (r *workbuddyRuntime) recordWBReq(e wbReqLog) {
+	r.reqMu.Lock()
+	defer r.reqMu.Unlock()
+	r.reqLog = append([]wbReqLog{e}, r.reqLog...)
+	if len(r.reqLog) > wbReqLogCap {
+		r.reqLog = r.reqLog[:wbReqLogCap]
+	}
+}
+
+// recentRequests 返回最近请求副本（无记录返回 nil）。
+func (r *workbuddyRuntime) recentRequests() []wbReqLog {
+	r.reqMu.Lock()
+	defer r.reqMu.Unlock()
+	if len(r.reqLog) == 0 {
+		return nil
+	}
+	out := make([]wbReqLog, len(r.reqLog))
+	copy(out, r.reqLog)
+	return out
+}
+
+// 积分缓存窗口：新鲜 5 分钟；失败后 60 秒内不再打上游。
+const (
+	wbCreditsFreshTTL  = 5 * time.Minute
+	wbCreditsRetryGate = 60 * time.Second
+)
+
+// creditsSnapshot 返回积分余额（带缓存）。没有可用数据时返回 nil——调用方
+// 据此省略字段，绝不能因为积分挂了拖垮 /v1/usage 主报告。
+func (r *workbuddyRuntime) creditsSnapshot(ctx context.Context) *wbCredits {
+	r.creditsMu.Lock()
+	defer r.creditsMu.Unlock()
+	now := time.Now()
+	if r.creditsCache != nil && now.Sub(r.creditsFreshAt) < wbCreditsFreshTTL {
+		return r.creditsCache
+	}
+	if now.Sub(r.creditsFailAt) < wbCreditsRetryGate {
+		return r.creditsCache
+	}
+	credits, err := r.client.fetchCredits(ctx)
+	if err != nil {
+		r.creditsFailAt = now
+		r.log.Debugf("workbuddy: 积分查询失败: %v", err)
+		return r.creditsCache
+	}
+	r.creditsCache = credits
+	r.creditsFreshAt = now
+	return credits
+}
+
+// wbCreditsFor 返回 workbuddy 模型的计费倍率（其他 provider 返回空串）。
+func wbCreditsFor(providerID, modelID string) string {
+	if wbRuntime == nil || providerID != "workbuddy" {
+		return ""
+	}
+	for _, m := range wbRuntime.models {
+		if m.ID == modelID {
+			return m.Credits
+		}
+	}
+	return ""
+}
+
+// wbCreditsIsFree 判断倍率是否为零倍率（免费）："x0.00" / "x0.0" 视为免费，
+// 与插件的 free 判定（/^x?0\.0+$/）一致。
+func wbCreditsIsFree(credits string) bool {
+	s := strings.TrimPrefix(strings.TrimSpace(credits), "x")
+	if s == "" {
+		return false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	return err == nil && f == 0
+}
+
+// wbContextOverride 返回 workbuddy 模型当前生效的上下文预算（读运行时设置，
+// 设置变更立即反映到 /v1/models，不等 OpenCode 重注入）；非 workbuddy 返回 0。
+func wbContextOverride(providerID, modelID string) int {
+	if wbRuntime == nil || providerID != "workbuddy" {
+		return 0
+	}
+	mode := "max"
+	if wbRuntime.cfg != nil {
+		mode = wbRuntime.cfg.WorkBuddyContext
+	}
+	for _, m := range wbRuntime.models {
+		if m.ID == modelID {
+			return m.wbMaxContext(mode)
+		}
+	}
+	return 0
+}
+
+// toOpenAIWithCredits 把模型转成 OpenAI 条目；workbuddy 模型附带计费倍率，
+// 且上下文长度用运行时档位覆盖（立即生效）。非 workbuddy 模型（opencode
+// 渠道）可用 ocCtx 覆盖展示预算（0 = 跟随目录）。
+// 零倍率同时打上免费标记（workbuddy 无 OpenCode cost 数据，isFreeModel 判不出）。
+func toOpenAIWithCredits(m OCModel, ocCtx int) ModelObject {
+	obj := ToOpenAI(m)
+	if c := wbCreditsFor(m.ProviderID, m.ID); c != "" {
+		obj.WorkBuddyCredits = c
+		if wbCreditsIsFree(c) {
+			obj.Free = true
+		}
+	}
+	if ctx := wbContextOverride(m.ProviderID, m.ID); ctx > 0 {
+		obj.ContextLength = ctx
+	} else if ocCtx > 0 && m.ProviderID != "workbuddy" {
+		obj.ContextLength = ocCtx
+	}
+	return obj
 }
 
 // wbRuntime 是全局运行时（nil = 未启用）。
@@ -96,14 +225,13 @@ func newWorkBuddyRuntime(cfg *Config, log *Logger) (*workbuddyRuntime, error) {
 	// 续期成功后把新凭据落盘，避免每次重启都重刷一遍。
 	client.onRefresh = func(c *wbCredential) { rt.persistCredential(c) }
 
-	// 模型目录：先看缓存，再尝试刷新（刷新失败仍用缓存；都没有则报错）。
+	// 模型目录：先看缓存，再同步刷新。必须同步——variants（思考强度档位）
+	// 是在拉起 opencode 时随 OPENCODE_CONFIG_CONTENT 注入的，刷新晚了
+	// 这一轮进程就带不上真实档位（缓存旧形态会全部退化成无档）。
+	// 刷新失败仍有缓存兜底；两者皆无才禁用 provider。
 	rt.loadCatalog()
-	if len(rt.models) == 0 {
-		if err := rt.refreshCatalog(context.Background()); err != nil {
-			return nil, fmt.Errorf("拿不到 WorkBuddy 模型目录: %w", err)
-		}
-	} else {
-		go rt.refreshCatalog(context.Background()) // 后台刷新，不阻塞启动
+	if err := rt.refreshCatalog(context.Background()); err != nil && len(rt.models) == 0 {
+		return nil, fmt.Errorf("拿不到 WorkBuddy 模型目录: %w", err)
 	}
 
 	log.Infof("workbuddy provider enabled: region=%s base=%s models=%d",
@@ -117,13 +245,27 @@ func (r *workbuddyRuntime) baseURL() string {
 }
 
 // modelConfigs 生成 OpenCode provider 配置里的 models 映射。
+//
+// variants 语义（180 上 opencode v2.0.27 实测）：
+//   - 声明了档位的推理模型 → 注入 {effort: {reasoningEffort: effort}}，
+//     OpenCode 的模型列表即只提供这些档位（请求构造时映射为线上的
+//     reasoning_effort），替换掉它自作主张的通用档 low/medium/high；
+//   - 未声明档位的推理模型 → 不注入，保持 OpenCode 通用默认；
+//   - 非推理模型 → 注入空 variants 压掉自动档（选不到就不会发出上游
+//     必 400 的 effort）。
+//   - off 档只在 canDisableThinking 为真时提供（CN 端 onlyReasoning 模型
+//     线上拒 off，同样不给）。
 func (r *workbuddyRuntime) modelConfigs() map[string]any {
 	out := make(map[string]any, len(r.models))
+	mode := ""
+	if r.cfg != nil {
+		mode = r.cfg.WorkBuddyContext
+	}
 	for _, m := range r.models {
 		entry := map[string]any{"name": m.Name}
 		limit := map[string]any{}
-		if m.ContextWindow > 0 {
-			limit["context"] = m.ContextWindow
+		if ctx := m.wbMaxContext(mode); ctx > 0 {
+			limit["context"] = ctx
 		}
 		if m.MaxOutputToken > 0 {
 			limit["output"] = m.MaxOutputToken
@@ -133,6 +275,21 @@ func (r *workbuddyRuntime) modelConfigs() map[string]any {
 		}
 		if m.SupportsImages {
 			entry["attachment"] = true
+		}
+		variants := map[string]any{}
+		switch {
+		case m.Reasoning && len(m.SupportedEfforts) > 0:
+			for _, e := range m.SupportedEfforts {
+				variants[e] = map[string]any{"reasoningEffort": e}
+			}
+			if m.CanDisableThinking && !(m.OnlyReasoning && r.client.credential().region() == "cn") {
+				variants["off"] = map[string]any{"reasoningEffort": "off"}
+			}
+			entry["variants"] = variants
+		case m.Reasoning:
+			// 未声明档位：保持 OpenCode 通用默认档。
+		default:
+			entry["variants"] = variants // 空 map：压掉自动档
 		}
 		out[m.ID] = entry
 	}
@@ -190,8 +347,26 @@ func (r *workbuddyRuntime) handleChat(w http.ResponseWriter, req *http.Request) 
 	}
 	body := wbPrepareBody(raw)
 
+	// 请求记录：console 的 request-logs 不统计 workbuddy 渠道，这里自记
+	// （模型名取自原始 body；耗时到上游响应为止，SSE 流式阶段不计）。
+	var probe struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+	start := time.Now()
+	status := http.StatusOK
+	defer func() {
+		r.recordWBReq(wbReqLog{
+			Time:   time.Now().Format("15:04:05"),
+			Model:  probe.Model,
+			Status: status,
+			DurMs:  time.Since(start).Milliseconds(),
+		})
+	}()
+
 	resp, err := r.client.chat(req.Context(), body)
 	if err != nil {
+		status = http.StatusBadGateway
 		r.writeOpenAIError(w, http.StatusBadGateway, "api_error", "workbuddy: "+Redact(err.Error()))
 		return
 	}
@@ -204,7 +379,8 @@ func (r *workbuddyRuntime) handleChat(w http.ResponseWriter, req *http.Request) 
 		if msg == "" {
 			msg = shrink(head, 300)
 		}
-		r.writeOpenAIError(w, wbStatusFor(kind), string(kind), "workbuddy 上游: "+msg)
+		status = wbStatusFor(kind)
+		r.writeOpenAIError(w, status, string(kind), "workbuddy 上游: "+msg)
 		return
 	}
 

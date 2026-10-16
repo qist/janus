@@ -627,8 +627,9 @@ OpenCode 上游并行工作：
 
 - 启动时拉取模型目录（`GET /v3/config`，缓存 `<数据目录>/workbuddy/catalog-<region>.json`，后台定期刷新）；
 - 在本机起 `/workbuddy/{token}/v1/chat/completions` 透传端点（仅回环可达，token 随机生成、不落配置）；
-- 经 OpenCode 内联配置注入 provider `workbuddy`，模型即以 **`workbuddy/<id>`** 出现在 `/v1/models`；
-- 请求自动补齐 WorkBuddy 桌面身份头（`X-IDE-*` / `X-User-Id` / `X-Conv-*` / `X-Product`），并规整请求体（强制 `stream`、`developer`→`system`、拍平 `tool_choice`），401 自动用 refreshToken 续期重试一次。
+- 经 OpenCode 内联配置注入 provider `workbuddy`，模型即以 **`workbuddy/<id>`** 出现在 `/v1/models`（条目带 `x_workbuddy_credits` 计费倍率）；
+- 请求自动补齐 WorkBuddy 桌面身份头（`X-IDE-*` / `X-User-Id` / `X-Conv-*` / `X-Product`），并规整请求体（强制 `stream`、`developer`→`system`、拍平 `tool_choice`），401 自动用 refreshToken 续期重试一次；
+- 积分余额查询：`/v1/usage` 响应附带 `workbuddy` 字段（套餐明细、剩余总额、24h/3d/7d 到期分桶；个人/CN 企业端点自动分流）。查询失败只降级（60s 负缓存 + 旧数据回落），不影响用量主报告。
 
 ### 凭据准备（必须先做）
 
@@ -643,9 +644,15 @@ OpenCode 上游并行工作：
 
 WorkBuddy AI 桌面版 5.6 起本地凭据是**加密信封**，janus 读不了。导出明文：
 
-1. 找一台装了 WorkBuddy AI 桌面版（并已登录）的机器；
-2. 安装 [dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) 插件（或直接读它的自留副本）——它会把凭据明文留在 `$DSH_HOME/.workbuddy-ai-auth.json`；
-3. 把该文件拷到 janus 主机，`WORKBUDDY_AUTH_FILE` 指向它（或放 `<数据目录>/workbuddy/credential.json`）。
+1. 找一台装了 WorkBuddy 桌面版（并已登录）的机器，跑内置解密子命令：
+
+   ```bash
+   janus workbuddy-decrypt -o out.json            # 自动发现桌面版与凭据文件
+   # 找不到时：-bin 指向桌面版 exe / -in 指向 .info 文件 / -variant cn|ai 限定产品
+   ```
+
+   （或继续用 [dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) 插件导出——它会把凭据明文留在 `$DSH_HOME/.workbuddy-ai-auth.json`。）
+2. 把该文件拷到 janus 主机，`WORKBUDDY_AUTH_FILE` 指向它（或放 `<数据目录>/workbuddy/credential.json`）。
 
 > refreshToken 续期不依赖桌面版；accessToken 过期后 janus 自动刷新并回写凭据文件。
 

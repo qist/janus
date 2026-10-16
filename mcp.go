@@ -220,6 +220,8 @@ func (s *Server) mcpToolCall(w http.ResponseWriter, r *http.Request, id json.Raw
 	if res.TimedOut || res.Aborted {
 		pend.markStale()
 		s.metrics.incToolTimeouts()
+		// 楔死取证：找回本轮 tool_calls 响应的落盘文件，与成功轮逐字节对比
+		s.forensics.trace(pend.CallID)
 	}
 	if res.TimedOut {
 		// 调用属于当前绑定：标记 terminated（下一轮重放保护：同内容 → 499，

@@ -4,6 +4,29 @@
 
 ---
 
+## [v0.3.52] - 2026-10-16
+
+### 修复
+**kill/重启类命令经 RunCommand blocking=true 执行时，客户端偶发楔死**（两次
+楔死都是同一条 `kill -9 + nohup 重启` 命令：交付后 Trae 不执行也不回传，任务
+卡死，详见 v0.3.51 的取证）。
+
+**规避：RunCommand 类工具描述追加异步引导**——模型对 kill / systemctl /
+nohup / 超过 ~30s 的命令一律改用 `blocking=false` + 轮询
+`CheckCommandStatus`（异步模式实测稳定，昨天的构建就是这么走的）。
+
+- 注入点在注册源头（ensureTools）：描述变化体现在工具集指纹里 → 指纹改名 →
+  opencode 必然重新拉 tools/list（它对同名 server 的重新 PUT 不重列工具）。
+  若只在 tools/list 暴露层注入，指纹不变，已有会话永远看不到新描述。
+- 仅当配套状态查询工具可用时注入（`BRIDGE_TOOL_COMPANIONS`，避免引导模型
+  调用不存在的工具）；幂等，其余工具不受影响。
+
+### 验证
+- 新增 `TestSteerAsyncCommandDesc`（触发工具命中/非触发工具/禁用配套/幂等
+  四段断言）；`go vet` + `go test ./...` 全绿。
+
+---
+
 ## [v0.3.51] - 2026-10-16
 
 ### 新增

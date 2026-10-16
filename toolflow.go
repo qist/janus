@@ -28,6 +28,13 @@ func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string
 	if s.cfg.ToolCompanions {
 		tools = augmentCompanionTools(tools)
 	}
+	// 异步命令引导：改写 RunCommand 类工具的描述（对 kill/重启/长命令强制
+	// blocking=false + 状态查询轮询），绕开客户端同步执行器的楔死窗口。
+	// 必须在指纹计算之前改——描述变化要体现在指纹里，驱动 opencode 重新拉
+	// tools/list（它对同名 server 的重新 PUT 不重列工具）。
+	for i := range tools {
+		tools[i].Function.Description = steerAsyncCommandDesc(s.cfg.ToolCompanions, tools[i].Function.Name, tools[i].Function.Description)
+	}
 	sess := s.tools.Register(conv.Key, tools)
 	// 工具结果超时时标记会话 terminated：下一轮请求若重发相同内容（Trae 自动重试）
 	// 会被 499 挡掉，不白跑一遍；若发了新内容则走 terminated 路径重建。
@@ -175,6 +182,29 @@ var companionTriggerTools = map[string]bool{
 
 // companionToolID 是配套状态查询工具的入参（RunCommand 返回的异步命令 id）。
 const companionToolID = "command_id"
+
+// asyncCommandSteeringNote 追加到 RunCommand 类工具描述末尾的引导：让模型对
+// kill / 重启 / nohup / 长命令一律走异步模式（blocking=false + 轮询状态查询），
+// 绕开客户端同步执行器的楔死窗口——实测两次楔死都是 blocking=true 的
+// 「kill -9 + nohup 重启」命令，交付后客户端不执行也不回传。
+const asyncCommandSteeringNote = "IMPORTANT: for any command that kills processes, starts/stops/restarts a service " +
+	"(kill, systemctl, service, nohup, background `&`), or may take longer than ~30 seconds (build/test/publish), " +
+	"ALWAYS run it asynchronously with blocking=false, then poll CheckCommandStatus / check_command_status with the " +
+	"returned command_id until it finishes. Never run such commands with blocking=true: the client may abort the " +
+	"hanging call and the whole task stalls."
+
+// steerAsyncCommandDesc 给 RunCommand 类工具的描述追加异步引导（仅当配套状态查询
+// 工具可用时——否则模型会去调一个不存在的工具）。其余工具原样返回。幂等：已含
+// 引导的描述不重复追加。
+func steerAsyncCommandDesc(companions bool, toolName, desc string) string {
+	if !companions || !companionTriggerTools[strings.ToLower(toolName)] {
+		return desc
+	}
+	if strings.Contains(desc, asyncCommandSteeringNote) {
+		return desc
+	}
+	return strings.TrimSpace(strings.TrimSpace(desc) + "\n\n" + asyncCommandSteeringNote)
+}
 
 // companionToolSchema 描述配套状态查询工具的入参：command_id 取 RunCommand 返回的 id。
 var companionToolSchema = json.RawMessage(`{"type":"object","properties":{"` +

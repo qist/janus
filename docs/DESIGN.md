@@ -208,11 +208,13 @@ fledge-alpha-free                       → 在已知列表中唯一匹配则采
 3. `/v1/models` 返回的 `id` 使用**完整 `provider/id` 形式**，保证客户端回传时无歧义。
 4. `GET /api/model` 缓存 60s（模型列表变化不频繁），`/v1/models?refresh=1` 强刷。
 
-**模型别名**：客户端可填 `default` / `auto` / 留空，桥会实时解析为上游
-`GET /api/model/default` 的当前值（`ModelCache.Default` 带缓存）。
-`/v1/models` 首条固定输出虚拟模型 `default`，让客户端下拉框里就有"用上游默认"
-这个选项 —— 避免把 `opencode/fledge-alpha-free` 这类具体名字写进客户端配置，
-上游换默认时无需改配置。
+**模型别名**：客户端可填 `janus`（**推荐**：解析到 `/ui` 面板选定的默认模型，
+存 DB、含思考档位；换模型只动面板，不改客户端/env），或 `default` / `auto` /
+留空——这三者实时解析为上游 `GET /api/model/default` 的当前值（**上游官方默认**，
+随时可能被上游改动、也可能落在免费档；`ModelCache.Default` 带缓存）。
+`/v1/models` 首条固定输出虚拟模型 `janus`、第二条 `default`，让客户端下拉框里
+直接有推荐项与"用上游默认"选项 —— 避免把 `opencode/nemotron-3.5-super-vl-free`
+这类具体名字写进客户端配置，上游换默认时无需改配置。
 
 **思考强度（`reasoning_effort`）**：上游模型的 `variant` 实测就是思考强度档位
 （`variant.settings.reasoningEffort = <档位>`），可用值实测为

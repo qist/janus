@@ -117,15 +117,16 @@ make dist           # 全部平台（linux + darwin + windows）
 |---|---|
 | Base URL | `http://<bridge-host>:2810/v1` |
 | API Key | `BRIDGE_API_KEY` 的值（若已设置） |
-| Model | **`default`** — 使用 `BRIDGE_DEFAULT_MODEL`；未配置时跟随上游当前默认 |
+| Model | **`janus`** — 虚拟模型：解析到 `/ui` 面板选定的默认模型（存 DB，含思考档位） |
 
-**推荐填 `default`，不要写死具体模型名。** 通过 `BRIDGE_DEFAULT_MODEL` 固定你订阅的套餐模型；
-未配置时才实时解析上游 `GET /api/model/default`。
-当前配置已设为 `opencode-go/gpt-6-luna`。`auto` / 留空也是同一个别名。
+**推荐填 `janus`，不要写死具体模型名。** 换模型只在 `/ui` 面板点一下，运行时生效、
+不用改客户端/env；面板未选时回落 `BRIDGE_DEFAULT_MODEL`，再回落上游默认。
+`default` / `auto` / 留空是另一个别名——解析到**上游官方默认模型**（随时可能被
+上游改动，也可能落在免费档），不推荐日常使用。
 
 需要指定模型时，填 `/v1/models` 里的 `provider/model`，例如
-`opencode-go/deepseek-v4.1-flash`。模型列表：`GET /v1/models`
-（首条固定是 `default`，共 69 条）。
+`opencode-go/deepseek-v4.1-flash`。`/v1/models` 里首条固定是虚拟模型
+`janus`、第二条是 `default`。
 
 ## 自动发现 / 自动拉起上游（重要）
 
@@ -294,7 +295,7 @@ curl -s http://127.0.0.1:2810/v1/usage -H "Authorization: Bearer sk-your-key"
 | `BRIDGE_PROJECT` | 空 | 显式项目名（优先于自动识别）。适合「一台 janus 只服务一个项目」 |
 | `BRIDGE_PROJECT_MAP` | 空 | 设备路径→项目名映射（逗号分隔，如 `/opt/tvfusion=tvfusion,D:\project\tvfusion=tvfusion`）；跨设备路径不同时用 |
 | `BRIDGE_WORKSPACES_DIR` | `/var/lib/janus/workspaces` | 远程时 per-scope 的中性工作目录根（客户端项目路径在 janus 上不存在时用它，避免误认项目 / 上游 500） |
-| `BRIDGE_DEFAULT_MODEL` | 空 | `default`/`auto`/空别名使用的模型（如 `opencode-go/gpt-6-luna`）；**留空=跟随上游默认**。客户端显式传的 `model` 始终透传，不受此影响。注意：上游默认若是 `opencode/*` 免费模型，经 API 调用会 403（免费额度只能在 OpenCode 内用），需要支持"不带 model"的请求就显式填一个可用的 |
+| `BRIDGE_DEFAULT_MODEL` | 空 | `default`/`auto`/空别名使用的模型（如 `opencode-go/gpt-6-luna`）；**留空=跟随上游默认**。客户端显式传的 `model` 始终透传，不受此影响。客户端日常推荐填虚拟模型 `janus`（由 `/ui` 面板控制默认模型，见「虚拟模型与默认模型选择」）。上游默认若是 `opencode/*` 免费模型：v0.3.50 起 orchestrator 放行内置 `read`，免费档经 API 已可用 |
 | `BRIDGE_MODEL_MAP` | 空 | 模型别名映射（逗号分隔 `from=to`，键不区分大小写，键以 `*` 结尾为前缀通配）。主要给 Claude Code：**只需映射 opus/sonnet/haiku 三个档位**，如 `claude-opus*=opencode-go/deepseek-v4-pro,claude-haiku*=opencode-go/glm-5.3-flash`。想省事就用 `BRIDGE_DEFAULT_MODEL` 一个开关；用 `janus models` 查当前映射 |
 | `BRIDGE_WEBSEARCH_ENABLED` | `true` | 是否支持 Claude Code 的 `web_search` 服务端工具（由 Janus 内部调用上游 `/api/websearch` 执行） |
 | `BRIDGE_AGENT` | `build` | 默认 agent，取值见下 |

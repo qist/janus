@@ -104,8 +104,9 @@ SDK 3.24.0 会读取并按类型校验这些字段，全部通过：
 即 `opencode/fledge-alpha-free`。名字里的 "alpha"/"free" 看着像占位符，
 但它是**真实的上游默认**，实测可正常对话、可收图片、支持工具。
 
-尽管它是真的，**客户端仍建议填 `default`**：默认值随时可能被上游改掉，
-写死就得跟着改配置。桥把 `default` / `auto` / 空字符串都实时解析到上游默认值。
+尽管它是真的，**客户端建议填 `janus`**（虚拟模型 = `/ui` 面板选定的默认模型，
+换模型只动面板、不改客户端/env）；`default` / `auto` / 空字符串解析到上游官方
+默认——默认值随时可能被上游改掉，写死具体模型名就得跟着改配置。
 
 模型总数 68（`opencode` 39 + `opencode-go` 29），`/v1/models` 返回 69 条
 （多一条虚拟的 `default`）。
@@ -314,7 +315,7 @@ curl -s https://opencode.ai/console/api/billing/status \
 |---|---|
 | Base URL | `http://<host>:2810/v1` |
 | API Key | `BRIDGE_API_KEY` 的值 |
-| Model | **`default`**（推荐）/ `auto` / 留空 —— 均解析为上游当前默认模型；也可填任意 `/v1/models` 里的 `provider/model` |
+| Model | **`janus`**（推荐，= `/ui` 面板选定的默认模型）/ `default` / `auto` / 留空 —— 后三者解析为上游官方默认模型；也可填任意 `/v1/models` 里的 `provider/model` |
 | 流式 | 开（默认）；关也能用 |
 | `stream_options.include_usage` | 开（有 usage chunk） |
 | 上下文发送 | **发完整历史**，桥会自己算增量 |

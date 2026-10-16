@@ -183,15 +183,15 @@ var companionTriggerTools = map[string]bool{
 // companionToolID 是配套状态查询工具的入参（RunCommand 返回的异步命令 id）。
 const companionToolID = "command_id"
 
-// asyncCommandSteeringNote 追加到 RunCommand 类工具描述末尾的引导：让模型对
-// kill / 重启 / nohup / 长命令一律走异步模式（blocking=false + 轮询状态查询），
-// 绕开客户端同步执行器的楔死窗口——实测两次楔死都是 blocking=true 的
-// 「kill -9 + nohup 重启」命令，交付后客户端不执行也不回传。
-const asyncCommandSteeringNote = "IMPORTANT: for any command that kills processes, starts/stops/restarts a service " +
-	"(kill, systemctl, service, nohup, background `&`), or may take longer than ~30 seconds (build/test/publish), " +
-	"ALWAYS run it asynchronously with blocking=false, then poll CheckCommandStatus / check_command_status with the " +
-	"returned command_id until it finishes. Never run such commands with blocking=true: the client may abort the " +
-	"hanging call and the whole task stalls."
+// asyncCommandSteeringNote 追加到 RunCommand 类工具描述末尾的引导：所有命令
+// 一律走异步模式（blocking=false + 轮询状态查询），彻底消灭 blocking=true 的
+// 楔死窗口——实测楔死命令两类：①「kill -9 + nohup 重启」类；②命令内含裸
+// curl（无 --max-time）打到应用自身一个瞬时挂起的路由上，命令永远不返回。
+const asyncCommandSteeringNote = "IMPORTANT: run EVERY command asynchronously with blocking=false, then poll " +
+	"CheckCommandStatus / check_command_status with the returned command_id until it finishes. Do NOT use " +
+	"blocking=true for anything (even trivial commands): if a command hangs, the client stalls and the whole " +
+	"task dies. Additionally, inside commands ALWAYS add a timeout to network probes: `curl --max-time 10 ...` " +
+	"or `timeout 10 wget ...` - a bare curl to a temporarily unresponsive endpoint hangs forever."
 
 // steerAsyncCommandDesc 给 RunCommand 类工具的描述追加异步引导（仅当配套状态查询
 // 工具可用时——否则模型会去调一个不存在的工具）。其余工具原样返回。幂等：已含

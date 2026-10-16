@@ -454,6 +454,12 @@ func (s *Server) Handler() http.Handler {
 	// 既是路由，也当鉴权（URL 里的 token 是 128 位随机串）。
 	mux.HandleFunc("/mcp/{token}", s.handleMCP)
 
+	// WorkBuddy provider（可选）：OpenAI 兼容面挂在自己的 token 路径下，
+	// OpenCode 经注入的 provider 配置访问它（见 workbuddy_provider.go）。
+	if wbRuntime != nil {
+		wbRuntime.registerRoutes(mux)
+	}
+
 	// 其余 /v1/* 一律返回 OpenAI 格式 404（客户端不会因解析失败而崩）
 	mux.HandleFunc("/v1/", s.handleUnknownV1)
 

@@ -37,6 +37,10 @@ func main() {
 		log.Infof("config file loaded: %s", cfg.ConfigFile)
 	}
 
+	// WorkBuddy provider：必须在 EnsureUpstream 之前初始化——OpenCode 拉起时
+	// 生成的内联配置要包含 workbuddy provider（模型目录此刻就得就绪）。
+	initWorkBuddy(&cfg, log)
+
 	// 本次进程拉起的 upstream PID（退出时回收，见 stopManagedUpstream）。
 	var spawnedPID int
 	if cfg.UpstreamAuto {

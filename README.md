@@ -620,6 +620,49 @@ curl -s http://127.0.0.1:2810/v1/models/opencode/claude-sonnet-5-5 -H "Authoriza
 
 接口：`GET /v1/settings` 读；`POST /v1/settings {"default_model":"provider/id[:variant]"}` 写（空字符串=清除，回落配置）。
 
+## WorkBuddy 内嵌 provider（可选）
+
+Janus 可把 **WorkBuddy AI**（workbuddy.ai）作为第二个模型上游内嵌进来，与
+OpenCode 上游并行工作：
+
+- 启动时拉取模型目录（`GET /v3/config`，缓存 `<数据目录>/workbuddy/catalog-<region>.json`，后台定期刷新）；
+- 在本机起 `/workbuddy/{token}/v1/chat/completions` 透传端点（仅回环可达，token 随机生成、不落配置）；
+- 经 OpenCode 内联配置注入 provider `workbuddy`，模型即以 **`workbuddy/<id>`** 出现在 `/v1/models`；
+- 请求自动补齐 WorkBuddy 桌面身份头（`X-IDE-*` / `X-User-Id` / `X-Conv-*` / `X-Product`），并规整请求体（强制 `stream`、`developer`→`system`、拍平 `tool_choice`），401 自动用 refreshToken 续期重试一次。
+
+### 凭据准备（必须先做）
+
+凭据文件需是**明文 JSON**，两种形态都认：
+
+```jsonc
+// 扁平
+{ "accessToken": "...", "refreshToken": "...", "domain": "...", "uid": "...", "enterpriseId": "..." }
+// 或嵌套
+{ "auth": { "accessToken": "...", "refreshToken": "..." }, "identity": { "uid": "...", "enterpriseId": "..." } }
+```
+
+WorkBuddy AI 桌面版 5.6 起本地凭据是**加密信封**，janus 读不了。导出明文：
+
+1. 找一台装了 WorkBuddy AI 桌面版（并已登录）的机器；
+2. 安装 [dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) 插件（或直接读它的自留副本）——它会把凭据明文留在 `$DSH_HOME/.workbuddy-ai-auth.json`；
+3. 把该文件拷到 janus 主机，`WORKBUDDY_AUTH_FILE` 指向它（或放 `<数据目录>/workbuddy/credential.json`）。
+
+> refreshToken 续期不依赖桌面版；accessToken 过期后 janus 自动刷新并回写凭据文件。
+
+### 启用
+
+```ini
+BRIDGE_WORKBUDDY_ENABLED=true
+WORKBUDDY_AUTH_FILE=/etc/janus/workbuddy-auth.json
+# 可选：跟随桌面版实际版本（请求头 UA / X-IDE-Version 用）
+# WORKBUDDY_APP_VERSION=5.6.2
+```
+
+重启 janus 后 `janus models`（或 `/v1/models`）里应出现 `workbuddy/<id>` 系列；
+IDE 侧模型名填 `workbuddy/<id>` 即可，其余（工具桥、会话、限流）与 OpenCode
+上游完全一致。国内/国际站按凭据里的 `domain` 自动分流（copilot.tencent.com /
+www.workbuddy.ai）。
+
 ## 跨设备共享（scope）
 
 客户端大多不给「会话 id」（Trae / Copilot / CodeBuddy 都不给），Janus 就退化为按 **`scope = IDE + 项目`** 定位会话。开启：

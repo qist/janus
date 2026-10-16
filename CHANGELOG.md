@@ -4,6 +4,37 @@
 
 ---
 
+## [v0.3.54] - 2026-10-16
+
+### 新增
+**WorkBuddy 内嵌 provider（可选）**：把 WorkBuddy AI（workbuddy.ai）作为第二
+个模型上游内嵌进 janus，与 OpenCode 上游并行（来源分析：
+[dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect)）。
+
+- **workbuddy.go**：上游客户端。目录（`GET /v3/config`，UA 分流国际/国内，
+  以 agents 里 `name=="cli"` 的 models 列表为权威顺序）、chat
+  （`POST /v2/chat/completions`，401 自动 refreshToken 续期重试一次、单飞）、
+  桌面身份头（`X-IDE-*` / `X-User-Id` / `X-Conv-*` 三 UUID / `X-Product:SaaS`）、
+  请求体规整（强制 stream、developer→system、拍平 tool_choice、去
+  reasoning_effort=off）、错误分类（硬额度耗尽 / 会话失效 / 软限速 / 服务端）。
+- **workbuddy_provider.go**：内嵌路由。启动时加载明文凭据 → 拉目录（缓存
+  `<数据目录>/workbuddy/catalog-<region>.json` + 后台刷新）→ 本机起
+  `/workbuddy/{token}/v1/chat/completions` 透传端点（token 随机生成、仅回环）。
+- **opencode_config.go**：经 `OPENCODE_CONFIG_CONTENT` 注入 provider
+  `workbuddy`，模型以 `workbuddy/<id>` 出现在 `/v1/models`，客户端直接选用。
+- 配置三项：`BRIDGE_WORKBUDDY_ENABLED`（默认 false）、`WORKBUDDY_AUTH_FILE`、
+  `WORKBUDDY_APP_VERSION`（空=兜底 5.5.6）。README 新增凭据明文导出说明
+  （桌面版 5.6 起本地凭据是加密信封，需经 dsh-workbuddy-connect 插件导出）。
+
+### 修复
+- 目录数值字段解析兼容 int/float64 双形态（`wbNum` 收口）。
+
+### 验证
+- `go vet` + `go test ./...` 全绿（新增 5 组 WorkBuddy 测试：凭据解析/请求体
+  规整/错误分类/目录解析/provider 路由含假上游 SSE 与 401 续期断言）。
+
+---
+
 ## [v0.3.53] - 2026-10-16
 
 ### 修复

@@ -52,7 +52,27 @@ func opencodeInlineConfig(cfg *Config) string {
 	// 扩展点：后续可按 role/模型生成 providers / 每模型 settings 等，
 	// 都从这里一并注入（见 docs/ARCHITECTURE.md 的「模型访问层」）。
 
-	b, err := json.Marshal(map[string]any{"agents": agents})
+	inline := map[string]any{"agents": agents}
+
+	// WorkBuddy provider（可选）：wbRuntime 就绪时把 WorkBuddy 注册成 OpenCode
+	// 的 openai-compatible provider，baseURL 指向 janus 的 /workbuddy/<token>/v1
+	// （token 即鉴权，OpenCode 与 janus 同机回环）。模型列表来自 /v3/config，
+	// 会话/工具桥/权限复用现有链路，WorkBuddy 模型以 workbuddy/<id> 出现。
+	if wbRuntime != nil && len(wbRuntime.models) > 0 {
+		inline["provider"] = map[string]any{
+			"workbuddy": map[string]any{
+				"npm":  "@ai-sdk/openai-compatible",
+				"name": "WorkBuddy",
+				"options": map[string]any{
+					"baseURL": wbRuntime.baseURL(),
+					"apiKey":  wbRuntime.token,
+				},
+				"models": wbRuntime.modelConfigs(),
+			},
+		}
+	}
+
+	b, err := json.Marshal(inline)
 	if err != nil {
 		return ""
 	}

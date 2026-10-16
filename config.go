@@ -85,6 +85,13 @@ type Config struct {
 	// 客户端楔死（工具结果超时）时按 callID 找回落盘文件做逐字节对比。
 	WedgeForensics bool
 
+	// WorkBuddy provider（把 WorkBuddy 桌面 App 的模型接入本桥，见 workbuddy.go）。
+	// WorkBuddyEnabled 开启后，janus 挂载 /workbuddy/{token}/v1 端点，并把
+	// WorkBuddy 注册为 OpenCode 的 provider（模型形如 workbuddy/<id>）。
+	WorkBuddyEnabled    bool   // BRIDGE_WORKBUDDY_ENABLED，默认 false
+	WorkBuddyAuthFile   string // WORKBUDDY_AUTH_FILE：明文凭据文件路径（必填）
+	WorkBuddyAppVersion string // WORKBUDDY_APP_VERSION：桌面版版本号（UA 用），空=兜底 5.5.6
+
 	SessionTTL        time.Duration // 会话空闲回收
 	SharedSessionTTL  time.Duration // 共享（scope）会话空闲回收；<0 = 永不回收
 	RequestTimeout    time.Duration // 单次补全超时
@@ -441,6 +448,10 @@ func LoadConfig() (Config, error) {
 		MCPPublicURL:     strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
 		MCPTransport:     loader.str("BRIDGE_MCP_TRANSPORT", "local"),
 		WedgeForensics:   loader.boolean("BRIDGE_WEDGE_FORENSICS", false),
+
+		WorkBuddyEnabled:    loader.boolean("BRIDGE_WORKBUDDY_ENABLED", false),
+		WorkBuddyAuthFile:   loader.str("WORKBUDDY_AUTH_FILE", ""),
+		WorkBuddyAppVersion: loader.str("WORKBUDDY_APP_VERSION", ""),
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),

@@ -642,7 +642,8 @@ OpenCode 上游并行工作：
 { "auth": { "accessToken": "...", "refreshToken": "..." }, "identity": { "uid": "...", "enterpriseId": "..." } }
 ```
 
-WorkBuddy AI 桌面版 5.6 起本地凭据是**加密信封**，janus 读不了。导出明文：
+WorkBuddy AI 桌面版 5.6 起本地凭据是**加密信封**，janus 读不了。导出明文
+（Windows 端完整步骤与故障排查见 [docs/workbuddy-decrypt.md](docs/workbuddy-decrypt.md)）：
 
 1. 找一台装了 WorkBuddy 桌面版（并已登录）的机器，跑内置解密子命令：
 

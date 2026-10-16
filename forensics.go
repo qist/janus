@@ -12,9 +12,12 @@ import (
 //
 // 背景：Trae 类客户端偶发收到 tool_call 后不执行也不回传（2026-10-15/16 五次
 // 同签名楔死：janus 交付完成、accesslog 显示客户端零请求），纯服务端日志无法
-// 定位客户端解析卡死的触发点。开启取证（BRIDGE_WEDGE_FORENSICS）后，每轮
-// tool_calls 响应的原始 SSE 字节落盘；楔死发生时（工具结果超时）按 callID 找回
-// 对应的落盘文件，与成功轮逐字节对比即可定位触发字段/分块形态。
+// 定位客户端解析卡死的触发点。开启取证（BRIDGE_WEDGE_FORENSICS，默认关）后，
+// 每轮 tool_calls 响应的原始 SSE 字节落盘；楔死发生时（工具结果超时）按 callID
+// 找回对应的落盘文件，与成功轮逐字节对比即可定位触发字段/分块形态。
+//
+// 磁盘代价：单份 dump 可达 MB 级；每会话保留最近 20 份、全部落盘超 72h 在
+// 启动时清理——只作排查用途，不要长期开启。
 
 // Forensics 取证落盘器。nil = 未启用（所有方法 nil 安全）。
 type Forensics struct {
@@ -23,11 +26,52 @@ type Forensics struct {
 	log  *Logger
 }
 
+// forensicsMaxAge 是落盘文件的保留时长：取证是排查工具，不是审计留痕，
+// 超龄文件启动时统一清掉，避免会话目录随使用无限累积吃磁盘。
+const forensicsMaxAge = 72 * time.Hour
+
 func newForensics(root string, keep int, log *Logger) *Forensics {
 	if root == "" || keep <= 0 {
 		return nil
 	}
-	return &Forensics{dir: root, keep: keep, log: log}
+	f := &Forensics{dir: root, keep: keep, log: log}
+	f.sweep()
+	return f
+}
+
+// sweep 启动时清掉超龄的落盘文件与空会话目录（fail-safe：出错只记 Debug）。
+func (f *Forensics) sweep() {
+	ents, err := os.ReadDir(f.dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-forensicsMaxAge)
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(f.dir, e.Name())
+		files, _ := os.ReadDir(dir)
+		empty := true
+		for _, file := range files {
+			if file.IsDir() {
+				empty = false
+				continue
+			}
+			info, err := file.Info()
+			if err != nil || info.ModTime().After(cutoff) {
+				empty = false
+				continue
+			}
+			if rmErr := os.Remove(filepath.Join(dir, file.Name())); rmErr != nil {
+				f.log.Debugf("forensics sweep remove: %v", rmErr)
+				empty = false
+			}
+		}
+		if empty {
+			_ = os.Remove(dir)
+		}
+	}
 }
 
 // save 落盘一轮 tool_calls 响应；返回文件路径（失败返回空串，只记 Debug 不影响主链路）。

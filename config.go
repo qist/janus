@@ -80,6 +80,11 @@ type Config struct {
 	//   remote：旧行为，直连 janus 的 /mcp/<token> HTTP 端点（受上述硬顶制约）。
 	MCPTransport string
 
+	// WedgeForensics 开启楔死取证（BRIDGE_WEDGE_FORENSICS）：每轮以 tool_calls
+	// 收尾的响应原始字节落盘（数据目录 forensics/ 下，每会话保留 20 份），
+	// 客户端楔死（工具结果超时）时按 callID 找回落盘文件做逐字节对比。
+	WedgeForensics bool
+
 	SessionTTL        time.Duration // 会话空闲回收
 	SharedSessionTTL  time.Duration // 共享（scope）会话空闲回收；<0 = 永不回收
 	RequestTimeout    time.Duration // 单次补全超时
@@ -435,6 +440,7 @@ func LoadConfig() (Config, error) {
 		ToolOrphanWait:   loader.dur("BRIDGE_TOOL_ORPHAN_WAIT", 30*time.Second),
 		MCPPublicURL:     strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
 		MCPTransport:     loader.str("BRIDGE_MCP_TRANSPORT", "local"),
+		WedgeForensics:   loader.boolean("BRIDGE_WEDGE_FORENSICS", false),
 
 		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),

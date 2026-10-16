@@ -23,6 +23,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 		writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error(), "")
 		return
 	}
+	sw.capOn = s.cfg.WedgeForensics
 
 	started := time.Now()
 	s.metrics.streamStart()
@@ -115,6 +116,15 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 		_ = sw.toolCalls(pending)
 		_ = sw.finish("tool_calls", &res.usage,
 			req.StreamOptions != nil && req.StreamOptions.IncludeUsage)
+		// 楔死取证：把本轮响应原始字节落盘，客户端楔死时（工具结果超时）按
+		// callID 找回对比（见 forensics.go）。
+		if s.forensics != nil {
+			ids := make([]string, 0, len(pending))
+			for _, p := range pending {
+				ids = append(ids, p.CallID)
+			}
+			s.forensics.save(conv.Key, sid, ids, sw.captureBytes())
+		}
 		return
 	}
 

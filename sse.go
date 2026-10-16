@@ -28,6 +28,11 @@ type sseWriter struct {
 	mu      sync.Mutex
 	started bool
 	closed  bool
+
+	// 楔死取证（BRIDGE_WEDGE_FORENSICS）：开启时把写出的每个 data 块原样留底，
+	// tool_calls 收尾的轮次由 handler 落盘（见 forensics.go），其余轮次丢弃。
+	capOn  bool
+	capBuf []byte
 }
 
 func newSSE(w http.ResponseWriter, model string) (*sseWriter, error) {
@@ -61,6 +66,11 @@ func (s *sseWriter) writeChunk(c ChatChunk) error {
 	if err != nil {
 		return err
 	}
+	if s.capOn {
+		s.capBuf = append(s.capBuf, "data: "...)
+		s.capBuf = append(s.capBuf, b...)
+		s.capBuf = append(s.capBuf, '\n', '\n')
+	}
 	if _, err := s.w.Write([]byte("data: ")); err != nil {
 		return err
 	}
@@ -72,6 +82,18 @@ func (s *sseWriter) writeChunk(c ChatChunk) error {
 	}
 	s.flusher.Flush()
 	return nil
+}
+
+// captureBytes 返回已捕获的响应字节快照（未开启取证时为 nil）。
+func (s *sseWriter) captureBytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.capBuf) == 0 {
+		return nil
+	}
+	out := make([]byte, len(s.capBuf))
+	copy(out, s.capBuf)
+	return out
 }
 
 // begin 发送首个 role chunk。
@@ -211,6 +233,9 @@ func (s *sseWriter) done() error {
 		return nil
 	}
 	s.closed = true
+	if s.capOn {
+		s.capBuf = append(s.capBuf, "data: [DONE]\n\n"...)
+	}
 	if _, err := s.w.Write([]byte("data: [DONE]\n\n")); err != nil {
 		return err
 	}

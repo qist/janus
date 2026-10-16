@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ type Server struct {
 	globalLimit *RateLimiter
 	metrics     *metrics
 	httpc       *http.Client // 用于下载远程附件，与上游客户端分开
+	forensics   *Forensics   // 楔死取证落盘器；nil = 未启用
 
 	known map[string]struct{} // 曾经创建过的上游 session，供 janitor 回收
 
@@ -198,6 +200,10 @@ func NewServer(cfg Config, log *Logger) *Server {
 		owned: map[string]time.Time{},
 	}
 	srv.mcpAllow = parseCIDRList(cfg.MCPAllow)
+	if cfg.WedgeForensics {
+		// 楔死取证：仅当数据目录可定位时启用（见 forensics.go）
+		srv.forensics = newForensics(filepath.Join(janusDataDir(), "forensics"), 20, log)
+	}
 	if !dbMemoryDSN(cfg.DBPath) {
 		if opened, err := openDB(cfg.DBPath); err != nil {
 			log.Warnf("sqlite open failed (%s): %v; falling back to in-memory", cfg.DBPath, err)

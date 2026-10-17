@@ -6,7 +6,7 @@ DIST    := dist
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || cat VERSION 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.Date=$(DATE)
+LDFLAGS := -s -w -X janus/internal/version.Version=$(VERSION) -X janus/internal/version.Commit=$(COMMIT) -X janus/internal/version.Date=$(DATE)
 
 # Linux 发布架构（对应 GitHub Release 里的 janus_<version>_linux_<arch>.tar.gz）
 LINUX_ARCHES := amd64 arm64 arm 386
@@ -33,7 +33,7 @@ vet:
 	$(GO) vet ./...
 
 fmt:
-	gofmt -w *.go
+	gofmt -w .
 
 # 前台运行（读取仓库根的 janus.env）
 run: build

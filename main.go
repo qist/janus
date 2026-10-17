@@ -1,16 +1,27 @@
+// janus —— OpenCode ↔ OpenAI/Anthropic/Responses 兼容桥。
+//
+// 本文件是仓库根的可执行入口（package main）。它只负责命令行解析、
+// 配置加载与上游探活引导，真正的 HTTP 接口实现全部在 internal/api。
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"janus/internal/api"
+	"janus/internal/channel/opencode"
+	"janus/internal/channel/workbuddy"
+	"janus/internal/cli"
+	"janus/internal/config"
+	"janus/internal/db"
+	"janus/internal/logx"
+	"janus/internal/version"
 )
 
 func main() {
@@ -18,27 +29,27 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "-v", "--version", "version":
-			fmt.Println(versionString())
+			fmt.Println(version.String())
 			return
 		case "models":
 			// 列出上游可用模型，帮用户挑 BRIDGE_DEFAULT_MODEL
-			runModels(os.Args[2:])
+			cli.RunModels(os.Args[2:])
 			return
 		case "workbuddy-decrypt":
 			// 在装有 WorkBuddy 桌面版的机器上把 5.6 加密凭据解成明文
-			runWorkBuddyDecrypt(os.Args[2:])
+			workbuddy.RunDecrypt(os.Args[2:])
 			return
 		}
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		// 配置写错就立刻退出，别带着半截配置跑
 		os.Stderr.WriteString("config error: " + err.Error() + "\n")
 		os.Exit(2)
 	}
-	log := NewLogger(cfg.LogLevel)
-	log.Infof("%s", versionString())
+	log := logx.NewLogger(cfg.LogLevel)
+	log.Infof("%s", version.String())
 	if cfg.ConfigFile != "" {
 		log.Infof("config file loaded: %s", cfg.ConfigFile)
 	}
@@ -47,30 +58,28 @@ func main() {
 	// 生成的内联配置要包含 workbuddy provider（模型目录此刻就得就绪）。
 	// 上下文档位（workbuddy_context）持久化在 DB 里，也必须赶在内联配置
 	// 注入前读到，否则重启后回到 env 默认值。
-	if !dbMemoryDSN(cfg.DBPath) {
-		if d, err := openDB(cfg.DBPath); err == nil {
-			if v, ok := d.getSetting("workbuddy_context"); ok && (v == "max" || v == "default") {
+	if !db.MemoryDSN(cfg.DBPath) {
+		if d, err := db.Open(cfg.DBPath); err == nil {
+			if v, ok := d.GetSetting("workbuddy_context"); ok && (v == "max" || v == "default") {
 				cfg.WorkBuddyContext = v
 			}
-			if v, ok := d.getSetting("opencode_context"); ok {
+			if v, ok := d.GetSetting("opencode_context"); ok {
 				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
 					cfg.OpenCodeContext = n
 				}
 			}
-			if sqlDB, err := d.db.DB(); err == nil {
-				_ = sqlDB.Close()
-			}
+			d.Close()
 		}
 	}
-	initWorkBuddy(&cfg, log)
+	workbuddy.Init(&cfg, log)
 
-	// 本次进程拉起的 upstream PID（退出时回收，见 stopManagedUpstream）。
+	// 本次进程拉起的 upstream PID（退出时回收，见 Server.Run）。
 	var spawnedPID int
 	if cfg.UpstreamAuto {
 		// 自动发现 + 必要时自己拉起：OpenCode 桌面端端口/密码每次都变，
 		// 没有在跑的（比如桌面端没开）就以随机端口拉一个，读 /proc 找到活的那个。
 		dctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-		ep, derr := EnsureUpstream(dctx, log, &cfg, cfg.AutostartUpstream)
+		ep, derr := opencode.Ensure(dctx, log, &cfg, cfg.AutostartUpstream, api.MCPNamePrefix)
 		cancel()
 		if derr != nil {
 			log.Warnf("upstream auto-discovery failed: %v (will keep retrying in background)", derr)
@@ -89,157 +98,10 @@ func main() {
 		log.Warnf("BRIDGE_API_KEY is empty — anyone who can reach %s can spend your quota", cfg.Addr)
 	}
 
-	srv := NewServer(cfg, log)
-	if spawnedPID > 0 {
-		srv.setManagedUpstream(spawnedPID)
-	}
+	srv := api.NewServer(cfg, log)
+	srv.SetManagedUpstream(spawnedPID)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	// 事件流：单连接长驻
-	go srv.bus.Run(ctx)
-
-	// 上游探活 + 端点自动切换（扛住 OpenCode 重启）
-	go srv.WatchUpstream(ctx, cfg.UpstreamAuto)
-
-	// 启动自检
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		ic, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if err := srv.up.Ping(ic); err != nil {
-			log.Warnf("upstream %s not reachable yet: %v", srv.up.endpoint(), err)
-		} else {
-			log.Infof("upstream %s ok", srv.up.endpoint())
-		}
-	}()
-
-	// 模型列表预热：OpenCode 刚起来时模型列表可能还是空的，重试几次再放弃。
-	go func() {
-		const attempts = 6
-		var err error
-		for i := 1; i <= attempts; i++ {
-			mc, cancel := context.WithTimeout(ctx, 20*time.Second)
-			_, err = srv.models.Get(mc, srv.up, cfg.Directory, true)
-			cancel()
-			if err == nil {
-				if i > 1 {
-					log.Infof("model list warmup ok (attempt %d)", i)
-				}
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(3 * time.Second):
-			}
-		}
-		log.Warnf("model list warmup failed after %d attempts: %v", attempts, err)
-	}()
-
-	// janitor：回收闲置会话
-	go srv.janitor(ctx)
-
-	// 权限请求兜底扫描：agent 会在两次请求之间异步发起权限请求，
-	// 事件流可能落空档，定时扫一遍待审批的、属于本桥的请求并自动应答。
-	go srv.sweepPermissions(ctx)
-
-	httpSrv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		// 不设 WriteTimeout：SSE 长连接需要保持打开
-		IdleTimeout: 120 * time.Second,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		log.Infof("janus listening on %s (upstream=%s, dir=%s, agent=%s)",
-			cfg.Addr, srv.up.endpoint(), cfg.Directory, cfg.Agent)
-		errCh <- httpSrv.ListenAndServe()
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Infof("shutting down…")
-		srv.bus.Close()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := httpSrv.Shutdown(shutCtx); err != nil {
-			log.Warnf("shutdown: %v", err)
-		}
-		// 收掉自己拉起的 opencode（没它的话 nohup/裸进程部署下会留孤儿）。
-		// 注意放在 HTTP 收尾之后、进程退出之前。
-		srv.stopManagedUpstream()
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			srv.stopManagedUpstream()
-			log.Errorf("listen: %v", err)
-			os.Exit(1)
-		}
-	}
-	log.Infof("bye")
+	srv.Run(ctx)
 }
-
-// janitor 定期清理 store 里过期的会话，并同步删除上游 session。
-func (s *Server) janitor(ctx context.Context) {
-	t := time.NewTicker(60 * time.Second)
-	defer t.Stop()
-
-	// 被分桶淘汰的 session 立即删；channel 满时靠 TTL 兜底
-	drainOrphans := func() {
-		for {
-			select {
-			case sid := <-s.store.orphans:
-				s.deleteSession(sid)
-			default:
-				return
-			}
-		}
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case sid := <-s.store.orphans:
-			s.deleteSession(sid)
-		case <-t.C:
-			drainOrphans()
-			for _, sid := range s.store.GC() {
-				s.deleteSession(sid)
-			}
-			s.sweepTools(ctx)
-			s.responses.gc()
-			if s.db != nil {
-				// 会话映射 / 历史快照保留时长（默认 7 天）；<0 = 永不清理
-				if ttl := s.cfg.ConvTTL; ttl >= 0 {
-					s.db.gcConvs(time.Now().Add(-ttl).Unix())
-				}
-			}
-			s.perKeyLimit.GC()
-			s.globalLimit.GC()
-		}
-	}
-}
-
-func (s *Server) deleteSession(sid string) {
-	if sid == "" {
-		return
-	}
-	dctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := s.up.DeleteSession(dctx, sid); err != nil {
-		s.log.Debugf("delete session %s: %v", sid, err)
-	} else {
-		s.log.Infof("janitor deleted session %s", sid)
-	}
-	// 无论上游删除是否成功，都要清掉库里对该 session 的引用，
-	// 否则之后会拿死 session 去打上游（502 Session not found）。
-	if s.db != nil {
-		s.db.clearSession(sid)
-	}
-}
-
-var _ = fmt.Sprintf

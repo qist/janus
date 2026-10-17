@@ -1003,14 +1003,61 @@ Janus 背后是一个**能执行 shell、读写文件**的 agent（默认以启�
 
 ```
 janus/
-├── go.mod
+├── main.go                进程入口（配置加载 + 上游引导，HTTP 实现在 internal/api）
+├── go.mod / go.sum        依赖清单
 ├── Makefile
 ├── janus.env.example      配置模板（复制成 janus.env）
 ├── README.md
-├── cmd/                    （预留：多二进制/入口时用）
 │
-├── web/
-│   └── ui.html            用量面板页面（go:embed，零依赖离线可用）
+├── internal/
+│   ├── api/               端点层：路由、鉴权、协议转换、工具桥、会话
+│   │   ├── run.go         启动、janitor、优雅退出
+│   │   ├── server.go      路由、鉴权、公开路径
+│   │   ├── chat.go        /v1/chat/completions 主流程 + executor
+│   │   ├── complete.go    流式/非流式收尾
+│   │   ├── sse.go         OpenAI chunk 写出 + 错误映射
+│   │   ├── store.go       会话分桶 + 历史差分
+│   │   ├── aliases.go     协议词汇的本地类型别名（定义在 protocol/modelx）
+│   │   ├── mcp.go         内置 MCP server（暴露客户端 tools）
+│   │   ├── toolbridge.go  工具注册表 / 挂起调用 / 防串会话
+│   │   ├── toolflow.go    工具调用编排（注册/回填/恢复/清理）
+│   │   ├── responses.go   Responses API（输入输出转换 + 响应存储）
+│   │   ├── responses_stream.go Responses 的 SSE 事件流
+│   │   ├── ui.go          用量面板 HTTP 处理（委托 internal/ui）
+│   │   └── *_test.go      单元测试
+│   │
+│   ├── channel/           渠道实现（按渠道分目录，各自独立包）
+│   │   ├── opencode/      OpenCode 渠道：探活、托管进程、模型缓存、内联配置
+│   │   └── workbuddy/     WorkBuddy 渠道
+│   │       ├── workbuddy.go   上游客户端（身份头 / body 规整 / 续期 / 目录 / 积分）
+│   │       ├── provider.go    运行时 + /workbuddy/{token}/v1 路由 + OpenCode provider 描述
+│   │       ├── decrypt.go     `janus workbuddy-decrypt` 子命令（桌面加密凭据解密）
+│   │       └── *_test.go      单元测试
+│   │
+│   ├── attach/           图片/文件附件提取（data URI、http(s) 下载、模态过滤）
+│   ├── cli/              子命令（`janus models`）
+│   ├── config/           环境变量/配置文件
+│   ├── db/               SQLite 持久化（会话映射、设置、历史快照）
+│   ├── discover/         上游自动发现（扫 /proc）
+│   ├── forensics/        楔死取证（原始字节落盘）
+│   ├── httpx/            通用 HTTP 件：中间件、请求解析、响应写出（不含协议）
+│   ├── logx/             日志
+│   ├── mcpbridge/        stdio 工具桥（go:embed mcpbridge.js）
+│   ├── metricx/          Prometheus 指标
+│   ├── modelx/           模型目录投影：命名解析、变体/档位、详情、免费判定
+│   ├── paths/            数据目录/路径解析
+│   ├── procx/            进程属性与上游进程控制（跨平台）
+│   ├── prompt/           messages → prompt 文本、工具注释
+│   ├── protocol/         协议层公共词汇
+│   │   ├── openai/       OpenAI 线格式类型（Chat Completions / Models）
+│   │   └── shared/       错误信封、消息/工具类型、ID 生成
+│   ├── ratelimit/        令牌桶限流
+│   ├── tokenbudget/      token 预算
+│   ├── ui/               用量面板页面（go:embed ui.html）
+│   ├── upstream/         上游客户端 + 事件总线
+│   ├── usage/            OpenCode console 用量/余额客户端
+│   ├── useragent/        User-Agent 归一
+│   └── version/          构建期注入的版本信息
 │
 ├── docs/
 │   ├── DESIGN.md          设计文档（含调研过程）
@@ -1020,36 +1067,13 @@ janus/
 ├── scripts/
 │   └── run.sh             一键启动
 │
-├── tests/
-│   └── compat_test.py     端到端兼容矩阵（OpenAI 官方 SDK）
-│
-└── *.go                   Go 源码（单二进制，package main 位于仓库根，符合 Go 约定）
-    ├── main.go            启动、janitor、优雅退出
-    ├── config.go          环境变量/配置文件
-    ├── server.go          路由、鉴权、CORS、公开路径
-    ├── chat.go            /v1/chat/completions 主流程 + executor
-    ├── complete.go        流式/非流式收尾
-    ├── sse.go             OpenAI chunk 写出 + 错误映射
-    ├── store.go           会话分桶 + 历史差分
-    ├── flatten.go         messages → prompt 文本
-    ├── attach.go          图片附件提取/下载
-    ├── models.go          模型缓存、命名解析、免费判定
-    ├── upstream.go        OpenCode 客户端（endpoint 热替换）
-    ├── eventbus.go        单条 SSE 连接 + fan-out + 权限自动应答
-    ├── discover.go        上游自动发现 + 端点热切换
-    ├── autostart.go       没找到在跑的 OpenCode 时自动拉起（随机端口 + 生成的密码）
-    ├── mcp.go             内置 MCP server（暴露客户端 tools）
-    ├── toolbridge.go      工具注册表 / 挂起调用 / 防串会话
-    ├── toolflow.go        工具调用编排（注册/回填/恢复/清理）
-    ├── responses.go       Responses API（输入输出转换 + 响应存储）
-    ├── responses_stream.go Responses 的 SSE 事件流
-    ├── ui.go              用量面板 HTTP 处理（go:embed web/ui.html）
-    └── *_test.go          单元测试
+└── tests/
+    └── compat_test.py     端到端兼容矩阵（OpenAI 官方 SDK）
 ```
 
-> 单二进制 Go 项目遵循惯例把 `package main` 放在仓库根；`web/`、`docs/`、
-> `scripts/`、`tests/` 已分层。若以后要拆成多个二进制/库，再引入 `cmd/` +
-> `internal/`（注意 `go:embed` 不能引用上级目录，嵌入式页面需随包同目录）。
+> 仓库根只保留 `main.go` 一个 Go 文件作为进程入口，全部实现位于 `internal/`
+> 下按职责拆分的包里；`go:embed` 不能引用上级目录，因此内嵌资源（`internal/ui/ui.html`、
+> `internal/mcpbridge/mcpbridge.js`）与使用它们的包放在同一目录。
 
 ## 许可证
 

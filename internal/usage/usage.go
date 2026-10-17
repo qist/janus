@@ -1,0 +1,678 @@
+// Package usage 查询 OpenCode 账号的余额、用量与逐条请求日志。
+//
+// 上游 OpenCode 的本地 server 只暴露「已消耗」（/api/experimental/session/stats），
+// 真正的「余额」在 console API 上，需要 OAuth 凭据。凭据存在 OpenCode 的
+// SQLite 库里（credential 表，integration_id='opencode'），这里用只读方式取出来，
+// 调 console 的 billing / usage 接口。
+//
+// 实测端点（2026-10，OpenCode v2.0.22）：
+//
+//	GET {console}/billing/status      → 余额、可用额度、计费模式
+//	GET {console}/usage/summary       → 总消耗（tokens + cost）
+//	GET {console}/usage/models        → 按模型分组的消耗
+//	GET {console}/usage/cost-by-day   → 按天分组的消耗
+//
+// 注意：金额单位是「微美分」，1 USD = 1e8 micro-cents。
+//
+// 本包只管数据获取与缓存，不含任何 HTTP 端点。
+package usage
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"janus/internal/channel/workbuddy"
+	"janus/internal/config"
+	"janus/internal/logx"
+	"janus/internal/useragent"
+)
+
+// microCents 是 console API 的金额单位。1 USD = 100 分 = 1e8 微分。
+type microCents int64
+
+func (m microCents) USD() float64 { return float64(m) / 1e8 }
+
+// UnmarshalJSON 兼容字符串与数字两种形式（console 金额用字符串）。
+func (m *microCents) UnmarshalJSON(b []byte) error {
+	var f flexInt
+	if err := f.UnmarshalJSON(b); err != nil {
+		return err
+	}
+	*m = microCents(f)
+	return nil
+}
+
+// flexInt 兼容 JSON 里数字以字符串或数字两种形式出现（console 用字符串）。
+type flexInt int64
+
+func (f *flexInt) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	if s == "" || s == "null" {
+		*f = 0
+		return nil
+	}
+	// 可能是 "342653290" 也可能是 342653290，甚至带小数
+	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+		*f = flexInt(v)
+		return nil
+	}
+	fl, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return fmt.Errorf("not a number: %q", s)
+	}
+	*f = flexInt(int64(fl))
+	return nil
+}
+
+type Report struct {
+	Billing   BillingStatus `json:"billing"`
+	Totals    Totals        `json:"totals"`
+	Models    []ModelUsage  `json:"models"`
+	ByDay     []DayUsage    `json:"by_day"`
+	Go        *GoUsage      `json:"go,omitempty"`
+	FetchedAt time.Time     `json:"fetched_at"`
+	Source    string        `json:"source"`
+
+	// WorkBuddy 是 WorkBuddy provider 的积分余额（provider 未启用或查询失败
+	// 时缺省；失败不拖垮主报告，有旧数据则回落旧数据）。
+	WorkBuddy *workbuddy.Credits `json:"workbuddy,omitempty"`
+}
+
+// GoUsage 是 OpenCode Go / Go Plus 套餐的三窗口限额用量：
+// 5 小时滚动 / 每周 / 每月。它是独立于 Zen 余额的数据模型，
+// 只有 inference 主机（而非 console）暴露该端点，且为非公开接口。
+type GoUsage struct {
+	Rolling GoWindow `json:"rolling"`
+	Weekly  GoWindow `json:"weekly"`
+	Monthly GoWindow `json:"monthly"`
+}
+
+// GoWindow 单个限额窗口。Percent 是已用百分比（0–100），
+// ResetsInSec 是拉取时距重置的秒数（服务端只给绝对时间，这里换算好方便展示）。
+type GoWindow struct {
+	Status      string    `json:"status"`
+	Percent     float64   `json:"percent"`
+	ResetsAt    time.Time `json:"resets_at"`
+	ResetsInSec int64     `json:"resets_in_sec"`
+}
+
+type BillingStatus struct {
+	Mode            string   `json:"mode"`         // 如 pay-as-you-go
+	BillingMode     string   `json:"billing_mode"` // 如 prepaid
+	BalanceUSD      float64  `json:"balance_usd"`
+	AvailableUSD    float64  `json:"available_usd"`
+	CreditLimitUSD  *float64 `json:"credit_limit_usd"`
+	CanPurchase     bool     `json:"can_purchase_credits"`
+	CanAutoRecharge bool     `json:"can_enable_auto_recharge"`
+}
+
+type Totals struct {
+	Requests           int64   `json:"requests"`
+	InputTokens        int64   `json:"input_tokens"`
+	OutputTokens       int64   `json:"output_tokens"`
+	CacheReadTokens    int64   `json:"cache_read_tokens"`
+	CacheWrite5mTokens int64   `json:"cache_write_5m_tokens"`
+	CacheWrite1hTokens int64   `json:"cache_write_1h_tokens"`
+	CostUSD            float64 `json:"cost_usd"`
+}
+
+type ModelUsage struct {
+	Provider        string  `json:"provider"`
+	Model           string  `json:"model"`
+	Requests        int64   `json:"requests"`
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	CacheReadTokens int64   `json:"cache_read_tokens"`
+	CostUSD         float64 `json:"cost_usd"`
+}
+
+type DayUsage struct {
+	Date     string  `json:"date"`
+	Requests int64   `json:"requests"`
+	Tokens   int64   `json:"tokens"`
+	CostUSD  float64 `json:"cost_usd"`
+}
+
+// ---------- 凭据读取 ----------
+
+type consoleCredential struct {
+	Access  string
+	OrgID   string
+	Email   string
+	Expires int64
+}
+
+// readCredential 只读打开 OpenCode 的 SQLite 库取 OAuth 凭据。
+//
+// 用 sqlite3 CLI 而不是引入 Go 的 sqlite 驱动：本桥坚持零第三方依赖，
+// 而 sqlite3 在目标环境是常装的。拿不到就返回可读的错误，端点降级为 503。
+func readCredential(dbPath string) (*consoleCredential, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("opencode db path is empty (set OPENCODE_DB)")
+	}
+	bin, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return nil, fmt.Errorf("sqlite3 CLI not found in PATH; usage endpoint unavailable")
+	}
+	const q = `select value from credential where integration_id='opencode' and active=1 limit 1;`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, "-readonly", dbPath, q)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("read credential from %s: %s", filepath.Base(dbPath), msg)
+	}
+
+	var raw struct {
+		Type     string `json:"type"`
+		Access   string `json:"access"`
+		Expires  int64  `json:"expires"`
+		Metadata struct {
+			OrgID string `json:"orgID"`
+			Email string `json:"email"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parse credential JSON: %w", err)
+	}
+	if raw.Access == "" {
+		return nil, fmt.Errorf("no active opencode credential found in %s", filepath.Base(dbPath))
+	}
+	if raw.Type != "" && raw.Type != "oauth" {
+		return nil, fmt.Errorf("unsupported credential type %q (want oauth)", raw.Type)
+	}
+	if raw.Expires > 0 && raw.Expires < time.Now().UnixMilli() {
+		return nil, fmt.Errorf("opencode credential expired at %s; re-login in OpenCode",
+			time.UnixMilli(raw.Expires).Format(time.RFC3339))
+	}
+	return &consoleCredential{
+		Access:  raw.Access,
+		OrgID:   raw.Metadata.OrgID,
+		Email:   raw.Metadata.Email,
+		Expires: raw.Expires,
+	}, nil
+}
+
+// ---------- console 客户端 ----------
+
+// Client 是 console / inference 端点的带缓存客户端。
+type Client struct {
+	base   string
+	goURL  string
+	dbPath string
+	hc     *http.Client
+	log    *logx.Logger
+	ttl    time.Duration
+
+	mu       sync.Mutex
+	cached   *Report
+	cachedAt time.Time
+	err      error     // 上次失败原因
+	errAt    time.Time // 上次失败时间（负缓存窗口内不再重试）
+
+	// request-logs 短缓存 + 失败负缓存：UI 自动刷新/重复调用时避免每次都打
+	// console（该接口可能被限速或超时，连不上时更要避免每次卡满超时）。
+	reqMu    sync.Mutex
+	reqItems []RequestLog
+	reqLimit int
+	reqAt    time.Time // 上次成功时间
+	reqErr   error     // 上次失败原因
+	reqErrAt time.Time // 上次失败时间（负缓存窗口内不再重试）
+}
+
+// New 按配置构造客户端。
+func New(cfg config.Config, log *logx.Logger) *Client {
+	return &Client{
+		base:   cfg.ConsoleURL,
+		goURL:  cfg.GoUsageURL,
+		dbPath: cfg.OpencodeDB,
+		log:    log,
+		ttl:    cfg.UsageTTL,
+		hc:     &http.Client{Timeout: 15 * time.Second, Transport: useragent.Wrap(nil)},
+	}
+}
+
+// errTTL 是 Report 的失败负缓存窗口：console 超时/限速时窗口内不重试，
+// 有旧数据就返回旧数据（宁旧不卡），UI 靠 fetched_at 辨别新旧。
+// var 仅为可测性（测试里临时缩短）；运行期视为常量。
+var errTTL = 60 * time.Second
+
+// Report 返回缓存的用量报告。
+//
+// 失败负缓存（与 RequestLogs 同策略）：console 侧超时/限速的窗口期里不再重试
+// （UI 每 60s 自动刷新，没这层的话每次都卡满 15s 超时、面板整块报错），
+// 有旧数据就返回旧数据（宁旧不卡），没有旧数据才把错误报出去。
+func (c *Client) Report(ctx context.Context) (*Report, error) {
+	c.mu.Lock()
+	if c.cached != nil && time.Since(c.cachedAt) < c.ttl {
+		r := c.cached
+		c.mu.Unlock()
+		return r, nil
+	}
+	// 失败负缓存窗口内：不重试，给旧数据或上次的错误
+	if !c.errAt.IsZero() && time.Since(c.errAt) < errTTL {
+		var (
+			r   *Report
+			err error
+		)
+		if c.cached != nil {
+			r = c.cached
+		} else {
+			err = c.err
+		}
+		c.mu.Unlock()
+		return r, err
+	}
+	c.mu.Unlock()
+
+	rep, err := c.fetch(ctx)
+	if err != nil {
+		c.mu.Lock()
+		c.err, c.errAt = err, time.Now()
+		stale := c.cached
+		c.mu.Unlock()
+		if stale != nil {
+			return stale, nil
+		}
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.cached, c.cachedAt = rep, time.Now()
+	c.err, c.errAt = nil, time.Time{}
+	c.mu.Unlock()
+	return rep, nil
+}
+
+func (c *Client) fetch(ctx context.Context) (*Report, error) {
+	cred, err := readCredential(c.dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// console 的四个端点并发拉，任一失败整体失败（余额最关键）。
+	// Go 套餐用量走另一个域，属可选数据：失败只降级为不展示。
+	var (
+		wg         sync.WaitGroup
+		billing    billingRaw
+		summary    summaryRaw
+		models     modelsRaw
+		byDay      []dayRaw
+		goRaw      goUsageRaw
+		errB, errS error
+		errM, errD error
+		errG       error
+	)
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		errB = c.get(ctx, cred, "/billing/status", &billing)
+	}()
+	go func() {
+		defer wg.Done()
+		errS = c.get(ctx, cred, "/usage/summary", &summary)
+	}()
+	go func() {
+		defer wg.Done()
+		errM = c.get(ctx, cred, "/usage/models", &models)
+	}()
+	go func() {
+		defer wg.Done()
+		errD = c.get(ctx, cred, "/usage/cost-by-day", &byDay)
+	}()
+	go func() {
+		defer wg.Done()
+		if c.goURL == "" {
+			errG = fmt.Errorf("go usage endpoint not configured")
+			return
+		}
+		errG = c.getURL(ctx, cred, c.goURL, &goRaw)
+	}()
+	wg.Wait()
+
+	if errB != nil {
+		return nil, fmt.Errorf("billing/status: %w", errB)
+	}
+	if errS != nil {
+		return nil, fmt.Errorf("usage/summary: %w", errS)
+	}
+	if errM != nil {
+		return nil, fmt.Errorf("usage/models: %w", errM)
+	}
+	if errD != nil {
+		return nil, fmt.Errorf("usage/cost-by-day: %w", errD)
+	}
+
+	rep := &Report{
+		FetchedAt: time.Now().UTC(),
+		Source:    c.base,
+		Billing: BillingStatus{
+			Mode:            billing.Mode,
+			BillingMode:     billing.BillingMode,
+			BalanceUSD:      billing.BalanceMicroCents.USD(),
+			AvailableUSD:    billing.AvailableMicroCents.USD(),
+			CanPurchase:     billing.CanPurchaseCredits,
+			CanAutoRecharge: billing.CanEnableAutoRecharge,
+		},
+		Totals: Totals{
+			Requests:           int64(summary.TotalRequests),
+			InputTokens:        int64(summary.TotalInputTokens),
+			OutputTokens:       int64(summary.TotalOutputTokens),
+			CacheReadTokens:    int64(summary.TotalCacheReadTokens),
+			CacheWrite5mTokens: int64(summary.TotalCacheWrite5mTokens),
+			CacheWrite1hTokens: int64(summary.TotalCacheWrite1hTokens),
+			CostUSD:            summary.TotalCostMicroCents.USD(),
+		},
+	}
+	if billing.CreditLimitMicroCents != nil {
+		v := billing.CreditLimitMicroCents.USD()
+		rep.Billing.CreditLimitUSD = &v
+	}
+
+	for _, m := range models.Items {
+		rep.Models = append(rep.Models, ModelUsage{
+			Provider:        m.Provider,
+			Model:           m.Model,
+			Requests:        int64(m.TotalRequests),
+			InputTokens:     int64(m.TotalInputTokens),
+			OutputTokens:    int64(m.TotalOutputTokens),
+			CacheReadTokens: int64(m.TotalCacheReadTokens),
+			CostUSD:         m.TotalCostMicroCents.USD(),
+		})
+	}
+	for _, d := range byDay {
+		rep.ByDay = append(rep.ByDay, DayUsage{
+			Date:     d.Date,
+			Requests: int64(d.TotalRequests),
+			Tokens:   int64(d.TotalTokens),
+			CostUSD:  d.TotalCostMicroCents.USD(),
+		})
+	}
+	if errG != nil {
+		c.log.Debugf("go plan usage unavailable: %v", errG)
+	} else {
+		rep.Go = goRaw.toUsage()
+	}
+	return rep, nil
+}
+
+func (c *Client) get(ctx context.Context, cred *consoleCredential, path string, out any) error {
+	return c.getURL(ctx, cred, c.base+path, out)
+}
+
+// getURL 与 get 相同，但接受完整 URL（Go 套餐用量在另一个域）。
+func (c *Client) getURL(ctx context.Context, cred *consoleCredential, url string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cred.Access)
+	if cred.OrgID != "" {
+		req.Header.Set("x-opencode-org-id", cred.OrgID)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("console rejected the credential (HTTP %d); re-login in OpenCode", resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTP %d: %.200s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("decode %s: %w", url, err)
+	}
+	return nil
+}
+
+// ---------- console 原始响应 ----------
+
+type billingRaw struct {
+	BillingMode           string      `json:"billingMode"`
+	Mode                  string      `json:"mode"`
+	BalanceMicroCents     microCents  `json:"balanceMicroCents"`
+	CreditLimitMicroCents *microCents `json:"creditLimitMicroCents"`
+	AvailableMicroCents   microCents  `json:"availableMicroCents"`
+	CanPurchaseCredits    bool        `json:"canPurchaseCredits"`
+	CanEnableAutoRecharge bool        `json:"canEnableAutoRecharge"`
+}
+
+type summaryRaw struct {
+	TotalRequests           flexInt    `json:"totalRequests"`
+	TotalInputTokens        flexInt    `json:"totalInputTokens"`
+	TotalOutputTokens       flexInt    `json:"totalOutputTokens"`
+	TotalCacheReadTokens    flexInt    `json:"totalCacheReadTokens"`
+	TotalCacheWrite5mTokens flexInt    `json:"totalCacheWrite5mTokens"`
+	TotalCacheWrite1hTokens flexInt    `json:"totalCacheWrite1hTokens"`
+	TotalCostMicroCents     microCents `json:"totalCostMicroCents"`
+}
+
+type modelsRaw struct {
+	Items []struct {
+		Model                string     `json:"model"`
+		Provider             string     `json:"provider"`
+		TotalRequests        flexInt    `json:"totalRequests"`
+		TotalInputTokens     flexInt    `json:"totalInputTokens"`
+		TotalOutputTokens    flexInt    `json:"totalOutputTokens"`
+		TotalCacheReadTokens flexInt    `json:"totalCacheReadTokens"`
+		TotalCostMicroCents  microCents `json:"totalCostMicroCents"`
+	} `json:"items"`
+}
+
+type dayRaw struct {
+	Date                string     `json:"date"`
+	TotalCostMicroCents microCents `json:"totalCostMicroCents"`
+	TotalTokens         flexInt    `json:"totalTokens"`
+	TotalRequests       flexInt    `json:"totalRequests"`
+}
+
+// goUsageRaw 是 inference 主机 /v1/usage 的响应。
+// 注意字段名是 resetsAt（驼峰），与 console 端点的 snake_case 不同。
+type goUsageRaw struct {
+	Usage struct {
+		Rolling goWindowRaw `json:"rolling"`
+		Weekly  goWindowRaw `json:"weekly"`
+		Monthly goWindowRaw `json:"monthly"`
+	} `json:"usage"`
+}
+
+type goWindowRaw struct {
+	Status   string  `json:"status"`
+	Percent  float64 `json:"percent"`
+	ResetsAt string  `json:"resetsAt"`
+}
+
+// toUsage 把原始响应换算成对外结构；三个窗口都没有状态时返回 nil（非 Go 账号）。
+func (r goUsageRaw) toUsage() *GoUsage {
+	if r.Usage.Rolling.Status == "" && r.Usage.Weekly.Status == "" && r.Usage.Monthly.Status == "" {
+		return nil
+	}
+	now := time.Now()
+	conv := func(w goWindowRaw) GoWindow {
+		out := GoWindow{Status: w.Status, Percent: w.Percent}
+		if t, err := time.Parse(time.RFC3339, w.ResetsAt); err == nil {
+			out.ResetsAt = t
+			if d := t.Sub(now); d > 0 {
+				out.ResetsInSec = int64(d.Seconds())
+			}
+		}
+		return out
+	}
+	return &GoUsage{
+		Rolling: conv(r.Usage.Rolling),
+		Weekly:  conv(r.Usage.Weekly),
+		Monthly: conv(r.Usage.Monthly),
+	}
+}
+
+// ---------- 逐条请求日志（缓存命中率） ----------
+//
+// 官方 console 的日志页用的是 GET {console}/request-logs?since=<ms>&category=inference&limit=<n>，
+// 同样用 OAuth 凭据 + org 头。这里拉最近若干条，换算成便于展示/对账的结构。
+// 注意：inputTokens 不含缓存命中；prompt = input + cacheRead。
+
+type RequestLog struct {
+	Time         time.Time `json:"time"`
+	Model        string    `json:"model"`
+	Provider     string    `json:"provider"`
+	Session      string    `json:"session"`
+	Finish       string    `json:"finish"`
+	InputTokens  int64     `json:"input_tokens"`      // 未命中
+	CacheRead    int64     `json:"cache_read_tokens"` // 命中
+	CacheWrite   int64     `json:"cache_write_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	Reasoning    int64     `json:"reasoning_tokens"`
+	PromptTokens int64     `json:"prompt_tokens"`  // input + cacheRead
+	CacheHitRate float64   `json:"cache_hit_rate"` // cacheRead / prompt
+	DurationMs   int64     `json:"duration_ms"`
+	CostUSD      float64   `json:"cost_usd"`
+}
+
+type requestLogRaw struct {
+	SessionID        string  `json:"sessionID"`
+	RequestedModel   string  `json:"requestedModel"`
+	Model            string  `json:"model"`
+	Provider         string  `json:"provider"`
+	StartedAt        int64   `json:"startedAt"` // 毫秒
+	DurationMs       int64   `json:"durationMs"`
+	Outcome          string  `json:"outcome"`
+	InputTokens      flexInt `json:"inputTokens"`
+	OutputTokens     flexInt `json:"outputTokens"`
+	ReasoningTokens  flexInt `json:"reasoningTokens"`
+	CacheReadTokens  flexInt `json:"cacheReadTokens"`
+	CacheWriteTokens flexInt `json:"cacheWriteTokens"`
+	Cost             float64 `json:"cost"`
+	Finish           struct {
+		Reason string `json:"reason"`
+	} `json:"finish"`
+}
+
+// request-logs 的两级缓存：
+//   - 成功：requestLogsTTL 内复用，不打上游（窗口参数变化很快也命中，只按 limit 缓存）；
+//   - 失败：requestLogsErrTTL 内不重试——该接口超时/被限速时，避免 UI 每次刷新都卡满超时；
+//     若已有旧数据就返回旧数据（宁旧不卡）。
+const (
+	requestLogsTTL    = 5 * time.Second
+	requestLogsErrTTL = 60 * time.Second
+)
+
+// RequestLogs 拉取最近的上游请求日志。sinceMs<=0 时默认看最近 6 小时；limit 上限 100。
+func (c *Client) RequestLogs(ctx context.Context, sinceMs int64, limit int) ([]RequestLog, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	c.reqMu.Lock()
+	// 成功缓存
+	if c.reqItems != nil && c.reqLimit == limit && time.Since(c.reqAt) < requestLogsTTL {
+		items := c.reqItems
+		c.reqMu.Unlock()
+		return items, nil
+	}
+	// 失败负缓存：窗口内不重试；有旧数据就给旧的，没有就快速返回上次错误。
+	if !c.reqErrAt.IsZero() && time.Since(c.reqErrAt) < requestLogsErrTTL {
+		if c.reqItems != nil && c.reqLimit == limit {
+			items := c.reqItems
+			c.reqMu.Unlock()
+			return items, nil
+		}
+		err := c.reqErr
+		c.reqMu.Unlock()
+		return nil, err
+	}
+	c.reqMu.Unlock()
+
+	fail := func(err error) ([]RequestLog, error) {
+		c.reqMu.Lock()
+		c.reqErr, c.reqErrAt = err, time.Now()
+		c.reqMu.Unlock()
+		return nil, err
+	}
+
+	cred, err := readCredential(c.dbPath)
+	if err != nil {
+		return fail(err)
+	}
+	if sinceMs <= 0 {
+		sinceMs = time.Now().Add(-6 * time.Hour).UnixMilli()
+	}
+	path := fmt.Sprintf("/request-logs?since=%d&category=inference&limit=%d", sinceMs, limit)
+
+	var wrap struct {
+		Items []requestLogRaw `json:"items"`
+	}
+	if err := c.get(ctx, cred, path, &wrap); err != nil {
+		return fail(err)
+	}
+
+	out := make([]RequestLog, 0, len(wrap.Items))
+	for _, it := range wrap.Items {
+		out = append(out, it.toRequestLog())
+	}
+
+	c.reqMu.Lock()
+	c.reqItems, c.reqLimit, c.reqAt = out, limit, time.Now()
+	c.reqErr, c.reqErrAt = nil, time.Time{}
+	c.reqMu.Unlock()
+	return out, nil
+}
+
+// toRequestLog 把官方原始记录换算成展示结构（命中率 = cacheRead / (input+cacheRead)）。
+func (it requestLogRaw) toRequestLog() RequestLog {
+	input := int64(it.InputTokens)
+	read := int64(it.CacheReadTokens)
+	prompt := input + read
+	var hit float64
+	if prompt > 0 {
+		hit = float64(read) / float64(prompt)
+	}
+	model := it.RequestedModel
+	if model == "" {
+		model = it.Model
+	}
+	return RequestLog{
+		Time:         time.UnixMilli(it.StartedAt),
+		Model:        model,
+		Provider:     it.Provider,
+		Session:      it.SessionID,
+		Finish:       it.Finish.Reason,
+		InputTokens:  input,
+		CacheRead:    read,
+		CacheWrite:   int64(it.CacheWriteTokens),
+		OutputTokens: int64(it.OutputTokens),
+		Reasoning:    int64(it.ReasoningTokens),
+		PromptTokens: prompt,
+		CacheHitRate: hit,
+		DurationMs:   it.DurationMs,
+		CostUSD:      it.Cost,
+	}
+}

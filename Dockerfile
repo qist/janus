@@ -11,7 +11,7 @@ ARG VERSION=dev
 ARG COMMIT=none
 ARG DATE=unknown
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
-      -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.Date=${DATE}" \
+      -ldflags "-s -w -X janus/internal/version.Version=${VERSION} -X janus/internal/version.Commit=${COMMIT} -X janus/internal/version.Date=${DATE}" \
       -o /out/janus .
 
 # ---------- 运行阶段：极小、非 root、无 shell ----------

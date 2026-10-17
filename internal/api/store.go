@@ -1,0 +1,650 @@
+package api
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"janus/internal/db"
+	"janus/internal/logx"
+	"janus/internal/upstream"
+)
+
+// ConversationKey → OpenCode session 映射 + 历史快照。
+
+type Conversation struct {
+	Key string
+
+	// mu 覆盖整个请求生命周期：同一会话的请求天然串行化，
+	// 避免 prompt 在上游 busy 时静默排队导致串上下文。
+	// 只保护 agent/model/directory 这些"请求期间不变"的字段。
+	mu sync.Mutex
+
+	// stateMu 保护 lastMessages / sessionID / lastResponse。
+	// 必须独立于 mu：store.Acquire 要在拿到 mu 之前读 lastMessages 做前缀匹配，
+	// store.GC 也要在不抢 mu 的前提下读 sessionID。用 mu 会导致持 s.mu 时
+	// 阻塞在慢请求上，把整个 store 卡死。
+	stateMu      sync.RWMutex
+	lastMessages []ChatMessage // 上次成功发给上游的完整 messages
+	sessionID    string
+	lastResponse *ChatResponse // DiffNone 时直接复用
+	instructions string        // Responses 链上已注入会话的 instructions（去重用）
+
+	agent     string
+	model     upstream.OCModelRef
+	directory string
+	// 出向路径改写（远程 mode B：工作区目录 → 客户端项目路径）。
+	// 只在持 conv.mu 的请求路径上读写（与上面三个字段同一约定）。
+	rewriteFrom string
+	rewriteTo   string
+
+	// 工具调用状态（只在请求路径上、持 conv.mu 时访问）
+	mcpName      string         // 已注册的 MCP server 名；空=未注册
+	toolsFP      string         // 已注册工具集的指纹，用于判断是否需要重注册
+	toolSess     *toolSession   // 对应的工具上下文
+	pendingTools []*pendingCall // 本轮已回给客户端、等待结果回填的调用
+	toolsRegAt   time.Time      // 上次成功注册的时间（上游重启会丢注册，靠它续注册）
+
+	lastActive atomic.Int64 // 毫秒，eviction 不需要抢锁读
+	createdAt  time.Time
+
+	// terminated：上一轮被客户端中止（断连/主动终止）过。中止后上游会话
+	// 停在一个残缺的回合上，下一次请求必须重开干净会话，绝不能把「新任务」
+	// 续接到那个已中止的会话（否则新任务会看到旧任务的上下文/中断残影）。
+	terminated atomic.Bool
+
+	// restoredFromDB：本会话是从持久化库恢复的（跨进程重启续链）。首次使用前
+	// 需对上流探活，避免恢复出已失效的 session 导致首请求 502（见 ensureSession）。
+	restoredFromDB atomic.Bool
+}
+
+func (c *Conversation) touch() { c.lastActive.Store(time.Now().UnixMilli()) }
+func (c *Conversation) idle() time.Duration {
+	return time.Since(time.UnixMilli(c.lastActive.Load()))
+}
+
+// markTerminated 标记本会话上一轮被中止；下一轮请求据此重开会话。
+func (c *Conversation) markTerminated() { c.terminated.Store(true) }
+
+// takeTerminated 读取并清除中止标记（只消费一次）。
+func (c *Conversation) takeTerminated() bool { return c.terminated.Swap(false) }
+
+// snapshotTerminated 只读中止标记、不清除：判断断线后的「同内容重发」时用，
+// 此时标记必须保留给真正携带新内容的请求。
+func (c *Conversation) snapshotTerminated() bool { return c.terminated.Load() }
+
+func (c *Conversation) snapshotLast() []ChatMessage {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.lastMessages
+}
+
+func (c *Conversation) setLast(msgs []ChatMessage) {
+	c.stateMu.Lock()
+	c.lastMessages = msgs
+	c.stateMu.Unlock()
+}
+
+func (c *Conversation) clearLast() {
+	c.stateMu.Lock()
+	c.lastMessages = nil
+	c.stateMu.Unlock()
+}
+
+func (c *Conversation) snapshotSessionID() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.sessionID
+}
+
+func (c *Conversation) setSessionID(id string) {
+	c.stateMu.Lock()
+	c.sessionID = id
+	c.stateMu.Unlock()
+}
+
+func (c *Conversation) snapshotResponse() *ChatResponse {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.lastResponse
+}
+
+func (c *Conversation) setResponse(r *ChatResponse) {
+	c.stateMu.Lock()
+	c.lastResponse = r
+	c.stateMu.Unlock()
+}
+
+func (c *Conversation) snapshotInstructions() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.instructions
+}
+
+func (c *Conversation) setInstructions(s string) {
+	c.stateMu.Lock()
+	c.instructions = s
+	c.stateMu.Unlock()
+}
+
+// lastMatches 判断 stored 是否是 incoming 的严格前缀（或为空）。
+func (c *Conversation) lastMatches(incoming []ChatMessage) bool {
+	stored := c.snapshotLast()
+	if len(stored) == 0 {
+		// 空会话（首 prompt 失败过）可被任意 incoming 复用，等价于新建
+		return true
+	}
+	if len(incoming) < len(stored) {
+		return false
+	}
+	return lcp(stored, incoming) == len(stored)
+}
+
+type Store struct {
+	mu sync.Mutex
+	// dir 是 key → 候选会话列表，不是 key → 单会话。
+	// 因为指纹只覆盖 (system, directory)：真实客户端常不带 system 消息，
+	// 两个不相关的话题会拿到同一个 key。若严格单映射，它们会互相挤掉对方的
+	// 会话（实测 compat_test 每个用例都在互踢）。分桶后按历史前缀挑会话，
+	// 不相关的话题各占一格，互不干扰。
+	dir       map[string][]*Conversation
+	log       *logx.Logger
+	ttl       time.Duration // 普通会话空闲回收；<0 = 永不
+	sharedTTL time.Duration // 共享（scope）会话空闲回收；<0 = 永不
+	max       int           // 全局会话数上限
+	maxPerKey int           // 单 key 候选数上限，防止滑动窗口客户端无限新建
+
+	// orphans 收集被挤出索引的上游 sessionID，由 janitor 异步删除。
+	// 带缓冲 + 满则丢，保证 evict 路径永不阻塞（它持着 s.mu）。
+	orphans chan string
+
+	// db 非空时，新会话的 sessionID 会尝试从库中恢复（跨重启续链）。
+	db *db.Store
+}
+
+// attachDB 注入持久化层（可后续调用；测试里通常不注入）。
+func (s *Store) attachDB(db *db.Store) {
+	s.mu.Lock()
+	s.db = db
+	s.mu.Unlock()
+}
+
+// restoreLocked 为新会话恢复持久化的上游 sessionID / model / agent / dir。
+// 只在会话刚创建、尚未对外发布时调用（持 s.mu，且未持 c.mu）。
+// restoreLocked 为新会话恢复持久化的上游 sessionID / model / agent / dir。
+// 只在会话刚创建、尚未对外发布时调用（持 s.mu，且未持 c.mu）。
+//
+// incoming 非 nil 时（claim 路径）只有「恢复出的历史确为本次请求历史的前缀」才续链：
+// 恢复是给跨进程重启续同一会话用的。scope 模式下同一 key 的桶里会进新话题/子代理的
+// 会话 —— 若无条件恢复，它们会继承主会话的 sessionID：轻则 claim 反复失配、一轮请求
+// 连建多个会话把桶挤爆（孤儿删除风暴），重则子代理 DiffReset 时把主会话正在使用的
+// 上游 session 删掉（跨会话互相干扰，实测）。
+func (s *Store) restoreLocked(c *Conversation, incoming []ChatMessage) {
+	if s.db == nil || c == nil {
+		return
+	}
+	row, ok := s.db.LoadConv(c.Key)
+	if !ok || row.SessionID == "" {
+		return
+	}
+	var msgs []ChatMessage
+	if len(row.History) > 0 {
+		if json.Unmarshal(row.History, &msgs) != nil || len(msgs) == 0 {
+			msgs = nil
+		}
+	}
+	if incoming != nil && !restorableHistory(msgs, incoming) {
+		return
+	}
+	c.setSessionID(row.SessionID)
+	c.restoredFromDB.Store(true)
+	c.model = upstream.OCModelRef{ProviderID: row.ProviderID, ID: row.ModelID, Variant: row.Variant}
+	c.agent = row.Agent
+	c.directory = row.Directory
+	if len(msgs) > 0 {
+		c.setLast(msgs)
+	}
+}
+
+// restorableHistory 判断恢复的历史能否安全续链：stored 必须是 incoming 的严格前缀
+// （与 lastMatches 同语义）。历史快照为空时无法验证归属，一律不恢复 —— 宁可重开会话。
+func restorableHistory(stored, incoming []ChatMessage) bool {
+	if len(stored) == 0 {
+		return false
+	}
+	return lcp(stored, incoming) == len(stored)
+}
+
+func NewStore(log *logx.Logger, ttl, sharedTTL time.Duration, max int) *Store {
+	if sharedTTL == 0 {
+		sharedTTL = ttl
+	}
+	return &Store{
+		dir:       map[string][]*Conversation{},
+		log:       log,
+		ttl:       ttl,
+		sharedTTL: sharedTTL,
+		max:       max,
+		maxPerKey: 8,
+		orphans:   make(chan string, 512),
+	}
+}
+
+// isScopeKey 判断是否为共享（scope = IDE+项目）会话键。
+// 这类会话跨设备共享，通常希望比单机会话保留更久（见 BRIDGE_SHARED_SESSION_TTL）。
+func isScopeKey(key string) bool { return strings.HasPrefix(key, scopeKeyPrefix) }
+
+// ttlFor 返回该会话按空闲回收的时长；<0 表示永不按空闲回收。
+func (s *Store) ttlFor(c *Conversation) time.Duration {
+	if isScopeKey(c.Key) {
+		return s.sharedTTL
+	}
+	return s.ttl
+}
+
+// ConversationKey 优先级：显式头 > 指纹。
+// 指纹 = hash(首条 system + directory)，只是分桶依据，不保证唯一会话。
+// ConversationKey 决定"哪些请求算同一条对话线"（分桶依据）。
+//
+// 优先级：
+//  1. 显式会话头（X-Session-ID / X-OpenCode-Session）—— 最可靠
+//  2. 指纹 sha256(system + user + directory)
+//
+// 纳入 OpenAI 标准的 `user` 字段：它按约定标识终端用户。不带上它的话，
+// 同一目录、同一系统提示词的不同用户会共用同一个桶，桶会无谓地膨胀，
+// 也可能在前缀恰好相同时串到别人的会话上。
+//
+// 注意 key 只决定"分桶"，桶内还要按历史前缀严格匹配（见 Acquire），
+// 所以即使 key 相同，不相关话题也会各自独立。
+func ConversationKey(explicit, system, user, directory string) string {
+	if explicit != "" {
+		return "x:" + explicit
+	}
+	h := sha256.Sum256([]byte(system + "\x00" + user + "\x00" + directory))
+	return "f:" + hex.EncodeToString(h[:8])
+}
+
+// AcquireKey 按"精确的键"取会话，不做历史前缀匹配。
+//
+// 用于 Responses API 的 previous_response_id 链：一条链恰好一个会话，
+// 每轮只把新增 input 作为 prompt 发出，因此不能走 Chat 那套 Diff 前缀匹配。
+// 键统一带 "resp:" 前缀，与 Chat 的 x:/f: 键天然隔离。
+func (s *Store) AcquireKey(key string) *Conversation {
+	s.mu.Lock()
+	bucket := s.dir[key]
+	var found *Conversation
+	if len(bucket) > 0 {
+		found = bucket[0]
+	} else {
+		if len(s.dir) >= s.max {
+			s.evictOldestLocked()
+		}
+		found = &Conversation{Key: key, createdAt: time.Now()}
+		s.dir[key] = []*Conversation{found}
+		s.restoreLocked(found, nil)
+	}
+	s.mu.Unlock()
+
+	found.mu.Lock()
+	found.touch()
+	return found
+}
+
+// Acquire 在桶里挑一个「历史是 incoming 前缀」的会话，挑不到就新建。
+// 返回后会话已加锁，调用方必须 defer Release。
+//
+// 只接受严格前缀匹配：stored 必须完整出现在 incoming 开头。这样 delta 永远是
+// 纯增量，上游 session 里不会混入与客户端不一致的历史。客户端若改写/删减了
+// 旧消息（lcp < len(stored)），一律视为新会话，宁可丢上下文也不污染。
+//
+// 注意：先放掉 s.mu 再拿 c.mu，否则一个慢请求会把整个 store 卡住。
+func (s *Store) Acquire(key string, incoming []ChatMessage) *Conversation {
+	// 空历史的会话「匹配一切」，并发首请求会同时选中同一个，然后在 c.mu 上排队，
+	// 后来者才发现前缀对不上（此时只能靠 DiffReset 兜底，白多一轮）。
+	// 所以拿到 c.mu 之后必须复核一次，对不上就回到桶里重挑。
+	for attempt := 0; ; attempt++ {
+		c := s.claim(key, incoming, attempt >= 8)
+		if attempt < 8 && !c.lastMatches(incoming) {
+			c.mu.Unlock()
+			continue
+		}
+		c.touch()
+		return c
+	}
+}
+
+// claim 选一个候选（或新建）并返回已加锁的会话。forceNew 时无条件新建。
+func (s *Store) claim(key string, incoming []ChatMessage, forceNew bool) *Conversation {
+	s.mu.Lock()
+
+	bucket := s.dir[key]
+	var found *Conversation
+	best := -1
+	if !forceNew {
+		for _, c := range bucket {
+			if !c.lastMatches(incoming) {
+				continue
+			}
+			n := lcp(c.snapshotLast(), incoming)
+			if n > best {
+				best, found = n, c
+			}
+		}
+	}
+
+	if found == nil {
+		if len(s.dir) >= s.max {
+			s.evictOldestLocked()
+		}
+		if len(bucket) >= s.maxPerKey {
+			bucket = evictOldestInBucket(s, bucket)
+		}
+		found = &Conversation{Key: key, createdAt: time.Now()}
+		bucket = append([]*Conversation{found}, bucket...)
+		s.dir[key] = bucket
+		s.restoreLocked(found, incoming)
+	}
+	s.mu.Unlock()
+
+	found.mu.Lock()
+	return found
+}
+
+// markOrphan 把被挤出索引的会话登记为待删除，交 janitor 统一回收上游 session。
+// 只读 stateMu（不碰 c.mu），因此在持 s.mu 时调用也不会卡住整个 store。
+func (s *Store) markOrphan(c *Conversation) {
+	sid := c.snapshotSessionID()
+	if sid == "" {
+		return
+	}
+	select {
+	case s.orphans <- sid:
+	default:
+		// 缓冲满说明 janitor 跟不上，丢掉这一个，靠 TTL 兜底
+	}
+}
+
+func evictOldestInBucket(s *Store, bucket []*Conversation) []*Conversation {
+	// bucket[0] 最近活跃，淘汰末尾
+	victim := bucket[len(bucket)-1]
+	s.markOrphan(victim)
+	return bucket[:len(bucket)-1]
+}
+
+func (s *Store) Release(c *Conversation) {
+	c.touch()
+	c.mu.Unlock()
+}
+
+// evictOldestLocked 只从索引移除，不删上游 session（由 janitor 按 TTL 统一回收）。
+// lastActive 是 atomic，读它不需要抢 c.mu。
+func (s *Store) evictOldestLocked() {
+	var oldestKey string
+	var bucket []*Conversation
+	var victim *Conversation
+	var oldest int64
+	for k, b := range s.dir {
+		for _, c := range b {
+			la := c.lastActive.Load()
+			if victim == nil || la < oldest {
+				oldestKey, bucket, victim, oldest = k, b, c, la
+			}
+		}
+	}
+	if victim == nil {
+		return
+	}
+	s.markOrphan(victim)
+	rest := make([]*Conversation, 0, len(bucket))
+	for _, c := range bucket {
+		if c != victim {
+			rest = append(rest, c)
+		}
+	}
+	if len(rest) == 0 {
+		delete(s.dir, oldestKey)
+	} else {
+		s.dir[oldestKey] = rest
+	}
+	s.log.Infof("store evicted conversation %s", oldestKey)
+}
+
+// Count 返回当前内存里的会话数（指标用）。
+func (s *Store) Count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, b := range s.dir {
+		n += len(b)
+	}
+	return n
+}
+
+// Directories 返回所有活跃会话的非空工作区目录（去重）。
+// janitor 对账 MCP 注册用：注册按会话各自目录写入，只扫默认目录会漏掉
+// 分桶会话（WorkspacesDir/<scope>）的残留。正在服务的会话跳过，下一轮再扫。
+func (s *Store) Directories() []string {
+	seen := map[string]bool{}
+	var out []string
+	s.mu.Lock()
+	for _, bucket := range s.dir {
+		for _, c := range bucket {
+			if !c.mu.TryLock() {
+				continue
+			}
+			d := c.directory
+			c.mu.Unlock()
+			if d != "" && !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
+	}
+	s.mu.Unlock()
+	return out
+}
+
+// GC 清掉长期不活动的会话，返回其上游 sessionID 供删除。
+// TryLock 保证不会卡在正在服务的请求上。
+func (s *Store) GC() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var dead []string
+	for k, bucket := range s.dir {
+		rest := bucket[:0]
+		for _, c := range bucket {
+			if !c.mu.TryLock() {
+				rest = append(rest, c)
+				continue // 正在服务
+			}
+			if ttl := s.ttlFor(c); ttl >= 0 && c.idle() > ttl {
+				if id := c.snapshotSessionID(); id != "" {
+					dead = append(dead, id)
+				}
+				c.mu.Unlock()
+				continue
+			}
+			c.mu.Unlock()
+			rest = append(rest, c)
+		}
+		if len(rest) == 0 {
+			delete(s.dir, k)
+		} else {
+			s.dir[k] = rest
+		}
+	}
+	return dead
+}
+
+// ---------- 历史差分 ----------
+
+type DiffMode int
+
+const (
+	// DiffReset 客户端重置了上下文（或首条），必须重开会话
+	DiffReset DiffMode = iota
+	// DiffAppend 正常增量，只需把新增部分发给上游
+	DiffAppend
+	// DiffNone 内容完全一致，不需要发新 prompt
+	DiffNone
+)
+
+// lcp 返回两条消息列表的最长公共前缀长度。
+func lcp(a, b []ChatMessage) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && msgEqual(a[i], b[i]) {
+		i++
+	}
+	return i
+}
+
+func msgEqual(a, b ChatMessage) bool {
+	if a.Role != b.Role {
+		return false
+	}
+	if a.Content.Text != b.Content.Text {
+		return false
+	}
+	if a.Content.IsArray != b.Content.IsArray {
+		return false
+	}
+	if len(a.ToolCalls) != len(b.ToolCalls) {
+		return false
+	}
+	for i := range a.ToolCalls {
+		af, bf := a.ToolCalls[i].Function, b.ToolCalls[i].Function
+		if (af == nil) != (bf == nil) {
+			return false
+		}
+		if af != nil && (af.Name != bf.Name || af.Arguments != bf.Arguments) {
+			return false
+		}
+	}
+	return true
+}
+
+// Diff 计算 incoming 相对 stored 的增量（DESIGN.md §5.3）。
+//
+//	stored 是 incoming 的前缀  → DiffAppend，发 incoming[len(stored):]
+//	完全一致                   → DiffNone
+//	其余（删改历史/首条不同）    → DiffReset
+func Diff(stored, incoming []ChatMessage) (DiffMode, []ChatMessage) {
+	if len(incoming) == 0 {
+		return DiffNone, nil
+	}
+	if len(stored) == 0 {
+		return DiffReset, incoming
+	}
+
+	common := lcp(stored, incoming)
+
+	if common == len(stored) {
+		if len(incoming) == len(stored) {
+			return DiffNone, nil
+		}
+		return DiffAppend, incoming[common:]
+	}
+	// stored 比 incoming 长（客户端缩短了历史），或历史被改写。
+	// 无法只发增量，重开会话最安全。
+	return DiffReset, incoming
+}
+
+// TolerateReset 在 DiffReset 时判断：能否用「追加最后一条 user」代替重开会话。
+//
+// 不同客户端会把历史里的 assistant/tool 消息重新格式化（丢掉 reasoning、
+// 重排 tool_calls 等），导致严格前缀匹配失败、被判成"改写历史"而重开会话。
+// 只要「历史里的 user 轮次」仍逐个对得上、且最后一条是 user，就认为只是
+// 尾部差异，返回该 user 消息作为增量；否则返回 false（认为是真换话题）。
+func TolerateReset(stored, incoming []ChatMessage) ([]ChatMessage, bool) {
+	if len(incoming) == 0 || incoming[len(incoming)-1].Role != "user" {
+		return nil, false
+	}
+	su, iu := userTexts(stored), userTexts(incoming)
+	if len(iu) == 0 || len(iu) < len(su) {
+		return nil, false
+	}
+	for i := range su {
+		if su[i] != iu[i] {
+			return nil, false
+		}
+	}
+	return []ChatMessage{incoming[len(incoming)-1]}, true
+}
+
+// userTexts 抽出历史里所有 user 消息的文本，用于「只按 user 轮次」对齐。
+func userTexts(msgs []ChatMessage) []string {
+	var out []string
+	for _, m := range msgs {
+		if m.Role == "user" {
+			out = append(out, m.Content.Text)
+		}
+	}
+	return out
+}
+
+// firstSystem 取首条 system 内容（用于 key 指纹）。
+func firstSystem(msgs []ChatMessage) string {
+	for _, m := range msgs {
+		if m.Role == "system" {
+			return m.Content.Text
+		}
+	}
+	return ""
+}
+
+// firstUserTitle 取首条 user 文本作为会话标题。
+func firstUserTitle(msgs []ChatMessage, max int) string {
+	for _, m := range msgs {
+		if m.Role != "user" {
+			continue
+		}
+		t := strings.Join(strings.Fields(m.Content.Text), " ")
+		if t == "" {
+			continue
+		}
+		r := []rune(t)
+		if len(r) > max {
+			return string(r[:max]) + "…"
+		}
+		return t
+	}
+	return ""
+}
+
+// lastAssistant 取最后一条 assistant 的回复（DiffNone 时回填）。
+func lastAssistant(msgs []ChatMessage) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" {
+			return msgs[i].Content.Text
+		}
+	}
+	return ""
+}
+
+// cloneMessages 深拷贝，避免调用方后续改动污染快照。
+func cloneMessages(in []ChatMessage) []ChatMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		out := make([]ChatMessage, len(in))
+		copy(out, in)
+		return out
+	}
+	var out []ChatMessage
+	if err := json.Unmarshal(b, &out); err != nil {
+		out = make([]ChatMessage, len(in))
+		copy(out, in)
+	}
+	return out
+}

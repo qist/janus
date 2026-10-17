@@ -487,7 +487,7 @@ REVIEW      门禁（§9.4 Gate）——人工检查点是硬要求（§12 #17�
 #### 6.8.4 Task Lock（认领与冲突）
 
 - 协商产物落到 Task Queue 后，Agent 通过 **claim** 领取：`POST /janus/task/claim {agent, task_id}`；
-- **文件级锁**：写任务认领后即锁定其输出路径（`file: internal/user.go → owner: agent-A`）；
+- **文件级锁**：写任务认领后即锁定其输出路径（`file: internal/api/store.go → owner: agent-A`）；
 - 冲突规则 = §9.3"同一 artifact 只有一个 writer"的具体化：
   - 锁冲突 → 拒绝认领，提示已认领者与交接路径（`handoff`）；
   - 只读任务（audit / review）不抢写锁，可并行（沿用 §9.3）；

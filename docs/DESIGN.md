@@ -620,7 +620,7 @@ desktop 端等其他会话一律不碰。
 要改成**桥只部署一处、工具在客户端执行**，桥需要一个"只允许客户端 MCP 工具、
 禁用内置工具"的 agent，并让桥用它（`BRIDGE_AGENT=orchestrator`）。
 
-**该 agent 由 janus 自动生成并注入**（`opencode_config.go` → `OPENCODE_CONFIG_CONTENT`，
+**该 agent 由 janus 自动生成并注入**（`internal/channel/opencode/inlineconfig.go` → `OPENCODE_CONFIG_CONTENT`，
 优先级高于全局/项目配置），**不需要手写** `~/.config/opencode/opencode.jsonc`：
 
 ```jsonc
@@ -902,7 +902,7 @@ Store + executor + ToolBridge**，`anthropic.go` / `anthropic_stream.go` 只做�
 因此**无需逐模型映射**。解析优先级：`BRIDGE_MODEL_MAP`（精确/前缀 `*`）→ 请求本身可解析 →
 **面板选择的默认模型（`/ui` → 设为 janus，存 DB，含思考档位）** → `BRIDGE_DEFAULT_MODEL`
 （多数用户只配这一个，所有档位走它）→ 按档位启发式自动挑选
-（排除经 API 会 403 的 `opencode/*` 免费额度；opus 挑强、haiku 挑便宜快）。见 `cmd_models.go`
+（排除经 API 会 403 的 `opencode/*` 免费额度；opus 挑强、haiku 挑便宜快）。见 `internal/cli/models.go`
 - **映射可见性 / 选型**：`janus models` 列出全部可用模型（价格/上下文/能力/可用性）并打印三档
   当前映射；`GET /anthropic/v1/models`（或带 `anthropic-version` 头的 `/v1/models`）返回 Claude Code
   模型选择器认的 Anthropic 格式，`display_name` 里带上实际映射目标

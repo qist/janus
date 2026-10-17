@@ -78,7 +78,7 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := gdb.AutoMigrate(&response{}, &Conversation{}, &setting{}); err != nil {
+	if err := gdb.AutoMigrate(&response{}, &Conversation{}, &setting{}, &Account{}, &AccountModel{}); err != nil {
 		return nil, err
 	}
 	return &Store{db: gdb}, nil

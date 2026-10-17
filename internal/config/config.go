@@ -190,6 +190,8 @@ type Config struct {
 	// DBPath 持久化库路径（SQLite，github.com/qist/sqlite）。
 	// 空 / memory / off = 纯内存。默认见 paths.DefaultDBPath()。
 	DBPath string
+	// DBKey 凭据加密密钥（BRIDGE_DB_KEY）。空 = 派生自 BRIDGE_API_KEY。
+	DBKey string
 
 	// HistoryMaxBytes 落库的 Chat 历史快照上限；超过则只存会话映射（不存历史）。
 	HistoryMaxBytes int
@@ -472,6 +474,7 @@ func LoadConfig() (Config, error) {
 		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),
 		UserAgent:       loader.str("BRIDGE_USER_AGENT", ""),
 		DBPath:          loader.str("BRIDGE_DB", paths.DefaultDBPath()),
+		DBKey:           loader.str("JANUS_DB_KEY", ""),
 		HistoryMaxBytes: loader.integer("BRIDGE_HISTORY_MAX_BYTES", 1<<20),
 		ConvTTL:         loader.durTTL("BRIDGE_CONV_TTL", 7*24*time.Hour),
 

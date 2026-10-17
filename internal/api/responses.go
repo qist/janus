@@ -651,6 +651,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
 		return
 	}
+	s.ensureAccountForModel(r.Context(), ref)
 	if effort := responsesEffort(req); effort != "" && ref.Variant == "" {
 		if m := modelx.Find(ocModels, ref); m != nil {
 			if v, ok := modelx.PickVariant(*m, effort); ok {

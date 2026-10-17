@@ -60,6 +60,7 @@ func main() {
 	// 注入前读到，否则重启后回到 env 默认值。
 	if !db.MemoryDSN(cfg.DBPath) {
 		if d, err := db.Open(cfg.DBPath); err == nil {
+			d.SetAccountKey(cfg.DBKey)
 			if v, ok := d.GetSetting("workbuddy_context"); ok && (v == "max" || v == "default") {
 				cfg.WorkBuddyContext = v
 			}

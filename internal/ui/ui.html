@@ -447,6 +447,48 @@ tr.prov-sub td{background:#101728;font-weight:600;color:var(--muted);border-top:
   </section>
   </div><!-- /runtime -->
 
+  <div class="tabpane" data-pane="accounts">
+  <section>
+    <h2>上游账号 <span class="tag" id="acctTag"></span></h2>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+        <button id="btnAcctRefresh" class="ghost">刷新</button>
+        <button id="btnAcctDiscoverAll" class="ghost">发现全部模型</button>
+      </div>
+    </div>
+    <div class="panel tbl-wrap">
+      <table>
+        <thead><tr><th>账号</th><th>类型</th><th>Provider</th><th>状态</th><th>模型数</th><th>操作</th></tr></thead>
+        <tbody id="acctBody"></tbody>
+      </table>
+      <div class="empty" id="acctEmpty" style="display:none">还没有账号。下方添加，或用 CLI `janus accounts add`。</div>
+    </div>
+    <div id="acctModels" class="panel" style="margin-top:12px;display:none">
+      <h3 style="margin:0 0 8px">模型（按账号分组）</h3>
+      <div id="acctModelList"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>添加账号</h2>
+    <div class="panel">
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <select id="acctKind"><option value="opencode">opencode</option><option value="workbuddy">workbuddy</option></select>
+        <input id="acctProvider" placeholder="provider_id (如 opencode)" style="width:150px">
+        <input id="acctLabel" placeholder="label (如 personal)" style="width:150px">
+        <input id="acctExt" placeholder="external_id (OpenCode label，可空)" style="width:180px">
+      </div>
+      <div style="margin-top:8px">
+        <textarea id="acctCred" rows="6" style="width:100%;font-family:monospace;font-size:12px" placeholder='凭据 JSON，例如 {"type":"oauth","access":"...","refresh":"...","expires":...,"metadata":{...}}'></textarea>
+      </div>
+      <div class="row" style="margin-top:8px;gap:8px">
+        <button id="btnAcctAdd" class="primary">添加</button>
+        <span id="acctAddMsg" class="dim" style="font-size:12px"></span>
+      </div>
+    </div>
+  </section>
+  </div><!-- /accounts -->
+
   <div class="foot">
     <span>数据来源：<code class="dim">/v1/usage</code>（OpenCode console API + Go inference）</span>
     <span>页面：<code class="dim">/ui</code></span>
@@ -1252,7 +1294,7 @@ function load(){
 
   return api('/v1/usage').then(function(rep){
     state.report=rep; hideBanner(); renderKeyBadge(false);
-    renderChanSeg(); applyPrefsOnce(); renderBilling(rep.billing); renderGo(rep.go); renderTotals(rep.totals); renderChart(); renderProviders(); renderModels(); renderWbUsage();
+    renderChanSeg(); applyPrefsOnce(); renderBilling(rep.billing); renderGo(rep.go); renderTotals(rep.totals); renderChart(); renderProviders(); renderModels(); renderWbUsage(); renderAccounts();
     el('footTime').textContent='页面刷新于 '+new Date().toLocaleTimeString();
     return fetchText('/metrics').then(function(t){
       renderLive(parseMetrics(t));
@@ -1291,10 +1333,10 @@ function renderChanSeg(){
 }
 // 子标签按渠道切换：OpenCode 渠道=原有四块原样；WorkBuddy 渠道=它自己的三块
 var CHAN_TABS={
-  opencode:['usage','requests','models','runtime'],
-  workbuddy:['usage','requests','models']
+  opencode:['usage','requests','models','runtime','accounts'],
+  workbuddy:['usage','requests','models','accounts']
 };
-var TAB_LABEL={usage:'用量',requests:'最近请求',models:'模型',runtime:'运行'};
+var TAB_LABEL={usage:'用量',requests:'最近请求',models:'模型',runtime:'运行',accounts:'账号'};
 function renderTabs(){
   var set=CHAN_TABS[state.chan]||CHAN_TABS.opencode;
   var cur=el('tabs').querySelector('button.on');
@@ -1331,6 +1373,72 @@ function showTab(name,skipSave){
 function openKey(){ el('keyInput').value=state.key||''; el('keyMask').className='mask show'; el('keyInput').focus(); }
 function closeKey(){ el('keyMask').className='mask'; }
 
+/* ---------- 渲染：账号（多账号） ---------- */
+function renderAccounts(){
+  api('/v1/accounts').then(function(d){
+    var rows=d.accounts||[];
+    el('acctTag').textContent=rows.length?(rows.length+' 个账号'):'';
+    el('acctEmpty').style.display=rows.length?'none':'block';
+    el('acctBody').innerHTML=rows.map(function(a){
+      var models=(a.models||[]).join(', ');
+      var short=models.length>60?models.slice(0,60)+'…':models;
+      return '<tr>'+
+        '<td>'+esc(a.label||a.id)+'</td>'+
+        '<td>'+esc(a.kind)+'</td>'+
+        '<td>'+esc(a.provider_id)+'</td>'+
+        '<td>'+(a.active?'<span class="pill free">active</span>':'–')+'</td>'+
+        '<td class="num" title="'+esc(models)+'">'+(a.models||[]).length+'</td>'+
+        '<td>'+
+          '<button class="ghost" onclick="discoverAcct(\''+esc(a.id)+'\')">发现模型</button> '+
+          (a.active?'':('<button class="ghost" onclick="activateAcct(\''+esc(a.id)+'\')">激活</button> '))+
+          '<button class="ghost" onclick="deleteAcct(\''+esc(a.id)+'\')">删除</button>'+
+        '</td></tr>';
+    }).join('');
+    // 模型分组展示
+    var html=rows.map(function(a){
+      var ms=a.models||[];
+      if(!ms.length) return '';
+      return '<div style="margin-bottom:10px"><div class="dim" style="font-size:12px;margin-bottom:4px">'+esc(a.label||a.id)+'（'+ms.length+' 个）</div>'+
+        '<div style="display:flex;flex-wrap:wrap;gap:4px">'+ms.map(function(m){return '<span class="pill">'+esc(m)+'</span>';}).join('')+'</div></div>';
+    }).join('');
+    el('acctModelList').innerHTML=html||'<div class="dim">暂无已发现模型，点"发现模型"。</div>';
+    el('acctModels').style.display='block';
+  }).catch(function(e){ showBanner('err','账号列表加载失败：'+e.message); });
+}
+function discoverAcct(id){
+  showBanner('info','正在发现模型（可能需要 20-40 秒）…');
+  apiJSON('POST','/v1/accounts/'+encodeURIComponent(id)+'/discover',{}).then(function(d){
+    hideBanner();
+    showBanner('info','发现 '+(d.models||[]).length+' 个模型');
+    renderAccounts();
+  }).catch(function(e){ hideBanner(); showBanner('err','发现失败：'+e.message); });
+}
+function activateAcct(id){
+  apiJSON('POST','/v1/accounts/'+encodeURIComponent(id)+'/activate',{}).then(function(){ renderAccounts(); }).catch(function(e){ showBanner('err',e.message); });
+}
+function deleteAcct(id){
+  if(!confirm('删除该账号？')) return;
+  apiJSON('DELETE','/v1/accounts/'+encodeURIComponent(id),null).then(function(){ renderAccounts(); }).catch(function(e){ showBanner('err',e.message); });
+}
+function addAcct(){
+  var kind=el('acctKind').value;
+  var provider=el('acctProvider').value.trim()||kind;
+  var label=el('acctLabel').value.trim()||provider;
+  var ext=el('acctExt').value.trim();
+  var credText=el('acctCred').value.trim();
+  var cred=null;
+  try{ cred=JSON.parse(credText); }catch(e){ el('acctAddMsg').textContent='凭据 JSON 解析失败：'+e.message; return; }
+  if(!cred){ el('acctAddMsg').textContent='凭据不能为空'; return; }
+  var body={kind:kind,provider_id:provider,label:label,credential:cred};
+  if(ext) body.external_id=ext;
+  apiJSON('POST','/v1/accounts',body).then(function(d){
+    el('acctAddMsg').textContent='已添加：'+d.id;
+    el('acctCred').value='';
+    renderAccounts();
+  }).catch(function(e){ el('acctAddMsg').textContent='添加失败：'+e.message; });
+}
+function loadAccounts(){ renderAccounts(); }
+
 /* ---------- 事件绑定 ---------- */
 function bind(){
   el('tabs').addEventListener('click',function(e){
@@ -1338,7 +1446,13 @@ function bind(){
     showTab(b.getAttribute('data-tab'));
   });
   try{ var savedTab=localStorage.getItem(TABKEY); if(savedTab) showTab(savedTab); }catch(e){}
-  el('btnRefresh').addEventListener('click',load);
+  el('btnAcctRefresh').addEventListener('click',renderAccounts);
+  el('btnAcctDiscoverAll').addEventListener('click',function(){
+    api('/v1/accounts').then(function(d){
+      (d.accounts||[]).forEach(function(a){ discoverAcct(a.id); });
+    });
+  });
+  el('btnAcctAdd').addEventListener('click',addAcct);
   el('autoSel').addEventListener('change',restartAuto);
   el('reqWindow').addEventListener('change',loadRequests);
   el('reqLimit').addEventListener('change',loadRequests);

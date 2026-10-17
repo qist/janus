@@ -778,6 +778,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
 		return
 	}
+	s.ensureAccountForModel(r.Context(), ref)
 
 	// 思考强度：标准字段 reasoning_effort → 上游 model variant。
 	// 若客户端已经在 model 串里写了 ":variant"，以它为准（更具体）。

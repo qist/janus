@@ -214,6 +214,7 @@ func NewServer(cfg config.Config, log *logx.Logger) *Server {
 		if opened, err := db.Open(cfg.DBPath); err != nil {
 			log.Warnf("sqlite open failed (%s): %v; falling back to in-memory", cfg.DBPath, err)
 		} else {
+			opened.SetAccountKey(cfg.DBKey)
 			srv.db = opened
 			srv.store.attachDB(opened)
 			srv.responses.attachDB(opened)
@@ -394,7 +395,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/usage", s.handleUsage)
 	mux.HandleFunc("GET /v1/requests", s.handleRequests)
 	mux.HandleFunc("GET /v1/settings", s.handleGetSettings)
-	mux.HandleFunc("POST /v1/settings", s.handleSetSettings)
+	mux.HandleFunc("GET /v1/accounts", s.handleListAccounts)
+	mux.HandleFunc("POST /v1/accounts", s.handleCreateAccount)
+	mux.HandleFunc("GET /v1/accounts/{id}", s.handleGetAccount)
+	mux.HandleFunc("DELETE /v1/accounts/{id}", s.handleDeleteAccount)
+	mux.HandleFunc("POST /v1/accounts/{id}/activate", s.handleActivateAccount)
+	mux.HandleFunc("GET /v1/accounts/{id}/models", s.handleAccountModels)
+	mux.HandleFunc("POST /v1/accounts/{id}/discover", s.handleDiscoverAccount)
 	mux.HandleFunc("POST /v1/responses", s.handleCreateResponse)
 	mux.HandleFunc("GET /v1/responses/{id}", s.handleGetResponse)
 	mux.HandleFunc("DELETE /v1/responses/{id}", s.handleDeleteResponse)

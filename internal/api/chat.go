@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"janus/internal/attach"
+	"janus/internal/gateway"
 	"janus/internal/httpx"
 	"janus/internal/modelx"
 	"janus/internal/prompt"
@@ -742,7 +743,8 @@ func buildResponse(id string, created int64, model string, r runResult) ChatResp
 // ---------- 主流程 ----------
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkAuth(r); err != nil {
+	p, err := s.principal(r)
+	if err != nil {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
 		return
 	}
@@ -766,6 +768,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 模型面直连：agent key（harness 自己跑工具循环）或显式 agent=direct。
+	// 只换 model 字段后原样转发，不建上游会话。
+	if s.directMode(r, p) {
+		if s.proxyModel(w, r, p, gateway.ProtocolOpenAIChat, body, openAIFail(w)) {
+			return
+		}
+	}
+
 	// ---- 模型解析 ----
 	ocModels, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
 	if err != nil {
@@ -778,7 +788,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
 		return
 	}
-	s.ensureAccountForModel(r.Context(), ref)
 
 	// 思考强度：标准字段 reasoning_effort → 上游 model variant。
 	// 若客户端已经在 model 串里写了 ":variant"，以它为准（更具体）。
@@ -1029,8 +1038,8 @@ func (c *Conversation) key() string { return c.Key }
 //
 //	"" / "default" / "auto"
 //
-// 先过一遍别名映射（BRIDGE_MODEL_MAP，如 claude-3-5-sonnet=...），
-// 其余交给 ResolveModel 按 provider/model 或裸名解析。
+// 其余先过路由表（model_routes，可带 credential / provider 作用域），
+// 再交给 modelx.Resolve 按 provider/model 或裸名解析。
 func (s *Server) resolveModel(ctx context.Context, raw string, list []upstream.OCModel) (upstream.OCModelRef, error) {
 	if isJanusAlias(raw) {
 		ref, err := s.resolveJanusModel(ctx, list)
@@ -1054,32 +1063,25 @@ func (s *Server) resolveModel(ctx context.Context, raw string, list []upstream.O
 	return ref, err
 }
 
-// mapModelName 应用 BRIDGE_MODEL_MAP（键不区分大小写）；无映射则原样返回。
-// 键以 '*' 结尾表示前缀匹配（如 claude-opus*=... 匹配 claude-opus-4-1）。
+// mapModelName 应用数据库里的路由规则（model_routes）；无命中则原样返回。
+// 规则键不区分大小写，尾部 '*' 为前缀通配（取最长前缀）。
 func (s *Server) mapModelName(raw string) string {
 	raw = stripContextSuffix(strings.TrimSpace(raw))
-	if len(s.cfg.ModelMap) == 0 {
+	if s.router == nil {
 		return raw
 	}
-	lower := strings.ToLower(raw)
-	if to, ok := s.cfg.ModelMap[lower]; ok {
-		return to
+	res, err := s.router.Route(gateway.RouteInput{Model: raw})
+	if err != nil {
+		return raw
 	}
-	// 前缀匹配取最长者
-	bestLen, bestTo := -1, ""
-	for k, to := range s.cfg.ModelMap {
-		if !strings.HasSuffix(k, "*") {
-			continue
-		}
-		p := strings.TrimSuffix(k, "*")
-		if p != "" && strings.HasPrefix(lower, p) && len(p) > bestLen {
-			bestLen, bestTo = len(p), to
-		}
+	if res.ProviderID == "" {
+		return raw
 	}
-	if bestLen >= 0 {
-		return bestTo
+	out := res.ProviderID + "/" + res.UpstreamID
+	if res.Variant != "" {
+		out += ":" + res.Variant
 	}
-	return raw
+	return out
 }
 
 // stripContextSuffix 去掉 Claude Code 的长上下文标记后缀。
@@ -1152,7 +1154,8 @@ func (s *Server) runtimeDefaultModelRef(ctx context.Context, list []upstream.OCM
 	if runtime == "" {
 		return upstream.OCModelRef{}, false
 	}
-	ref, err := modelx.Resolve(runtime, list)
+	// 先处理账号 label 格式
+	ref, err := modelx.Resolve(s.mapModelName(runtime), list)
 	if err == nil {
 		return ref, true
 	}
@@ -1160,7 +1163,7 @@ func (s *Server) runtimeDefaultModelRef(ctx context.Context, list []upstream.OCM
 	//（常是免费档模型，经 API 会 403 "free tier"）。
 	if s.models != nil {
 		if fresh, ferr := s.models.Get(ctx, s.up, s.cfg.Directory, true); ferr == nil {
-			if ref2, err2 := modelx.Resolve(runtime, fresh); err2 == nil {
+			if ref2, err2 := modelx.Resolve(s.mapModelName(runtime), fresh); err2 == nil {
 				return ref2, true
 			}
 		}

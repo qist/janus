@@ -9,10 +9,14 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"janus/internal/config"
-	"janus/internal/logx"
 )
+
+// writeJSON 是测试用的最小 JSON 响应助手。
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
 
 // 明文凭据两种形态都能解析；加密文件（无字符串 accessToken）明确报错。
 func TestParseWBCredential(t *testing.T) {
@@ -129,121 +133,6 @@ func TestWBParseCatalog(t *testing.T) {
 	}
 }
 
-// 端到端：httptest 假上游 + 真路由。models 走缓存目录，chat 透传 SSE 并校验身份头。
-func TestWorkBuddyProviderRoutes(t *testing.T) {
-	// 假上游：记录请求头，回一段 SSE
-	var gotAuth, gotUA, gotConv, gotBody string
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotUA = r.Header.Get("User-Agent")
-		gotConv = r.Header.Get("X-Conversation-ID")
-		b := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(b)
-		gotBody = string(b)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"))
-		w.Write([]byte("data: [DONE]\n\n"))
-	}))
-	defer up.Close()
-
-	cred := &Credential{AccessToken: "at-1", RefreshToken: "rt-1", Domain: "workbuddy.ai", UID: "u9"}
-	c := newWorkBuddyClient(cred, "5.6.2")
-	c.baseOverride = up.URL
-	rt := &Runtime{
-		cfg:    &config.Config{MaxBodyBytes: 1 << 20},
-		log:    logx.NewLogger("error"),
-		token:  "tok-123",
-		client: c,
-		models: []Model{{ID: "glm-5.3", Name: "GLM-5.3", ContextWindow: 200000}},
-	}
-	current = rt
-	t.Cleanup(func() { current = nil })
-
-	mux := http.NewServeMux()
-	rt.registerRoutes(mux)
-
-	// 错 token → 401
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/workbuddy/wrong/v1/chat/completions", strings.NewReader("{}")))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("错 token 应 401, got %d", rec.Code)
-	}
-
-	// models
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/workbuddy/tok-123/v1/models", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "glm-5.3") {
-		t.Fatalf("models: %d %s", rec.Code, rec.Body.String())
-	}
-
-	// chat：SSE 原样透传 + 身份头/body 规整生效
-	body := `{"model":"glm-5.3","stream":false,"messages":[{"role":"developer","content":"s"},{"role":"user","content":"hi"}],"tool_choice":{"type":"auto"}}`
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/workbuddy/tok-123/v1/chat/completions", strings.NewReader(body)))
-	if rec.Code != 200 {
-		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "pong") {
-		t.Fatalf("SSE 未透传: %s", rec.Body.String())
-	}
-	if gotAuth != "Bearer at-1" {
-		t.Fatalf("Authorization = %q", gotAuth)
-	}
-	if !strings.Contains(gotUA, "WorkBuddy/5.6.2 WorkBuddy AI/5.6.2") {
-		t.Fatalf("UA = %q", gotUA)
-	}
-	if gotConv == "" {
-		t.Fatal("X-Conversation-ID 缺失")
-	}
-	var sent map[string]any
-	if err := json.Unmarshal([]byte(gotBody), &sent); err != nil {
-		t.Fatal(err)
-	}
-	if sent["stream"] != true || sent["tool_choice"] != "auto" {
-		t.Fatalf("body 规整不符: %s", gotBody)
-	}
-	if msgs := sent["messages"].([]any); msgs[0].(map[string]any)["role"] != "system" {
-		t.Fatal("developer 应已改写")
-	}
-
-	// 上游 401 → 自动续期后重试
-	up2Hits := 0
-	refreshHits := 0
-	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/token/refresh") {
-			refreshHits++
-			w.Write([]byte(`{"code":0,"data":{"accessToken":"at-2"}}`))
-			return
-		}
-		up2Hits++
-		if up2Hits == 1 {
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"msg":"expired"}`))
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"after-refresh\"}}]}\n\n"))
-		w.Write([]byte("data: [DONE]\n\n"))
-	}))
-	defer up2.Close()
-	c2 := newWorkBuddyClient(&Credential{AccessToken: "stale", RefreshToken: "rt", Domain: "workbuddy.ai"}, "5.5.6")
-	c2.baseOverride = up2.URL
-	rt.client = c2
-
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/workbuddy/tok-123/v1/chat/completions", strings.NewReader(body)))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "after-refresh") {
-		t.Fatalf("401 续期重试失败: %d %s", rec.Code, rec.Body.String())
-	}
-	if refreshHits != 1 || up2Hits != 2 {
-		t.Fatalf("refresh=%d chat=%d", refreshHits, up2Hits)
-	}
-	if c2.credential().AccessToken != "at-2" {
-		t.Fatalf("新 token 未生效: %q", c2.credential().AccessToken)
-	}
-	_ = context.Background()
-}
-
 // 倍率规范化：带单位词 / 纯单位词 / 大小写不敏感 / 空值。
 func TestWBNormalizeCredits(t *testing.T) {
 	cases := map[string]string{
@@ -307,43 +196,6 @@ func TestWBParseCatalogCredits(t *testing.T) {
 	// m4：onlyReasoning 标记。
 	if !models[3].OnlyReasoning || len(models[3].SupportedEfforts) != 1 {
 		t.Fatalf("m4 思考元数据不符: %+v", models[3])
-	}
-}
-
-// variants 注入语义：声明档位注入/off 按 canDisable、非推理模型空表压档。
-func TestWBModelConfigsVariants(t *testing.T) {
-	rt := &Runtime{
-		client: newWorkBuddyClient(&Credential{AccessToken: "at", Domain: ""}, ""),
-		models: []Model{
-			{ID: "declared", Name: "D", Reasoning: true, SupportedEfforts: []string{"low", "high", "max"}, DefaultEffort: "high", CanDisableThinking: true},
-			{ID: "nodeclare", Name: "N", Reasoning: true},
-			{ID: "plain", Name: "P"},
-			{ID: "onlyre", Name: "O", Reasoning: true, SupportedEfforts: []string{"high"}, CanDisableThinking: true, OnlyReasoning: true},
-		},
-	}
-	cfg := rt.modelConfigs()
-	d := cfg["declared"].(map[string]any)
-	v := d["variants"].(map[string]any)
-	if _, ok := v["low"]; !ok {
-		t.Fatalf("declared 缺 low 档: %v", v)
-	}
-	if v["low"].(map[string]any)["reasoningEffort"] != "low" {
-		t.Fatalf("low 档 settings 不符: %v", v["low"])
-	}
-	if _, ok := v["off"]; !ok {
-		t.Fatalf("canDisableThinking 应有 off 档: %v", v)
-	}
-	if _, ok := cfg["nodeclare"].(map[string]any)["variants"]; ok {
-		t.Fatalf("未声明档位不应注入 variants")
-	}
-	p := cfg["plain"].(map[string]any)
-	if em, ok := p["variants"].(map[string]any); !ok || len(em) != 0 {
-		t.Fatalf("非推理模型应注入空 variants 压档: %v", p["variants"])
-	}
-	// CN 端 onlyReasoning：off 线上必拒，不给。
-	o := cfg["onlyre"].(map[string]any)["variants"].(map[string]any)
-	if _, ok := o["off"]; ok {
-		t.Fatalf("onlyReasoning 不应给 off 档: %v", o)
 	}
 }
 

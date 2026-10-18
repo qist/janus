@@ -11,18 +11,17 @@ import (
 
 	"janus/internal/channel/opencode"
 	"janus/internal/config"
+	"janus/internal/db"
 	"janus/internal/logx"
 	"janus/internal/mcpbridge"
 	"janus/internal/modelx"
 	"janus/internal/upstream"
 )
 
-// runModels 打印 Janus（= 上游 OpenCode）可用的模型，帮用户挑一个填进
-// BRIDGE_DEFAULT_MODEL。用法：janus models [--json]
+// RunModels 打印上游（OpenCode）可用的模型，帮用户挑一个填进默认模型。
+// 用法：janus models [--json]
 //
-// 设计意图：普通用户通常只想指定一个订阅里的模型，不需要逐个映射。
-// 配一个 BRIDGE_DEFAULT_MODEL，所有 Claude Code 档位都走它；这个命令就是
-// 用来"从一堆订阅模型里挑那一个"的。
+// 运行期设置全部在数据库里：这里先读 settings.runtime，再回落到 bootstrap 默认值。
 func RunModels(args []string) {
 	asJSON := false
 	for _, a := range args {
@@ -31,15 +30,21 @@ func RunModels(args []string) {
 			asJSON = true
 		case "-h", "--help", "help":
 			fmt.Println("用法: janus models [--json]")
-			fmt.Println("列出上游所有可用模型（含价格/能力），用于挑选 BRIDGE_DEFAULT_MODEL。")
+			fmt.Println("列出上游所有可用模型（含价格/能力），用于挑选默认模型。")
 			return
 		}
 	}
 
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error: "+err.Error())
-		os.Exit(2)
+	cfg := config.Load()
+	if !db.MemoryDSN(cfg.DBPath) {
+		if opened, err := db.Open(cfg.DBPath); err == nil {
+			if raw, ok := opened.GetSettingRaw(db.SettingRuntime); ok {
+				if err := cfg.ApplySettings(raw, json.Unmarshal); err != nil {
+					fmt.Fprintln(os.Stderr, "runtime settings ignored: "+err.Error())
+				}
+			}
+			opened.Close()
+		}
 	}
 	log := logx.NewLogger("warn")
 
@@ -52,7 +57,7 @@ func RunModels(args []string) {
 		cancel()
 		if derr != nil {
 			fmt.Fprintln(os.Stderr, "upstream auto-discovery/autostart failed: "+derr.Error())
-			fmt.Fprintln(os.Stderr, "提示：先安装/启动 OpenCode，或设置 OPENCODE_URL / OPENCODE_PASSWORD。")
+			fmt.Fprintln(os.Stderr, "提示：先安装/启动 OpenCode，或在 /api/v1/settings 配置 upstream。")
 			os.Exit(1)
 		}
 		cfg.Upstream, cfg.Username, cfg.Password = ep.Base, ep.User, ep.Pass
@@ -72,7 +77,7 @@ func RunModels(args []string) {
 		os.Exit(1)
 	}
 	if len(list) == 0 {
-		fmt.Fprintln(os.Stderr, "上面没有返回任何模型（检查 OPENCODE_URL / directory）")
+		fmt.Fprintln(os.Stderr, "上游没有返回任何模型（检查 settings.upstream / directory）")
 		os.Exit(1)
 	}
 
@@ -127,7 +132,7 @@ func RunModels(args []string) {
 
 	// 把 Claude Code 档位的自动挑选结果直接亮出来，用户一眼就知道"不配也行"。
 	fmt.Println()
-	fmt.Println("Claude Code 档位（未配 BRIDGE_MODEL_MAP 时的启发式自动挑选）：")
+	fmt.Println("Claude Code 档位（未配 model_routes 时的启发式自动挑选）：")
 	for _, t := range modelx.TierAliases {
 		if ref, ok := modelx.PickTier(list, t.Tier); ok {
 			fmt.Printf("  %-18s → %s\n", t.Alias, ref.String())
@@ -137,8 +142,8 @@ func RunModels(args []string) {
 	}
 	fmt.Println()
 	fmt.Println("想固定用某一个模型（多数用户的选择）：")
-	fmt.Println("  BRIDGE_DEFAULT_MODEL=<上面某一行的 provider/id>")
-	fmt.Println("  # 所有 Claude Code 档位都会走它；也可用 BRIDGE_MODEL_MAP 分档位映射")
+	fmt.Println("  PATCH /api/v1/settings {\"default_model\": \"<上面某一行的 provider/id>\"}")
+	fmt.Println("  # 所有 Claude Code 档位都会走它；也可用 /api/v1/routes 分档位映射")
 }
 
 func firstCost(m upstream.OCModel) upstream.OCCost {

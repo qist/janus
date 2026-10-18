@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 
-	"janus/internal/channel/workbuddy"
 	"janus/internal/protocol/openai"
 	"janus/internal/upstream"
 )
@@ -267,21 +266,11 @@ func IsFree(m upstream.OCModel) bool {
 	return true
 }
 
-// ToOpenAIWithCredits 把模型转成 OpenAI 条目；workbuddy 模型附带计费倍率，
-// 且上下文长度用运行时档位覆盖（立即生效）。非 workbuddy 模型（opencode
-// 渠道）可用 ocCtx 覆盖展示预算（0 = 跟随目录）。
-// 零倍率同时打上免费标记（workbuddy 无 OpenCode cost 数据，IsFree 判不出）。
+// ToOpenAIWithCredits 把模型转成 OpenAI 条目，并按需覆盖展示用的上下文预算
+// （ocCtx > 0 时生效，0 = 跟随目录）。
 func ToOpenAIWithCredits(m upstream.OCModel, ocCtx int) openai.ModelObject {
 	obj := ToOpenAI(m)
-	if c := workbuddy.CreditsFor(m.ProviderID, m.ID); c != "" {
-		obj.WorkBuddyCredits = c
-		if workbuddy.CreditsIsFree(c) {
-			obj.Free = true
-		}
-	}
-	if ctx := workbuddy.ContextOverride(m.ProviderID, m.ID); ctx > 0 {
-		obj.ContextLength = ctx
-	} else if ocCtx > 0 && m.ProviderID != workbuddy.ProviderID {
+	if ocCtx > 0 {
 		obj.ContextLength = ocCtx
 	}
 	return obj

@@ -5,14 +5,46 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"janus/internal/config"
+	"janus/internal/db"
+	"janus/internal/gateway"
 	"janus/internal/logx"
 	"janus/internal/modelx"
 	"janus/internal/upstream"
 )
+
+// newRouteServer 构造带 DB 路由规则的 Server（替代旧 BRIDGE_MODEL_MAP）。
+// 每条规则落在 opencode-go provider 上，并挂一份可用凭据，保证解析能落到
+// provider/model。
+func newRouteServer(t *testing.T, routes ...db.ModelRoute) *Server {
+	t.Helper()
+	st, err := db.Open(filepath.Join(t.TempDir(), "janus.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.SaveProvider(db.Provider{
+		ID: "opencode-go", Type: gateway.ProtocolOpenAIChat, AuthKind: "api_key", Enabled: true,
+	}); err != nil {
+		t.Fatalf("save provider: %v", err)
+	}
+	if _, err := st.CreateCredential("opencode-go", db.CredentialInput{
+		Label: "main", Secret: map[string]any{"api_key": "x"},
+	}); err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	for _, rt := range routes {
+		rt.Enabled = true
+		if _, err := st.SaveRoute(rt); err != nil {
+			t.Fatalf("save route: %v", err)
+		}
+	}
+	return &Server{cfg: config.Config{}, log: logx.NewLogger("error"), router: gateway.New(st)}
+}
 
 func mkModel(provider, id string, input, output float64, tools bool, enabled bool) upstream.OCModel {
 	m := upstream.OCModel{ID: id, ModelID: id, ProviderID: provider, Enabled: enabled}
@@ -91,11 +123,11 @@ func TestResolveAnthropicModelDefaultKnob(t *testing.T) {
 		t.Errorf("未配默认时 haiku 应挑最便宜，got %s", ref)
 	}
 
-	// 显式 BRIDGE_MODEL_MAP 优先于一切
-	s3 := &Server{cfg: config.Config{
-		DefaultModel: "opencode-go/big-pro",
-		ModelMap:     map[string]string{"claude-*": "opencode-go/cheap-flash"},
-	}}
+	// 显式路由规则（model_routes，替代旧 BRIDGE_MODEL_MAP）优先于一切
+	s3 := newRouteServer(t, db.ModelRoute{
+		Scope: db.RouteScopeGlobal, Alias: "claude-*", Target: "opencode-go/cheap-flash",
+	})
+	s3.cfg.DefaultModel = "opencode-go/big-pro"
 	ref, err = s3.resolveAnthropicModel(context.Background(), "claude-3-5-haiku", list)
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -198,7 +230,9 @@ func TestMapModelNameStripsContextSuffix(t *testing.T) {
 		t.Errorf("无映射 got %q", got)
 	}
 	// 有映射：先去掉后缀，再用前缀通配命中
-	s2 := &Server{cfg: config.Config{ModelMap: map[string]string{"claude-*": "opencode-go/x"}}}
+	s2 := newRouteServer(t, db.ModelRoute{
+		Scope: db.RouteScopeGlobal, Alias: "claude-*", Target: "opencode-go/x",
+	})
 	if got := s2.mapModelName("claude-sonnet-4-5[1m]"); got != "opencode-go/x" {
 		t.Errorf("有映射 got %q", got)
 	}

@@ -30,7 +30,6 @@ import (
 	"sync"
 	"time"
 
-	"janus/internal/channel/workbuddy"
 	"janus/internal/config"
 	"janus/internal/logx"
 	"janus/internal/useragent"
@@ -81,10 +80,6 @@ type Report struct {
 	Go        *GoUsage      `json:"go,omitempty"`
 	FetchedAt time.Time     `json:"fetched_at"`
 	Source    string        `json:"source"`
-
-	// WorkBuddy 是 WorkBuddy provider 的积分余额（provider 未启用或查询失败
-	// 时缺省；失败不拖垮主报告，有旧数据则回落旧数据）。
-	WorkBuddy *workbuddy.Credits `json:"workbuddy,omitempty"`
 }
 
 // GoUsage 是 OpenCode Go / Go Plus 套餐的三窗口限额用量：

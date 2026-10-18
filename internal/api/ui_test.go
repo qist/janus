@@ -15,7 +15,7 @@ import (
 func TestUIPage(t *testing.T) {
 	srv := newRateLimitServer(t, 0, 0, 0) // APIKey=sk-test
 
-	// 页面本身免鉴权：它只是静态 HTML，不含数据；/v1/usage 仍要 key。
+	// 页面本身免鉴权：它只是静态 HTML，不含数据；/api/v1/* 仍要 key。
 	req := httptest.NewRequest(http.MethodGet, "/ui", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -25,10 +25,60 @@ func TestUIPage(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Errorf("Content-Type = %q", ct)
 	}
-	for _, want := range []string{"用量面板", "/v1/usage", "/v1/models", "cache_read_tokens", "缓存命中率", "chartBox", "支持的模型", "catalogBody", "catalogFree", "仅免费", "data-copy", "复制模型名", "copyText"} {
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("入口页不该被缓存，Cache-Control = %q", cc)
+	}
+	// 入口只负责加载外壳：真正的页面在 /assets/ 下的 ESM 里。
+	for _, want := range []string{
+		"Janus 控制台",
+		`type="importmap"`,
+		"/assets/vendor/preact.module.js",
+		"/assets/vendor/hooks.module.js",
+		"/assets/vendor/htm.module.js",
+		"/assets/app.js",
+	} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("页面缺少 %q", want)
 		}
+	}
+}
+
+// 静态资源必须真的能被加载：任一 404 都会让整站白屏。
+func TestUIAssetsServed(t *testing.T) {
+	srv := newRateLimitServer(t, 0, 0, 0)
+
+	for _, path := range []string{
+		"/assets/app.js",
+		"/assets/api.js",
+		"/assets/components.js",
+		"/assets/pages/overview.js",
+		"/assets/pages/settings.js",
+		"/assets/pages/requests.js",
+		"/assets/pages/sessions.js",
+		"/assets/pages/keys.js",
+		"/assets/pages/agents.js",
+		"/assets/vendor/preact.module.js",
+		"/assets/vendor/hooks.module.js",
+		"/assets/vendor/htm.module.js",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s 应 200，got %d", path, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+			t.Errorf("%s Content-Type = %q", path, ct)
+		}
+	}
+
+	// 目录穿越不能读到 dist 之外的东西。
+	req := httptest.NewRequest(http.MethodGet, "/assets/../ui.go", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Errorf("路径穿越应被拒绝，got 200")
 	}
 }
 

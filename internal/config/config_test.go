@@ -1,100 +1,182 @@
 package config
 
 import (
-	"os"
+	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-// ---------- 配置文件解析 ----------
+// ---------- bootstrap（env） ----------
 
-func writeTempCfg(t *testing.T, body string) string {
-	t.Helper()
-	dir := t.TempDir()
-	p := dir + "/janus.env"
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
+func TestLoadReadsBootstrapEnv(t *testing.T) {
+	t.Setenv("JANUS_ADDR", "127.0.0.1:1234")
+	t.Setenv("JANUS_DB", "/tmp/janus.db")
+	t.Setenv("JANUS_DATA_DIR", "/tmp/janus-data")
+	t.Setenv("JANUS_LOG_LEVEL", "debug")
+	t.Setenv("JANUS_BOOTSTRAP_TOKEN", "tok")
+
+	cfg := Load()
+	if cfg.Addr != "127.0.0.1:1234" || cfg.DBPath != "/tmp/janus.db" ||
+		cfg.DataDir != "/tmp/janus-data" || cfg.LogLevel != "debug" ||
+		cfg.BootstrapToken != "tok" {
+		t.Fatalf("bootstrap env 未生效: %+v", cfg)
 	}
-	return p
+	// 运行期字段应有默认值，且不受 env 影响。
+	if cfg.Upstream != "" || !cfg.UpstreamAuto {
+		t.Errorf("upstream 默认应为 auto: %q auto=%v", cfg.Upstream, cfg.UpstreamAuto)
+	}
+	if cfg.RequestTimeout != 600*time.Second {
+		t.Errorf("request_timeout 默认 = %v", cfg.RequestTimeout)
+	}
 }
 
-func TestConfigFileParsesQuotesAndComments(t *testing.T) {
-	p := writeTempCfg(t, `
-# 注释
-BRIDGE_API_KEY="sk-with space"
-BRIDGE_DIRECTORY=/tmp/proj   # 行尾注释
-export BRIDGE_AGENT='plan'
+// 旧 env 不再被读取（不做兼容层）。
+func TestLoadIgnoresLegacyEnv(t *testing.T) {
+	t.Setenv("BRIDGE_ADDR", "1.2.3.4:1")
+	t.Setenv("BRIDGE_API_KEY", "legacy")
+	cfg := Load()
+	if cfg.Addr == "1.2.3.4:1" {
+		t.Error("BRIDGE_ADDR 不应再被读取")
+	}
+	if cfg.APIKey != "" {
+		t.Errorf("BRIDGE_API_KEY 不应再被读取: %q", cfg.APIKey)
+	}
+}
 
-   # 空行与缩进
-BRIDGE_SESSION_TTL=45m
-BRIDGE_TOOL_ANNOTATIONS=false
-BRIDGE_MAX_CONVERSATIONS=7
-`)
-	m, err := loadConfigFile(p)
+// ---------- 运行期设置（DB） ----------
+
+func TestApplySettingsOverridesRuntimeOnly(t *testing.T) {
+	cfg := Load()
+	cfg.Addr = "127.0.0.1:9999"
+	cfg.DBPath = "/tmp/keep.db"
+
+	raw := []byte(`{"directory":"/work","default_model":"p/m","request_timeout":"45s"}`)
+	if err := cfg.ApplySettings(raw, json.Unmarshal); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Directory != "/work" || cfg.DefaultModel != "p/m" {
+		t.Fatalf("运行期设置未覆盖: %+v", cfg)
+	}
+	if cfg.RequestTimeout != 45*time.Second {
+		t.Fatalf("duration 解析失败: %v", cfg.RequestTimeout)
+	}
+	// bootstrap 字段不能被库里的值覆盖。
+	if cfg.Addr != "127.0.0.1:9999" || cfg.DBPath != "/tmp/keep.db" {
+		t.Fatalf("bootstrap 被覆盖: %q %q", cfg.Addr, cfg.DBPath)
+	}
+	// 未出现的项回落默认值。
+	if cfg.SessionTTL != 30*time.Minute {
+		t.Fatalf("缺省项未回落默认: %v", cfg.SessionTTL)
+	}
+}
+
+func TestApplySettingsEmptyKeepsDefaults(t *testing.T) {
+	cfg := Config{Addr: "127.0.0.1:1"}
+	if err := cfg.ApplySettings(nil, json.Unmarshal); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxBodyBytes <= 0 || cfg.RequestTimeout <= 0 || cfg.SessionTTL <= 0 {
+		t.Fatalf("空设置应补齐默认值: %+v", cfg)
+	}
+	if cfg.Addr != "127.0.0.1:1" {
+		t.Fatalf("addr 被改写: %q", cfg.Addr)
+	}
+}
+
+func TestApplySettingsRejectsBadJSON(t *testing.T) {
+	cfg := Load()
+	if err := cfg.ApplySettings([]byte("{"), json.Unmarshal); err == nil {
+		t.Fatal("非法 JSON 应报错")
+	}
+}
+
+// 旧版 BRIDGE_* 里默认开启的开关与默认时长，重构后必须仍然生效。
+func TestLoadSeedsLegacyDefaults(t *testing.T) {
+	cfg := Load()
+	for _, c := range []struct {
+		name string
+		got  bool
+	}{
+		{"autostart_upstream", cfg.AutostartUpstream},
+		{"reuse_external", cfg.ReuseExternal},
+		{"upstream_cleanup", cfg.UpstreamCleanup},
+		{"usage_enabled", cfg.UsageEnabled},
+		{"responses_enabled", cfg.ResponsesEnabled},
+		{"anthropic_enabled", cfg.AnthropicEnabled},
+		{"websearch_enabled", cfg.WebSearchEnabled},
+		{"tool_calling", cfg.ToolCalling},
+		{"tool_companions", cfg.ToolCompanions},
+	} {
+		if !c.got {
+			t.Errorf("%s 默认应为 true", c.name)
+		}
+	}
+	if cfg.StreamIdleTimeout != 120*time.Second {
+		t.Errorf("stream_idle_timeout 默认 = %v", cfg.StreamIdleTimeout)
+	}
+	if cfg.ToolCallWaitFast != 90*time.Second {
+		t.Errorf("tool_call_wait_fast 默认 = %v", cfg.ToolCallWaitFast)
+	}
+}
+
+// 库里的显式 false / 0 不能被 seed 覆盖。
+func TestApplySettingsKeepsExplicitOff(t *testing.T) {
+	cfg := Load()
+	raw := []byte(`{"anthropic_enabled":false,"responses_enabled":false,` +
+		`"tool_calling":false,"stream_idle_timeout":"0s","tool_call_wait_fast":"30s"}`)
+	if err := cfg.ApplySettings(raw, json.Unmarshal); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AnthropicEnabled || cfg.ResponsesEnabled || cfg.ToolCalling {
+		t.Fatalf("显式关闭被重新打开: %+v", cfg)
+	}
+	if cfg.StreamIdleTimeout != 0 {
+		t.Fatalf("stream_idle_timeout 显式 0 被改写: %v", cfg.StreamIdleTimeout)
+	}
+	if cfg.ToolCallWaitFast != 30*time.Second {
+		t.Fatalf("tool_call_wait_fast 显式值被改写: %v", cfg.ToolCallWaitFast)
+	}
+	// 未出现的开关仍应保持默认开启。
+	if !cfg.UsageEnabled || !cfg.WebSearchEnabled || !cfg.ToolCompanions {
+		t.Fatalf("缺省项未回落默认: %+v", cfg)
+	}
+}
+
+// "never" 表示关闭流式空闲超时，不能被当成未设置而回填 120s。
+func TestApplySettingsStreamIdleNever(t *testing.T) {
+	cfg := Load()
+	if err := cfg.ApplySettings([]byte(`{"stream_idle_timeout":"never"}`), json.Unmarshal); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StreamIdleTimeout != 0 {
+		t.Fatalf("never 应折算为 0，got %v", cfg.StreamIdleTimeout)
+	}
+}
+
+// Encode 应只序列化运行期字段（bootstrap 标了 json:"-"）。
+func TestEncodeOmitsBootstrap(t *testing.T) {
+	cfg := Load()
+	cfg.DBKey = "secret-key"
+	raw, err := cfg.Encode(json.Marshal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m["BRIDGE_API_KEY"] != "sk-with space" {
-		t.Errorf("quoted value: %q", m["BRIDGE_API_KEY"])
-	}
-	if m["BRIDGE_DIRECTORY"] != "/tmp/proj" {
-		t.Errorf("inline comment not stripped: %q", m["BRIDGE_DIRECTORY"])
-	}
-	if m["BRIDGE_AGENT"] != "plan" {
-		t.Errorf("export/single quote: %q", m["BRIDGE_AGENT"])
-	}
-	if m["BRIDGE_SESSION_TTL"] != "45m" || m["BRIDGE_TOOL_ANNOTATIONS"] != "false" ||
-		m["BRIDGE_MAX_CONVERSATIONS"] != "7" {
-		t.Errorf("parse: %+v", m)
-	}
-}
-
-func TestConfigFileRejectsBadLine(t *testing.T) {
-	p := writeTempCfg(t, "GOOD=1\nthis line has no equals\n")
-	if _, err := loadConfigFile(p); err == nil {
-		t.Fatal("expected error for malformed line")
-	}
-}
-
-func TestConfigFileMissingIsNotError(t *testing.T) {
-	m, err := loadConfigFile("/nonexistent/janus.env")
-	if err != nil || m != nil {
-		t.Fatalf("m=%v err=%v", m, err)
-	}
-}
-
-// 环境变量必须压过配置文件。
-func TestEnvOverridesConfigFile(t *testing.T) {
-	t.Setenv("BRIDGE_CONFIG", writeTempCfg(t, "BRIDGE_API_KEY=from-file\nBRIDGE_ADDR=127.0.0.1:1111\n"))
-	t.Setenv("BRIDGE_API_KEY", "from-env")
-
-	cfg, err := LoadConfig()
-	if err != nil {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.APIKey != "from-env" {
-		t.Errorf("env should win, got %q", cfg.APIKey)
+	for _, k := range []string{"addr", "db_path", "db_key", "bootstrap_token", "api_key"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("bootstrap 字段 %q 不应入库", k)
+		}
 	}
-	if cfg.Addr != "127.0.0.1:1111" {
-		t.Errorf("file value should apply when env unset, got %q", cfg.Addr)
-	}
-}
-
-func TestConfigFileDurationAndBool(t *testing.T) {
-	t.Setenv("BRIDGE_CONFIG", writeTempCfg(t, "BRIDGE_REQUEST_TIMEOUT=120\nBRIDGE_USAGE_ENABLED=0\n"))
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.RequestTimeout != 120*time.Second {
-		t.Errorf("timeout = %v", cfg.RequestTimeout)
-	}
-	if cfg.UsageEnabled {
-		t.Error("BRIDGE_USAGE_ENABLED=0 应解析为 false")
+	if _, ok := m["request_timeout"]; !ok {
+		t.Error("运行期字段应被序列化")
 	}
 }
 
-// ---------- 取值归一化 ----------
+// ---------- 归一化 ----------
 
 func TestNormalizePermissionReply(t *testing.T) {
 	cases := map[string]string{
@@ -106,14 +188,14 @@ func TestNormalizePermissionReply(t *testing.T) {
 		"bogus":   "once",
 	}
 	for in, want := range cases {
-		if got := normalizePermissionReply(in); got != want {
-			t.Errorf("normalizePermissionReply(%q) = %q, want %q", in, got, want)
+		if got := NormalizePermissionReply(in); got != want {
+			t.Errorf("NormalizePermissionReply(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
 
 func TestParseToolSet(t *testing.T) {
-	got := parseToolSet("Grep, Read ,grep,,RunCommand")
+	got := ParseToolSet("Grep, Read ,grep,,RunCommand")
 	if !got["grep"] || !got["read"] || !got["runcommand"] {
 		t.Fatalf("解析结果缺项: %+v", got)
 	}
@@ -121,25 +203,9 @@ func TestParseToolSet(t *testing.T) {
 		t.Fatalf("去重/去空失败: %+v", got)
 	}
 	for _, off := range []string{"", "none", "off", "-"} {
-		if s := parseToolSet(off); len(s) != 0 {
-			t.Fatalf("parseToolSet(%q) 应为空: %+v", off, s)
+		if s := ParseToolSet(off); len(s) != 0 {
+			t.Fatalf("ParseToolSet(%q) 应为空: %+v", off, s)
 		}
-	}
-}
-
-func TestParseModelMap(t *testing.T) {
-	m := parseModelMap(" claude-3-5-sonnet = opencode-go/gpt-6-luna , claude-3-5-haiku=opencode-go/glm-5.3-flash ,bad,=")
-	if m["claude-3-5-sonnet"] != "opencode-go/gpt-6-luna" {
-		t.Fatalf("sonnet 映射: %+v", m)
-	}
-	if m["claude-3-5-haiku"] != "opencode-go/glm-5.3-flash" {
-		t.Fatalf("haiku 映射: %+v", m)
-	}
-	if len(m) != 2 {
-		t.Fatalf("只应有 2 条: %+v", m)
-	}
-	if parseModelMap("") == nil || len(parseModelMap("")) != 0 {
-		t.Fatal("空串应返回空 map")
 	}
 }
 
@@ -149,28 +215,31 @@ func TestNormalizeModelEcho(t *testing.T) {
 	}
 }
 
-// durTTL 支持 never/off/none/0 = Never，普通值照常解析。
-func TestDurTTL(t *testing.T) {
-	l := &cfgLoader{file: map[string]string{
-		"T_NEVER": "never",
-		"T_OFF":   "off",
-		"T_NONE":  "none",
-		"T_ZERO":  "0",
-		"T_DUR":   "30m",
-		"T_SEC":   "120",
-	}}
-	for _, k := range []string{"T_NEVER", "T_OFF", "T_NONE", "T_ZERO"} {
-		if got := l.durTTL(k, time.Hour); got != Never {
-			t.Fatalf("durTTL(%s) = %v, want Never", k, got)
+func TestParseDuration(t *testing.T) {
+	cases := []struct {
+		in   string
+		def  time.Duration
+		want time.Duration
+	}{
+		{"", time.Hour, time.Hour},
+		{"30m", time.Hour, 30 * time.Minute},
+		{"120", time.Hour, 120 * time.Second},
+		{"bogus", time.Hour, time.Hour},
+		{" 45s ", time.Hour, 45 * time.Second},
+	}
+	for _, c := range cases {
+		if got := ParseDuration(c.in, c.def); got != c.want {
+			t.Errorf("ParseDuration(%q) = %v, want %v", c.in, got, c.want)
 		}
 	}
-	if got := l.durTTL("T_DUR", time.Hour); got != 30*time.Minute {
-		t.Fatalf("durTTL(T_DUR) = %v, want 30m", got)
+}
+
+func TestKeyFilePath(t *testing.T) {
+	cfg := Config{DataDir: "/data"}
+	if got, want := cfg.KeyFilePath(), filepath.Join("/data", "bootstrap.key"); got != want {
+		t.Fatalf("KeyFilePath = %q, want %q", got, want)
 	}
-	if got := l.durTTL("T_SEC", time.Hour); got != 120*time.Second {
-		t.Fatalf("durTTL(T_SEC) = %v, want 120s", got)
-	}
-	if got := l.durTTL("T_UNSET", time.Hour); got != time.Hour {
-		t.Fatalf("未设置应返回默认, got %v", got)
+	if got := (Config{}).KeyFilePath(); got != "" {
+		t.Fatalf("无 data dir 应返回空: %q", got)
 	}
 }

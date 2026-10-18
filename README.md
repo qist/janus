@@ -1053,7 +1053,7 @@ janus/
 │   │   └── shared/       错误信封、消息/工具类型、ID 生成
 │   ├── ratelimit/        令牌桶限流
 │   ├── tokenbudget/      token 预算
-│   ├── ui/               用量面板页面（go:embed ui.html）
+│   ├── ui/               控制台前端（go:embed dist，Preact + htm 零构建）
 │   ├── upstream/         上游客户端 + 事件总线
 │   ├── usage/            OpenCode console 用量/余额客户端
 │   ├── useragent/        User-Agent 归一
@@ -1072,7 +1072,7 @@ janus/
 ```
 
 > 仓库根只保留 `main.go` 一个 Go 文件作为进程入口，全部实现位于 `internal/`
-> 下按职责拆分的包里；`go:embed` 不能引用上级目录，因此内嵌资源（`internal/ui/ui.html`、
+> 下按职责拆分的包里；`go:embed` 不能引用上级目录，因此内嵌资源（`internal/ui/dist/`、
 > `internal/mcpbridge/mcpbridge.js`）与使用它们的包放在同一目录。
 
 ## 许可证

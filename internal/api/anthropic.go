@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"janus/internal/attach"
+	"janus/internal/gateway"
 	"janus/internal/httpx"
 	"janus/internal/modelx"
 	"janus/internal/prompt"
@@ -397,13 +398,14 @@ func (s *Server) anthropicErrorFromUpstream(err error) (int, string, string) {
 // ---------- handler ----------
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkAuth(r); err != nil {
+	p, err := s.principal(r)
+	if err != nil {
 		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
 		return
 	}
 	if !s.cfg.AnthropicEnabled {
 		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error",
-			"Anthropic Messages API disabled (BRIDGE_ANTHROPIC_ENABLED=false)")
+			"Anthropic Messages API disabled (anthropic_enabled=false)")
 		return
 	}
 	body, err := readBody(r, s.cfg.MaxBodyBytes)
@@ -411,6 +413,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+
+	// 模型面直连：agent key / agent=direct 时不走会话桥，原样透传给厂商。
+	if s.directMode(r, p) {
+		if s.proxyModel(w, r, p, gateway.ProtocolAnthropic, body, anthropicFail(w)) {
+			return
+		}
+	}
+
 	var req AnthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body: "+err.Error())
@@ -781,8 +791,14 @@ func (s *Server) webSearchServerTool(dir string) serverToolFunc {
 // handleAnthropicModels 返回 Anthropic 格式的模型列表（Claude Code 的模型选择器用），
 // id 用 claude 别名，display_name 里带上"实际会映射到哪个模型"，方便用户确认。
 func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkAuth(r); err != nil {
+	p, err := s.principal(r)
+	if err != nil {
 		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
+		return
+	}
+	// 直连模式：目录在 DB 里，不依赖 OpenCode 上游。
+	if s.directMode(r, p) {
+		s.listCatalogAnthropicModels(w, p)
 		return
 	}
 	list, _ := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
@@ -801,12 +817,19 @@ func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item{alias, display})
 	}
-	// 显式映射里的 claude/anthropic 别名
-	for k, v := range s.cfg.ModelMap {
-		lk := strings.ToLower(k)
-		if strings.HasPrefix(lk, "claude") || strings.HasPrefix(lk, "anthropic") {
-			ref, err := modelx.Resolve(v, list)
-			add(strings.TrimSuffix(k, "*"), ref, err == nil)
+	// 路由表里的 claude/anthropic 别名（替代旧 BRIDGE_MODEL_MAP）。
+	if st := s.router.Store(); st != nil {
+		for _, rt := range st.ListRoutes("") {
+			if !rt.Enabled {
+				continue
+			}
+			alias := strings.TrimSuffix(rt.Alias, "*")
+			lk := strings.ToLower(alias)
+			if !strings.HasPrefix(lk, "claude") && !strings.HasPrefix(lk, "anthropic") {
+				continue
+			}
+			ref, err := modelx.Resolve(s.mapModelName(alias), list)
+			add(alias, ref, err == nil)
 		}
 	}
 	// 内置档位别名（不管有没有显式映射都列，display 显示实际映射到谁）

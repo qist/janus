@@ -1,22 +1,24 @@
-// janus —— OpenCode ↔ OpenAI/Anthropic/Responses 兼容桥。
+// janus —— 厂商无关的模型网关 + 可插拔 Agent 控制面。
 //
-// 本文件是仓库根的可执行入口（package main）。它只负责命令行解析、
-// 配置加载与上游探活引导，真正的 HTTP 接口实现全部在 internal/api。
+// 本文件是仓库根的可执行入口（package main）。它只负责：
+//  1. bootstrap（env：监听地址 / 数据库 / 主密钥 / 数据目录 / 日志级别）；
+//  2. 打开数据库、加载运行期设置、生成首启 admin key；
+//  3. 启动 HTTP 服务。
+//
+// 其余配置全部在数据库里，经 /api/v1/* 或 Web 面板修改。
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"janus/internal/api"
 	"janus/internal/channel/opencode"
-	"janus/internal/channel/workbuddy"
 	"janus/internal/cli"
 	"janus/internal/config"
 	"janus/internal/db"
@@ -32,53 +34,71 @@ func main() {
 			fmt.Println(version.String())
 			return
 		case "models":
-			// 列出上游可用模型，帮用户挑 BRIDGE_DEFAULT_MODEL
+			// 列出上游可用模型（走 OpenCode 目录），帮用户挑默认模型
 			cli.RunModels(os.Args[2:])
 			return
-		case "workbuddy-decrypt":
-			// 在装有 WorkBuddy 桌面版的机器上把 5.6 加密凭据解成明文
-			workbuddy.RunDecrypt(os.Args[2:])
-			return
 		}
 	}
 
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		// 配置写错就立刻退出，别带着半截配置跑
-		os.Stderr.WriteString("config error: " + err.Error() + "\n")
-		os.Exit(2)
-	}
+	cfg := config.Load()
 	log := logx.NewLogger(cfg.LogLevel)
 	log.Infof("%s", version.String())
-	if cfg.ConfigFile != "" {
-		log.Infof("config file loaded: %s", cfg.ConfigFile)
-	}
 
-	// WorkBuddy provider：必须在 EnsureUpstream 之前初始化——OpenCode 拉起时
-	// 生成的内联配置要包含 workbuddy provider（模型目录此刻就得就绪）。
-	// 上下文档位（workbuddy_context）持久化在 DB 里，也必须赶在内联配置
-	// 注入前读到，否则重启后回到 env 默认值。
-	if !db.MemoryDSN(cfg.DBPath) {
-		if d, err := db.Open(cfg.DBPath); err == nil {
-			d.SetAccountKey(cfg.DBKey)
-			if v, ok := d.GetSetting("workbuddy_context"); ok && (v == "max" || v == "default") {
-				cfg.WorkBuddyContext = v
-			}
-			if v, ok := d.GetSetting("opencode_context"); ok {
-				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
-					cfg.OpenCodeContext = n
-				}
-			}
-			d.Close()
+	// ---- bootstrap：打开数据库 ----
+	var store *db.Store
+	if db.MemoryDSN(cfg.DBPath) {
+		log.Warnf("JANUS_DB is empty/memory — persistence disabled, admin key will not survive restart")
+	} else {
+		// 主密钥：env > <data_dir>/master.key（首启生成 0600）
+		source, err := db.ConfigureKey(cfg.DBKey, cfg.KeyFilePath())
+		if err != nil {
+			log.Errorf("cannot configure credential key: %v", err)
+			os.Exit(2)
 		}
-	}
-	workbuddy.Init(&cfg, log)
+		log.Infof("credential key: %s", source)
 
-	// 本次进程拉起的 upstream PID（退出时回收，见 Server.Run）。
+		opened, err := db.Open(cfg.DBPath)
+		if err != nil {
+			log.Errorf("cannot open database %s: %v", cfg.DBPath, err)
+			os.Exit(2)
+		}
+		store = opened
+		defer store.Close()
+
+		// 运行期设置（settings.runtime）覆盖 bootstrap 默认值。
+		if raw, ok := store.GetSettingRaw(db.SettingRuntime); ok {
+			if err := cfg.ApplySettings(raw, json.Unmarshal); err != nil {
+				log.Warnf("runtime settings ignored: %v", err)
+			}
+		}
+
+		// 首启引导：admin 账号 + admin key（只打印一次，并写 bootstrap.key）。
+		boot, err := store.EnsureBootstrap(cfg.BootstrapToken)
+		if err != nil {
+			log.Errorf("bootstrap failed: %v", err)
+			os.Exit(2)
+		}
+		if boot.Created {
+			if err := db.WriteBootstrapFile(cfg.KeyFilePath(), boot); err != nil {
+				log.Warnf("cannot write bootstrap.key: %v", err)
+			}
+			if boot.Username != "" {
+				log.Infof("[init] admin user: %s", boot.Username)
+				log.Infof("[init] admin password: %s", boot.Password)
+			}
+			if boot.APIKey != "" {
+				log.Infof("[init] admin key: %s", boot.APIKey)
+			}
+			log.Infof("[init] credentials written to %s", cfg.KeyFilePath())
+		}
+		log.Infof("persistence enabled: %s", cfg.DBPath)
+	}
+
+	// ---- 上游（OpenCode agent runtime）----
+	// P2 之前 OpenCode 仍是唯一实现的 AgentRuntime，端点仍在 settings 里。
 	var spawnedPID int
 	if cfg.UpstreamAuto {
-		// 自动发现 + 必要时自己拉起：OpenCode 桌面端端口/密码每次都变，
-		// 没有在跑的（比如桌面端没开）就以随机端口拉一个，读 /proc 找到活的那个。
+		// 自动发现 + 必要时自己拉起：OpenCode 桌面端端口/密码每次都变。
 		dctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		ep, derr := opencode.Ensure(dctx, log, &cfg, cfg.AutostartUpstream, api.MCPNamePrefix)
 		cancel()
@@ -92,11 +112,8 @@ func main() {
 			log.Infof("auto-discovered OpenCode at %s (pid %d)", ep.Base, ep.PID)
 		}
 	} else if cfg.Password == "" {
-		log.Errorf("OPENCODE_PASSWORD / OPENCODE_SERVER_PASSWORD is not set, and OPENCODE_URL is fixed")
+		log.Errorf("upstream password is not set, and upstream is fixed: configure it in /api/v1/settings")
 		os.Exit(1)
-	}
-	if cfg.APIKey == "" {
-		log.Warnf("BRIDGE_API_KEY is empty — anyone who can reach %s can spend your quota", cfg.Addr)
 	}
 
 	srv := api.NewServer(cfg, log)

@@ -1,10 +1,20 @@
-// Package config 负责 janus 的配置加载（环境变量 > 配置文件 > 内置默认值）。
+// Package config 负责 janus 的启动引导配置与运行期设置。
+//
+// 设计（见 docs/REFACTOR.md）：
+//   - **只有 bootstrap 走环境变量**：监听地址、数据库路径、主密钥、数据目录、
+//     日志级别、首启 admin token。这些是"打开数据库之前"就必须知道的项，
+//     写进数据库会形成循环依赖。
+//   - **其余全部落库**：providers / credentials / models / routes / keys /
+//     agents / settings 都是数据，经 /api/v1 管理，UI 可改。
+//   - 旧 env（BRIDGE_* / OPENCODE_* / WORKBUDDY_*）不再读取，也不做兼容层。
 package config
 
 import (
-	"bufio"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -13,486 +23,339 @@ import (
 	"janus/internal/useragent"
 )
 
-// Config 全部来自「环境变量 > 配置文件 > 内置默认值」。
+// BootstrapKeys 是唯一允许走环境变量的配置项。
+var BootstrapKeys = []string{
+	"JANUS_ADDR",
+	"JANUS_DB",
+	"JANUS_DB_KEY",
+	"JANUS_DATA_DIR",
+	"JANUS_LOG_LEVEL",
+	"JANUS_BOOTSTRAP_TOKEN",
+}
+
+// Config 同时承载 bootstrap 与运行期设置。
 //
-// 配置文件是简单的 KEY=VALUE 文本（见 janus.env.example）：
-//   - 以 # 开头的行为注释
-//   - 值两端的引号会被去掉
-//   - 不展开 ${VAR}
-//   - 已存在的真实环境变量优先，便于临时覆盖
+// 标注 json:"-" 的字段是 bootstrap（env 提供，不入库）；其余字段会被整体
+// 序列化成 settings 表里的 runtime 行，因此可以在 Web 面板里修改。
 type Config struct {
-	Addr     string // bridge 监听地址
-	Upstream string // OpenCode server 地址
+	// ---------- bootstrap（env） ----------
+	Addr           string `json:"-"` // JANUS_ADDR
+	DBPath         string `json:"-"` // JANUS_DB
+	DBKey          string `json:"-"` // JANUS_DB_KEY
+	DataDir        string `json:"-"` // JANUS_DATA_DIR
+	BootstrapToken string `json:"-"` // JANUS_BOOTSTRAP_TOKEN，可选
+	ConfigFile     string `json:"-"` // 保留字段：新版本不再读配置文件
 
-	// UpstreamAuto 为 true 时启动时/断连时自动发现 OpenCode 端点，
-	// 覆盖 Upstream/Username/Password。OpenCode 桌面端每次重启都会换
-	// 随机端口和随机密码，靠它才能免配置续上。
-	UpstreamAuto bool
+	// APIKey 是进程内静态 key（只用于测试与应急），不读 env、不入库。
+	// 生产鉴权全部走 api_keys 表。
+	APIKey string `json:"-"`
 
-	// AutostartUpstream：自动发现找不到运行中的 OpenCode 时，由本桥以随机端口
-	// 把 `opencode serve` 拉起来（OPENCODE_AUTOSTART，默认 true）。
-	// OpencodeBin 可选，显式指定 opencode 可执行文件（OPENCODE_BIN）。
-	AutostartUpstream bool
-	OpencodeBin       string
+	// ---------- 运行期（DB） ----------
+	Upstream     string `json:"upstream"`      // OpenCode server 地址（agent 记录未就绪时的兜底）
+	UpstreamAuto bool   `json:"upstream_auto"` // 自动发现 OpenCode 端点
 
-	// OpencodeClient 是 janus 拉起的 OpenCode 对外声明的客户端身份
-	// （OPENCODE_CLIENT，显式转发给子进程）。OpenCode 用它填上游请求头
-	// x-opencode-client 与 User-Agent 尾段（opencode/latest/<ver>/<client>）。
-	// 空 = 不设置，交给 OpenCode 自己的默认（cli）。
-	OpencodeClient string
+	AutostartUpstream bool   `json:"autostart_upstream"`
+	OpencodeBin       string `json:"opencode_bin"`
+	OpencodeClient    string `json:"opencode_client"`
+	ReuseExternal     bool   `json:"reuse_external"`
+	UpstreamCleanup   bool   `json:"upstream_cleanup"`
 
-	// ReuseExternal：是否复用已在跑的外部 OpenCode（OPENCODE_REUSE_EXTERNAL，默认 true）。
-	// 设为 false 时 janus 总是自己拉起一个，从而能通过 OPENCODE_CONFIG_CONTENT
-	// 注入自己生成的 agent 配置（复用外部实例时注入不生效）。
-	ReuseExternal bool
+	Username string `json:"username"`
+	Password string `json:"password"`
 
-	// UpstreamCleanup：janus 退出（SIGTERM/SIGINT）时是否收掉「自己拉起的」OpenCode，
-	// 并在下次启动拉起前清扫上一轮 kill -9/崩溃留下的孤儿（BRIDGE_UPSTREAM_CLEANUP，
-	// 默认 true）。无 systemd/容器 cgroup 兜底的裸进程部署（nohup 等）下，
-	// 靠它避免 opencode 进程越积越多。外部实例（桌面端等）不受影响。
-	UpstreamCleanup bool
+	Directory    string `json:"directory"`
+	Agent        string `json:"agent"`
+	DefaultModel string `json:"default_model"`
 
-	Username string // Basic 用户名，OpenCode 固定为 "opencode"
-	Password string // 即 OPENCODE_SERVER_PASSWORD
+	// Project / ProjectMap / ScopeKey / WorkspacesDir 决定会话分桶与工作目录。
+	Project       string            `json:"project"`
+	ProjectMap    map[string]string `json:"project_map"`
+	ScopeKey      bool              `json:"scope_key"`
+	WorkspacesDir string            `json:"workspaces_dir"`
 
-	APIKey string // 对客户端的鉴权；空 = 接受任意 Bearer（会打 WARN）
+	MCPTransport   string `json:"mcp_transport"`
+	WedgeForensics bool   `json:"wedge_forensics"`
 
-	Directory    string // 会话默认工作目录
-	Agent        string // 默认 agent
-	DefaultModel string // default/auto/空别名实际使用的模型；空=跟随上游默认
+	// WorkBuddy 渠道（凭据在 credentials 表，这里只留展示/预算档位）。
+	WorkBuddyContext string `json:"workbuddy_context"`
+	OpenCodeContext  int    `json:"opencode_context"`
 
-	// ModelMap 模型别名映射（如 Claude Code 发的 claude-* → 真实后端模型）。
-	// 形如 "claude-3-5-sonnet=opencode-go/gpt-6-luna,claude-3-5-haiku=opencode-go/glm-5.3-flash"。
-	ModelMap map[string]string
+	SessionTTL        time.Duration `json:"session_ttl"`
+	SharedSessionTTL  time.Duration `json:"shared_session_ttl"`
+	RequestTimeout    time.Duration `json:"request_timeout"`
+	ReconcileInterval time.Duration `json:"reconcile_interval"`
+	IdlePollInterval  time.Duration `json:"idle_poll_interval"`
+	PromptGracePeriod time.Duration `json:"prompt_grace_period"`
+	StreamHeartbeat   time.Duration `json:"stream_heartbeat"`
+	StreamIdleTimeout time.Duration `json:"stream_idle_timeout"`
 
-	// Project 显式项目身份（BRIDGE_PROJECT）；空=自动归一（见 scope.go）。
-	Project string
-	// ProjectMap 客户端目录 → 项目名（BRIDGE_PROJECT_MAP），
-	// 如 "/opt/tvfusion=tvfusion,D:\\project\\tvfusion=tvfusion"。用于跨设备路径归一。
-	ProjectMap map[string]string
-	// ScopeKey=true 时按 scope(=hash(IDE+项目)) 定位会话（没有会话 id 时的兜底），
-	// 而不是按 (system+user+dir)。默认 false。
-	ScopeKey bool
-	// WorkspacesDir 是远程场景下 per-scope 的中性工作目录根（BRIDGE_WORKSPACES_DIR）。
-	// 客户端项目路径在 janus 主机上不存在时，用它当会话目录，避免误认成别的项目。
-	WorkspacesDir string
+	CORSOrigin string `json:"cors_origin"`
+	LogLevel   string `json:"log_level"`
 
-	// MCPTransport 决定工具桥注册到 OpenCode 的传输形态（BRIDGE_MCP_TRANSPORT）：
-	//   local（默认）：注册为 local(stdio) MCP server——opencode 拉起内嵌桥脚本，
-	//     stdio ↔ janus HTTP。绕开 Bun fetch 对 remote 请求的 ~360s 总时长硬顶
-	//     （长工具调用必死，实测复现）。
-	//   remote：旧行为，直连 janus 的 /mcp/<token> HTTP 端点（受上述硬顶制约）。
-	MCPTransport string
+	ToolAnnotations  bool  `json:"tool_annotations"`
+	MaxConversations int   `json:"max_conversations"`
+	MaxBodyBytes     int64 `json:"max_body_bytes"`
 
-	// WedgeForensics 开启楔死取证（BRIDGE_WEDGE_FORENSICS）：每轮以 tool_calls
-	// 收尾的响应原始字节落盘（数据目录 forensics/ 下，每会话保留 20 份），
-	// 客户端楔死（工具结果超时）时按 callID 找回落盘文件做逐字节对比。
-	WedgeForensics bool
+	UsageEnabled bool          `json:"usage_enabled"`
+	UsageTTL     time.Duration `json:"usage_ttl"`
+	OpencodeDB   string        `json:"opencode_db"`
+	ConsoleURL   string        `json:"console_url"`
+	GoUsageURL   string        `json:"go_usage_url"`
 
-	// WorkBuddy provider（把 WorkBuddy 桌面 App 的模型接入本桥，见
-	// internal/channel/workbuddy）。
-	// WorkBuddyEnabled 开启后，janus 挂载 /workbuddy/{token}/v1 端点，并把
-	// WorkBuddy 注册为 OpenCode 的 provider（模型形如 workbuddy/<id>）。
-	WorkBuddyEnabled    bool   // BRIDGE_WORKBUDDY_ENABLED，默认 false
-	WorkBuddyAuthFile   string // WORKBUDDY_AUTH_FILE：明文凭据文件路径（必填）
-	WorkBuddyAppVersion string // WORKBUDDY_APP_VERSION：桌面版版本号（UA 用），空=兜底 5.5.6
-	// WorkBuddyContext：注入 OpenCode 的上下文预算档位（WORKBUDDY_CONTEXT）。
-	// max（默认）= 用上游声明档位的最大值（如 1M，替代过小的默认预算 300k）；
-	// default = 用上游默认预算。上游不收 context 字段，这只放宽客户端预算。
-	WorkBuddyContext string
-	// OpenCodeContext：OpenCode 渠道（opencode/opencode-go）模型的上下文预算
-	// 覆盖（OPENCODE_CONTEXT，tokens；0 = 跟随目录值）。只影响 /v1/models
-	// 的展示预算，运行时可改并持久化。
-	OpenCodeContext int
+	RateLimitPerMin    int  `json:"rate_limit_per_min"`
+	RateLimitBurst     int  `json:"rate_limit_burst"`
+	RateLimitGlobalRPM int  `json:"rate_limit_global_rpm"`
+	TrustProxy         bool `json:"trust_proxy"`
+	MetricsPublic      bool `json:"metrics_public"`
 
-	SessionTTL        time.Duration // 会话空闲回收
-	SharedSessionTTL  time.Duration // 共享（scope）会话空闲回收；<0 = 永不回收
-	RequestTimeout    time.Duration // 单次补全超时
-	ReconcileInterval time.Duration // 事件流对账间隔
-	IdlePollInterval  time.Duration // 空闲轮询间隔（终端信号兜底）
-	PromptGracePeriod time.Duration // prompt 后多久才开始信任 idle 信号
-	StreamHeartbeat   time.Duration // SSE 心跳间隔
-	StreamIdleTimeout time.Duration // 流式：多久没有真实数据就判卡死（心跳不算）；0=不启用
+	ResponsesEnabled bool          `json:"responses_enabled"`
+	ResponseTTL      time.Duration `json:"response_ttl"`
+	AnthropicEnabled bool          `json:"anthropic_enabled"`
+	WebSearchEnabled bool          `json:"websearch_enabled"`
+	ModelEcho        string        `json:"model_echo"`
 
-	CORSOrigin string
-	LogLevel   string
+	ToolCalling      bool            `json:"tool_calling"`
+	ToolSoftFail     bool            `json:"tool_soft_fail"`
+	ToolReregister   time.Duration   `json:"tool_reregister"`
+	ToolCallWait     time.Duration   `json:"tool_call_wait"`
+	ToolCallWaitFast time.Duration   `json:"tool_call_wait_fast"`
+	ToolFastTools    map[string]bool `json:"tool_fast_tools"`
+	ToolCompanions   bool            `json:"tool_companions"`
+	ToolOrphanWait   time.Duration   `json:"tool_orphan_wait"`
+	MCPPublicURL     string          `json:"mcp_public_url"`
 
-	ToolAnnotations  bool // 是否把 agent 工具活动以注释形式写进 content
-	MaxConversations int  // 内存里最多保留多少个会话
-	MaxBodyBytes     int64
+	PermissionReply string `json:"permission_reply"`
+	MCPAllow        string `json:"mcp_allow"`
+	UserAgent       string `json:"user_agent"`
 
-	// 用量/余额查询（走 OpenCode console API，需要读本地凭据库）
-	UsageEnabled bool
-	UsageTTL     time.Duration
-	OpencodeDB   string // OpenCode 的 SQLite 凭据库路径
-	ConsoleURL   string // OpenCode console API 基址
-	GoUsageURL   string // OpenCode Go 套餐用量端点（inference 主机，与 console 不同域）
-
-	// 限流
-	RateLimitPerMin    int  // 每 key/IP 每分钟请求数；0=不限
-	RateLimitBurst     int  // 突发容量；0=同 RateLimitPerMin
-	RateLimitGlobalRPM int  // 全局每分钟上限；0=不限
-	TrustProxy         bool // 是否信任 X-Forwarded-For（影响限流分桶）
-
-	// 指标
-	MetricsPublic bool // /metrics 是否免鉴权（默认需要 API key）
-
-	// Responses API
-	ResponsesEnabled bool
-	ResponseTTL      time.Duration
-
-	// Anthropic Messages API（/v1/messages，供 Claude Code / Anthropic SDK）
-	AnthropicEnabled bool
-	// WebSearchEnabled 是否支持 Claude Code 的 web_search 服务端工具
-	// （由桥内部调用 OpenCode 的 /api/websearch 执行）。
-	WebSearchEnabled bool
-
-	// ModelEcho 决定响应里 model 字段回显什么：
-	//   real    （默认）解析后的真实模型，如 opencode-go/mimo-v2.5-pro
-	//   request 客户端请求里的原始模型名，如 claude-sonnet-4-5
-	ModelEcho string
-
-	// 工具调用（把客户端 tools 经内置 MCP server 暴露给 OpenCode agent）
-	ToolCalling    bool          // 是否启用
-	ToolSoftFail   bool          // true=注册失败时降级为无工具继续；false=直接报错
-	ToolReregister time.Duration // 注册多久后主动续注册（上游重启会丢注册）
-	ToolCallWait   time.Duration // 挂起等客户端回填结果的最长时间（执行类工具）
-	// ToolCallWaitFast 是只读/编辑类工具的短等待：这类工具正常秒回，卡住基本是客户端卡死，
-	// 快速判失败能让模型继续，而不是干等到 ToolCallWait 撞上 IDE 自身超时。
-	// <=0 或 >= ToolCallWait 时不启用（全部走 ToolCallWait）。
-	ToolCallWaitFast time.Duration
-	// ToolFastTools 是走短等待的工具名集合（小写，来自 BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS）。
-	// 只列已知的只读/编辑类；未知工具默认走长等待，避免误杀长任务。
-	ToolFastTools map[string]bool
-	// ToolCompanions 是否给「异步命令」类工具（RunCommand…）补配套的状态查询工具
-	//（CheckCommandStatus/check_command_status）。这些工具客户端本地有、但通常不会
-	// 写进 tools[] 声明；不补的话 agent 发起长命令后没法查询结果、会卡住。
-	ToolCompanions bool
-	// ToolOrphanWait 是「目标会话没有在飞请求」时的宽限：等这么久还没人接手，
-	// 就判定为孤儿 agent（客户端已离开、agent 还在调工具）→ 拒绝并中断其上游会话。
-	ToolOrphanWait time.Duration
-	MCPPublicURL   string // 注册给 OpenCode 的 MCP 基址；空=自动用本机回环
-
-	// PermissionReply 自动应答 OpenCode 的权限请求（agent 访问会话目录之外时
-	// OpenCode 会先 ask；headless 桥无人应答就会一直挂住，直到客户端超时）。
-	// once=仅本次放行，always=放行并记住，reject=拒绝，off=不自动应答。
-	PermissionReply string
-
-	// MCPAllow 可选：限制内置 MCP 端点 /mcp/{token} 的来源（逗号分隔的 IP/CIDR）。
-	// 留空 = 不限制（OpenCode 与本桥同机时是回环，默认即可）。
-	MCPAllow string
-
-	// UserAgent 覆盖所有出站请求的 User-Agent（BRIDGE_USER_AGENT）。
-	// 留空 = 用内置默认 `janus/<version> (...)`。Go 默认的 `Go-http-client/1.1`
-	// 容易被网关/风控当脚本拦掉，故默认换成 janus 标识。
-	UserAgent string
-
-	// DBPath 持久化库路径（SQLite，github.com/qist/sqlite）。
-	// 空 / memory / off = 纯内存。默认见 paths.DefaultDBPath()。
-	DBPath string
-	// DBKey 凭据加密密钥（BRIDGE_DB_KEY）。空 = 派生自 BRIDGE_API_KEY。
-	DBKey string
-
-	// HistoryMaxBytes 落库的 Chat 历史快照上限；超过则只存会话映射（不存历史）。
-	HistoryMaxBytes int
-
-	// ConvTTL 持久化的"会话键 → sessionID/历史"保留时长（janitor 清理）。<0 = 永不清理。
-	ConvTTL time.Duration
-
-	ConfigFile string // 实际加载的配置文件路径（空 = 没加载）
+	HistoryMaxBytes int           `json:"history_max_bytes"`
+	ConvTTL         time.Duration `json:"conv_ttl"`
 }
 
-// ---------- 配置来源 ----------
+// ---------- bootstrap 加载 ----------
 
-type cfgLoader struct {
-	file map[string]string
-}
-
-func (l *cfgLoader) get(key string) (string, bool) {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		return v, true
+// Load 只读取 bootstrap 环境变量；运行期设置由 ApplySettings 从数据库填充。
+func Load() Config {
+	cfg := Config{
+		Addr:           env("JANUS_ADDR", "0.0.0.0:2810"),
+		DBPath:         env("JANUS_DB", paths.DefaultDBPath()),
+		DBKey:          env("JANUS_DB_KEY", ""),
+		DataDir:        env("JANUS_DATA_DIR", paths.DataDir()),
+		LogLevel:       env("JANUS_LOG_LEVEL", "info"),
+		BootstrapToken: strings.TrimSpace(os.Getenv("JANUS_BOOTSTRAP_TOKEN")),
 	}
-	if l.file != nil {
-		if v, ok := l.file[key]; ok && v != "" {
-			return v, true
+	cfg.applySeed()
+	cfg.applyDefaults()
+	return cfg
+}
+
+// ApplySettings 把 settings 表里的 runtime 行覆盖到 cfg 上。
+// decode 由调用方注入（config 包不依赖 db，避免循环导入）。
+func (c *Config) ApplySettings(raw []byte, decode func([]byte, any) error) error {
+	if len(raw) == 0 {
+		c.applySeed()
+		c.applyDefaults()
+		return nil
+	}
+	// 先铺默认值，再用库里的值覆盖：新增设置项对老库自动生效。
+	// 铺的是 seed（含"默认开启"的开关），库里的显式 false/0 才能正确生效。
+	base := *c
+	base.applySeed()
+	base.applyDefaults()
+	*c = base
+	if err := decode(raw, c); err != nil {
+		return err
+	}
+	c.applyDefaults()
+	return nil
+}
+
+// Encode 把运行期设置序列化成 settings 表的值。
+func (c Config) Encode(encode func(any) ([]byte, error)) ([]byte, error) {
+	return encode(c)
+}
+
+// Never 表示"永不回收/清理"（会话 / 流空闲等 TTL 用）。
+const Never = time.Duration(-1)
+
+// MarshalJSON 把 time.Duration 字段写成 "45s" 形式，面板可直接编辑；
+// 其余字段沿用标准编码。bootstrap 字段带 json:"-"，不会出现。
+func (c Config) MarshalJSON() ([]byte, error) {
+	t := reflect.TypeOf(c)
+	v := reflect.ValueOf(c)
+	out := make(map[string]any, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		key := jsonKey(f)
+		if key == "" {
+			continue
+		}
+		if f.Type == reflect.TypeOf(time.Duration(0)) {
+			out[key] = time.Duration(v.Field(i).Int()).String()
+			continue
+		}
+		out[key] = v.Field(i).Interface()
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON 兼容两种时长写法：字符串（"45s"）与数字（纳秒）。
+// 只覆盖出现在 JSON 里的字段，bootstrap 与缺省项保持调用方已填的值。
+func (c *Config) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	t := reflect.TypeOf(*c)
+	v := reflect.ValueOf(c).Elem()
+	fields := make(map[string]int, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		if key := jsonKey(t.Field(i)); key != "" {
+			fields[key] = i
 		}
 	}
-	return "", false
+	for key, val := range raw {
+		i, ok := fields[key]
+		if !ok {
+			continue // 未知键（旧版本残留）直接忽略
+		}
+		fv := v.Field(i)
+		if fv.Type() == reflect.TypeOf(time.Duration(0)) {
+			d, err := parseDurationJSON(val)
+			if err != nil {
+				return fmt.Errorf("%s: %w", key, err)
+			}
+			fv.SetInt(int64(d))
+			continue
+		}
+		if err := json.Unmarshal(val, fv.Addr().Interface()); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+	}
+	return nil
 }
 
-func (l *cfgLoader) str(key, def string) string {
-	if v, ok := l.get(key); ok {
+// jsonKey 返回字段的 JSON 名；json:"-" 或没有 tag 的返回空。
+func jsonKey(f reflect.StructField) string {
+	tag := f.Tag.Get("json")
+	if tag == "" || tag == "-" {
+		return ""
+	}
+	key := strings.Split(tag, ",")[0]
+	if key == "" || key == "-" {
+		return ""
+	}
+	return key
+}
+
+// parseDurationJSON 解析时长：字符串走 ParseDuration（支持 never/off），
+// 数字按秒（与 ParseDuration 的纯数字语义一致）。
+func parseDurationJSON(raw json.RawMessage) (time.Duration, error) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "never", "off", "none", "no":
+			return Never, nil
+		}
+		return ParseDuration(s, 0), nil
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, fmt.Errorf("duration must be a string or seconds, got %s", string(raw))
+	}
+	return time.Duration(n) * time.Second, nil
+}
+
+func env(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
 	}
 	return def
 }
 
-func (l *cfgLoader) boolean(key string, def bool) bool {
-	v, ok := l.get(key)
-	if !ok {
-		return def
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return def
-	}
-	return b
-}
-
-func (l *cfgLoader) integer(key string, def int) int {
-	v, ok := l.get(key)
-	if !ok {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return def
-	}
-	return n
-}
-
-// dur 支持 "30m" / "600s"，也支持纯秒数 "600"。
-func (l *cfgLoader) dur(key string, def time.Duration) time.Duration {
-	v, ok := l.get(key)
-	if !ok {
-		return def
-	}
-	if d, err := time.ParseDuration(v); err == nil && d > 0 {
-		return d
-	}
-	if n, err := strconv.Atoi(v); err == nil && n > 0 {
-		return time.Duration(n) * time.Second
-	}
-	return def
-}
-
-// Never 表示"永不回收/清理"（给 durTTL 用）。
-const Never = time.Duration(-1)
-
-// durTTL 与 dur 类似，但额外支持 never/off/none/0 = 永不回收（返回 Never）。
-// 用于会话/映射的保留时长：设 0 或 never 就是不按时间回收。
-func (l *cfgLoader) durTTL(key string, def time.Duration) time.Duration {
-	v, ok := l.get(key)
-	if !ok {
-		return def
-	}
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "never", "off", "none", "no", "0":
-		return Never
-	}
-	if d, err := time.ParseDuration(v); err == nil && d > 0 {
-		return d
-	}
-	if n, err := strconv.Atoi(v); err == nil && n > 0 {
-		return time.Duration(n) * time.Second
-	}
-	return def
-}
-
-// loadConfigFile 解析 KEY=VALUE 文本。找不到文件返回 (nil, "")；
-// 文件存在但语法有误则报错，避免静默用错配置。
-func loadConfigFile(path string) (map[string]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-
-	out := map[string]string{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-
-	for line := 1; sc.Scan(); line++ {
-		raw := strings.TrimSpace(sc.Text())
-		if raw == "" || strings.HasPrefix(raw, "#") {
-			continue
-		}
-		// 允许 `export KEY=VALUE`
-		raw = strings.TrimPrefix(raw, "export ")
-		eq := strings.Index(raw, "=")
-		if eq <= 0 {
-			return nil, &configError{Path: path, Line: line, Msg: "expected KEY=VALUE"}
-		}
-		key := strings.TrimSpace(raw[:eq])
-		val := strings.TrimSpace(raw[eq+1:])
-		// 去掉成对引号
-		if len(val) >= 2 {
-			if (val[0] == '"' && val[len(val)-1] == '"') ||
-				(val[0] == '\'' && val[len(val)-1] == '\'') {
-				val = val[1 : len(val)-1]
-			}
-		}
-		// 行尾注释（仅在无引号包裹时处理）：`KEY=value  # comment`
-		if i := strings.Index(val, " #"); i >= 0 {
-			val = strings.TrimSpace(val[:i])
-		}
-		out[key] = val
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-type configError struct {
-	Path string
-	Line int
-	Msg  string
-}
-
-func (e *configError) Error() string {
-	return e.Path + ":" + strconv.Itoa(e.Line) + ": " + e.Msg
-}
-
-// resolveConfigPath 决定用哪个配置文件：
-// JANUS_CONFIG / BRIDGE_CONFIG 显式指定 > 可执行文件同目录 janus.env > 当前目录 janus.env
-func resolveConfigPath() string {
-	for _, key := range []string{"JANUS_CONFIG", "BRIDGE_CONFIG"} {
-		if p := os.Getenv(key); p != "" {
-			return p
-		}
-	}
-	if exe, err := os.Executable(); err == nil {
-		p := filepath.Join(filepath.Dir(exe), "janus.env")
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	if _, err := os.Stat("janus.env"); err == nil {
-		return "janus.env"
-	}
-	return ""
-}
-
-// ---------- 加载 ----------
-
-func LoadConfig() (Config, error) {
-	loader := &cfgLoader{}
-	cfgPath := resolveConfigPath()
-	if cfgPath != "" {
-		fileCfg, err := loadConfigFile(cfgPath)
-		if err != nil {
-			return Config{}, err
-		}
-		loader.file = fileCfg
-	}
-
-	// 密码优先取 OPENCODE_PASSWORD，退化到 OPENCODE_SERVER_PASSWORD
-	// （OpenCode server 进程本身用的就是后者）。
-	pw := loader.str("OPENCODE_PASSWORD", "")
-	if pw == "" {
-		pw = loader.str("OPENCODE_SERVER_PASSWORD", "")
-	}
-
-	upstream := loader.str("OPENCODE_URL", "auto")
-	auto := upstream == "" || strings.EqualFold(upstream, "auto")
-
-	cfg := Config{
-		Addr:         loader.str("BRIDGE_ADDR", "0.0.0.0:2810"),
-		Upstream:     strings.TrimRight(upstream, "/"),
-		UpstreamAuto: auto,
-
-		AutostartUpstream: loader.boolean("OPENCODE_AUTOSTART", true),
-		OpencodeBin:       loader.str("OPENCODE_BIN", ""),
-		OpencodeClient:    loader.str("OPENCODE_CLIENT", ""),
-		ReuseExternal:     loader.boolean("OPENCODE_REUSE_EXTERNAL", true),
-		UpstreamCleanup:   loader.boolean("BRIDGE_UPSTREAM_CLEANUP", true),
-
-		Username: loader.str("OPENCODE_USERNAME", "opencode"),
-		Password: pw,
-
-		APIKey: loader.str("BRIDGE_API_KEY", ""),
-
-		Directory:     loader.str("BRIDGE_DIRECTORY", defaultProjectDir()),
-		Agent:         loader.str("BRIDGE_AGENT", "build"),
-		DefaultModel:  loader.str("BRIDGE_DEFAULT_MODEL", ""),
-		ModelMap:      parseModelMap(loader.str("BRIDGE_MODEL_MAP", "")),
-		Project:       loader.str("BRIDGE_PROJECT", ""),
-		ProjectMap:    parseProjectMap(loader.str("BRIDGE_PROJECT_MAP", "")),
-		ScopeKey:      loader.boolean("BRIDGE_SCOPE_KEY", false),
-		WorkspacesDir: loader.str("BRIDGE_WORKSPACES_DIR", paths.DefaultWorkspacesDir()),
-
-		SessionTTL:        loader.durTTL("BRIDGE_SESSION_TTL", 30*time.Minute),
-		SharedSessionTTL:  loader.durTTL("BRIDGE_SHARED_SESSION_TTL", 24*time.Hour),
-		RequestTimeout:    loader.dur("BRIDGE_REQUEST_TIMEOUT", 600*time.Second),
-		ReconcileInterval: loader.dur("BRIDGE_RECONCILE_INTERVAL", 3*time.Second),
-		IdlePollInterval:  loader.dur("BRIDGE_IDLE_POLL_INTERVAL", 1*time.Second),
-		PromptGracePeriod: loader.dur("BRIDGE_PROMPT_GRACE", 2*time.Second),
-		StreamHeartbeat:   loader.dur("BRIDGE_STREAM_HEARTBEAT", 15*time.Second),
-		StreamIdleTimeout: loader.durTTL("BRIDGE_STREAM_IDLE_TIMEOUT", 120*time.Second),
-
-		CORSOrigin: loader.str("BRIDGE_CORS_ORIGIN", ""),
-		LogLevel:   loader.str("BRIDGE_LOG_LEVEL", "info"),
-
-		// 默认关闭：注释是桥自己生成的内容，拼进正文违反透传原则
-		// （模型输出不含任何非模型文本）。需要进展可视化的纯聊天客户端显式开启。
-		ToolAnnotations:  loader.boolean("BRIDGE_TOOL_ANNOTATIONS", false),
-		MaxConversations: loader.integer("BRIDGE_MAX_CONVERSATIONS", 256),
-		MaxBodyBytes:     8 << 20,
-
-		UsageEnabled: loader.boolean("BRIDGE_USAGE_ENABLED", true),
-		UsageTTL:     loader.dur("BRIDGE_USAGE_TTL", 30*time.Second),
-		OpencodeDB:   loader.str("OPENCODE_DB", paths.DefaultOpencodeDB()),
-		ConsoleURL:   strings.TrimRight(loader.str("OPENCODE_CONSOLE", "https://opencode.ai/console/api"), "/"),
-		GoUsageURL:   loader.str("OPENCODE_GO_USAGE", "https://opencode.ai/inference/go/v1/usage"),
-
-		MetricsPublic: loader.boolean("BRIDGE_METRICS_PUBLIC", false),
-
-		RateLimitPerMin:    loader.integer("BRIDGE_RATE_LIMIT", 0),
-		RateLimitBurst:     loader.integer("BRIDGE_RATE_BURST", 0),
-		RateLimitGlobalRPM: loader.integer("BRIDGE_RATE_LIMIT_GLOBAL", 0),
-		TrustProxy:         loader.boolean("BRIDGE_TRUST_PROXY", false),
-
-		ResponsesEnabled: loader.boolean("BRIDGE_RESPONSES_ENABLED", true),
-		ResponseTTL:      loader.dur("BRIDGE_RESPONSE_TTL", 30*time.Minute),
-		AnthropicEnabled: loader.boolean("BRIDGE_ANTHROPIC_ENABLED", true),
-		WebSearchEnabled: loader.boolean("BRIDGE_WEBSEARCH_ENABLED", true),
-		ModelEcho:        normalizeModelEcho(loader.str("BRIDGE_MODEL_ECHO", "real")),
-
-		ToolCalling:      loader.boolean("BRIDGE_TOOL_CALLING", true),
-		ToolSoftFail:     loader.boolean("BRIDGE_TOOL_SOFT_FAIL", false),
-		ToolReregister:   loader.dur("BRIDGE_TOOL_REREGISTER", 10*time.Minute),
-		ToolCallWait:     loader.dur("BRIDGE_TOOL_CALL_WAIT", 30*time.Minute),
-		ToolCallWaitFast: loader.dur("BRIDGE_TOOL_CALL_WAIT_FAST", 90*time.Second),
-		ToolFastTools:    parseToolSet(loader.str("BRIDGE_TOOL_CALL_WAIT_FAST_TOOLS", defaultFastTools)),
-		ToolCompanions:   loader.boolean("BRIDGE_TOOL_COMPANIONS", true),
-		ToolOrphanWait:   loader.dur("BRIDGE_TOOL_ORPHAN_WAIT", 30*time.Second),
-		MCPPublicURL:     strings.TrimRight(loader.str("BRIDGE_MCP_URL", ""), "/"),
-		MCPTransport:     loader.str("BRIDGE_MCP_TRANSPORT", "local"),
-		WedgeForensics:   loader.boolean("BRIDGE_WEDGE_FORENSICS", false),
-
-		WorkBuddyEnabled:    loader.boolean("BRIDGE_WORKBUDDY_ENABLED", false),
-		WorkBuddyAuthFile:   loader.str("WORKBUDDY_AUTH_FILE", ""),
-		WorkBuddyAppVersion: loader.str("WORKBUDDY_APP_VERSION", ""),
-		WorkBuddyContext:    loader.str("WORKBUDDY_CONTEXT", "max"),
-		OpenCodeContext:     loader.integer("OPENCODE_CONTEXT", 0),
-
-		PermissionReply: normalizePermissionReply(loader.str("BRIDGE_PERMISSION_REPLY", "once")),
-		MCPAllow:        loader.str("BRIDGE_MCP_ALLOW", ""),
-		UserAgent:       loader.str("BRIDGE_USER_AGENT", ""),
-		DBPath:          loader.str("BRIDGE_DB", paths.DefaultDBPath()),
-		DBKey:           loader.str("JANUS_DB_KEY", ""),
-		HistoryMaxBytes: loader.integer("BRIDGE_HISTORY_MAX_BYTES", 1<<20),
-		ConvTTL:         loader.durTTL("BRIDGE_CONV_TTL", 7*24*time.Hour),
-
-		ConfigFile: cfgPath,
-	}
-	if cfg.UserAgent != "" {
-		useragent.Default = cfg.UserAgent
-	}
-	return cfg, nil
-}
-
-// ApplyDefaults 兜底零值配置。
+// ApplyDefaults 补齐零值（供直接构造 Config 的调用方使用）。
 //
-// 配置文件的正常路径会填好这些，但 NewServer 也可能被测试/嵌入方用部分 Config 调用；
-// 零值很危险（MaxBodyBytes=0 会让所有 POST 读到 EOF，RequestTimeout=0 会立刻超时）。
-func (c *Config) ApplyDefaults() {
-	if c.MaxBodyBytes <= 0 {
-		c.MaxBodyBytes = 8 << 20
+// 只兜零值，不铺"默认开启"的开关：结构体字面量里的 false 无法与未设置
+// 区分，铺 true 会覆盖调用方显式关闭的意图。需要旧版默认值的调用方请走
+// Load / ApplySettings。
+func (c *Config) ApplyDefaults() { c.applyDefaults() }
+
+// applySeed 铺"无法用零值表达"的默认值：
+//   - 默认开启的布尔开关（旧版 BRIDGE_*_ENABLED 等默认 true）
+//   - 默认非零的时长（旧版 durTTL/dur 的默认值）
+//
+// 必须在 decode 之前调用，库里的显式 false/0 才能覆盖它；放进 applyDefaults
+// 会把显式关闭重新打开。
+func (c *Config) applySeed() {
+	c.AutostartUpstream = true
+	c.ReuseExternal = true
+	c.UpstreamCleanup = true
+
+	c.UsageEnabled = true
+	c.ResponsesEnabled = true
+	c.AnthropicEnabled = true
+	c.WebSearchEnabled = true
+	c.ToolCalling = true
+	c.ToolCompanions = true
+
+	if c.StreamIdleTimeout == 0 {
+		c.StreamIdleTimeout = 120 * time.Second
+	}
+	if c.ToolCallWaitFast == 0 {
+		c.ToolCallWaitFast = 90 * time.Second
+	}
+}
+
+// applyDefaults 兜底零值：零值很危险（MaxBodyBytes=0 会让所有 POST 读到 EOF）。
+func (c *Config) applyDefaults() {
+	if c.Addr == "" {
+		c.Addr = "0.0.0.0:2810"
+	}
+	if c.DataDir == "" {
+		c.DataDir = paths.DataDir()
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = "info"
+	}
+	if c.Upstream == "" {
+		c.Upstream = "auto"
+	}
+	if c.Upstream == "auto" || strings.EqualFold(c.Upstream, "auto") {
+		c.UpstreamAuto = true
+		c.Upstream = ""
+	}
+	if c.Username == "" {
+		c.Username = "opencode"
+	}
+	if c.Agent == "" {
+		c.Agent = "build"
+	}
+	if c.Directory == "" {
+		c.Directory = defaultProjectDir()
+	}
+	if c.WorkspacesDir == "" {
+		c.WorkspacesDir = paths.DefaultWorkspacesDir()
+	}
+	if c.MCPTransport == "" {
+		c.MCPTransport = "local"
+	}
+	if c.WorkBuddyContext == "" {
+		c.WorkBuddyContext = "max"
+	}
+	if c.OpencodeDB == "" {
+		c.OpencodeDB = paths.DefaultOpencodeDB()
+	}
+	if c.ConsoleURL == "" {
+		c.ConsoleURL = "https://opencode.ai/console/api"
+	}
+	if c.GoUsageURL == "" {
+		c.GoUsageURL = "https://opencode.ai/inference/go/v1/usage"
+	}
+	if c.SessionTTL == 0 {
+		c.SessionTTL = 30 * time.Minute
+	}
+	if c.SharedSessionTTL == 0 {
+		c.SharedSessionTTL = 24 * time.Hour
 	}
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = 600 * time.Second
@@ -503,44 +366,61 @@ func (c *Config) ApplyDefaults() {
 	if c.IdlePollInterval <= 0 {
 		c.IdlePollInterval = time.Second
 	}
+	if c.PromptGracePeriod <= 0 {
+		c.PromptGracePeriod = 2 * time.Second
+	}
 	if c.StreamHeartbeat <= 0 {
 		c.StreamHeartbeat = 15 * time.Second
 	}
-	// <0（never/off/0）= 关闭流式空闲超时
 	if c.StreamIdleTimeout < 0 {
 		c.StreamIdleTimeout = 0
 	}
-	if c.ToolCallWait <= 0 {
-		c.ToolCallWait = 30 * time.Minute
-	}
-	// 短等待必须比长等待小，否则没意义（全部走长等待）。
-	if c.ToolCallWaitFast <= 0 || c.ToolCallWaitFast >= c.ToolCallWait {
-		c.ToolCallWaitFast = 0
-	}
-	if c.ToolOrphanWait <= 0 {
-		c.ToolOrphanWait = 30 * time.Second
-	}
-	if c.PermissionReply == "" {
-		c.PermissionReply = "once"
-	}
-	if c.ResponseTTL <= 0 {
-		c.ResponseTTL = 30 * time.Minute
+	if c.MaxBodyBytes <= 0 {
+		c.MaxBodyBytes = 8 << 20
 	}
 	if c.MaxConversations <= 0 {
 		c.MaxConversations = 256
 	}
-	if c.SessionTTL == 0 {
-		c.SessionTTL = 30 * time.Minute
+	if c.UsageTTL <= 0 {
+		c.UsageTTL = 30 * time.Second
 	}
-	if c.SharedSessionTTL == 0 {
-		c.SharedSessionTTL = 24 * time.Hour
+	if c.ResponseTTL <= 0 {
+		c.ResponseTTL = 30 * time.Minute
+	}
+	if c.ModelEcho == "" {
+		c.ModelEcho = "real"
+	}
+	c.ModelEcho = normalizeModelEcho(c.ModelEcho)
+	if c.ToolCallWait <= 0 {
+		c.ToolCallWait = 30 * time.Minute
+	}
+	if c.ToolCallWaitFast <= 0 || c.ToolCallWaitFast >= c.ToolCallWait {
+		c.ToolCallWaitFast = 0
+	}
+	if c.ToolReregister <= 0 {
+		c.ToolReregister = 10 * time.Minute
+	}
+	if c.ToolOrphanWait <= 0 {
+		c.ToolOrphanWait = 30 * time.Second
+	}
+	if c.ToolFastTools == nil {
+		c.ToolFastTools = ParseToolSet(defaultFastTools)
+	}
+	if c.PermissionReply == "" {
+		c.PermissionReply = "once"
+	}
+	c.PermissionReply = NormalizePermissionReply(c.PermissionReply)
+	if c.HistoryMaxBytes <= 0 {
+		c.HistoryMaxBytes = 1 << 20
+	}
+	if c.ConvTTL == 0 {
+		c.ConvTTL = 7 * 24 * time.Hour
+	}
+	if c.UserAgent != "" {
+		useragent.Default = c.UserAgent
 	}
 }
 
-// paths.DefaultOpencodeDB 见 paths.go（跨平台）。
-
-// defaultProjectDir 未配置 BRIDGE_DIRECTORY 时用桥启动时的当前工作目录，
-// 避免把某个固定路径写死进默认值。
 func defaultProjectDir() string {
 	if wd, err := os.Getwd(); err == nil && wd != "" {
 		return wd
@@ -548,57 +428,27 @@ func defaultProjectDir() string {
 	return "."
 }
 
-// normalizePermissionReply 校验权限自动应答策略。
-// 非法值一律回退到 once：宁可多答一次，也不能让工具挂死。
-// parseModelMap 解析 "from=to,from2=to2"。键不区分大小写，忽略非法项。
-func parseModelMap(s string) map[string]string {
-	out := map[string]string{}
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		i := strings.Index(part, "=")
-		if i <= 0 {
-			continue
-		}
-		k := strings.ToLower(strings.TrimSpace(part[:i]))
-		v := strings.TrimSpace(part[i+1:])
-		if k != "" && v != "" {
-			out[k] = v
-		}
+// NormalizePermissionReply 校验权限自动应答策略，非法值回退 once。
+func NormalizePermissionReply(v string) string {
+	switch s := strings.ToLower(strings.TrimSpace(v)); s {
+	case "once", "always", "reject", "off":
+		return s
+	default:
+		return "once"
 	}
-	return out
 }
 
-// parseProjectMap 解析 "路径=项目名,路径2=项目名2"。键（路径）保留原样，忽略非法项。
-func parseProjectMap(s string) map[string]string {
-	out := map[string]string{}
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		i := strings.Index(part, "=")
-		if i <= 0 {
-			continue
-		}
-		k := strings.TrimSpace(part[:i])
-		v := strings.TrimSpace(part[i+1:])
-		if k != "" && v != "" {
-			out[k] = v
-		}
+func normalizeModelEcho(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "request", "req", "client", "alias":
+		return "request"
+	default:
+		return "real"
 	}
-	return out
 }
 
-// defaultFastTools 是默认走「短等待」的工具（只读/编辑类，正常秒回）。
-// 命令执行类（RunCommand/execute_command…）不在此列，保持 BRIDGE_TOOL_CALL_WAIT 长等待；
-// 状态查询类（CheckCommandStatus/check_command_status，桥自动补的配套工具）秒回，走短等待。
-const defaultFastTools = "Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile,CheckCommandStatus,check_command_status"
-
-// parseToolSet 解析逗号分隔的工具名集合（转小写）。设成 none/off/- 表示空集（禁用短等待）。
-func parseToolSet(s string) map[string]bool {
+// ParseToolSet 解析逗号分隔的工具名集合（转小写）。none/off/- 表示空集。
+func ParseToolSet(s string) map[string]bool {
 	out := map[string]bool{}
 	for _, part := range strings.Split(s, ",") {
 		name := strings.ToLower(strings.TrimSpace(part))
@@ -611,21 +461,28 @@ func parseToolSet(s string) map[string]bool {
 	return out
 }
 
-func normalizePermissionReply(v string) string {
-	switch s := strings.ToLower(strings.TrimSpace(v)); s {
-	case "once", "always", "reject", "off":
-		return s
-	default:
-		return "once"
+// defaultFastTools 是默认走「短等待」的工具（只读/编辑类，正常秒回）。
+const defaultFastTools = "Grep,Read,Glob,LS,WebFetch,Write,SearchReplace,DeleteFile,CheckCommandStatus,check_command_status"
+
+// KeyFilePath 返回首启 admin 凭据落盘位置（0600）。
+func (c Config) KeyFilePath() string {
+	if c.DataDir == "" {
+		return ""
 	}
+	return filepath.Join(c.DataDir, "bootstrap.key")
 }
 
-// normalizeModelEcho 归一化 BRIDGE_MODEL_ECHO：只有 request 才回显请求名，其余一律 real。
-func normalizeModelEcho(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "request", "req", "client", "alias":
-		return "request"
-	default:
-		return "real"
+// ParseDuration 解析 "30m" / "600s" / 纯秒数；空串返回 def。
+func ParseDuration(v string, def time.Duration) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return def
 	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return time.Duration(n) * time.Second
+	}
+	return def
 }

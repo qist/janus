@@ -101,6 +101,9 @@ func (c *Credential) origin() string {
 //
 // 只有 accessToken 是必需的；其余缺失时按“尽量可用”处理。加密的桌面文件（5.6 信封）
 // 里 accessToken 是个密文对象、解析不出字符串，这里会明确报错并提示先导出明文。
+// ParseCredential 解析明文凭据 JSON（导出供 API 层多账号发现使用）。
+func ParseCredential(text string) (*Credential, error) { return parseCredential(text) }
+
 func parseCredential(text string) (*Credential, error) {
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(text), &doc); err != nil {
@@ -958,6 +961,9 @@ type workbuddyClient struct {
 	baseOverride string
 }
 
+// NewClient 导出客户端构造函数（供 API 层多账号发现使用）。
+func NewClient(cred *Credential, appVer string) *workbuddyClient { return newWorkBuddyClient(cred, appVer) }
+
 func newWorkBuddyClient(cred *Credential, appVer string) *workbuddyClient {
 	if strings.TrimSpace(appVer) == "" {
 		appVer = fallbackAppVer
@@ -1086,6 +1092,9 @@ func (c *workbuddyClient) refresh(ctx context.Context) error {
 	}
 	return nil
 }
+
+// FetchCatalog 拉取模型目录（导出供 API 层多账号发现使用）。
+func (c *workbuddyClient) FetchCatalog(ctx context.Context) ([]Model, error) { return c.fetchCatalog(ctx) }
 
 // fetchCatalog 拉取模型目录。
 func (c *workbuddyClient) fetchCatalog(ctx context.Context) ([]Model, error) {

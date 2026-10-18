@@ -11,6 +11,7 @@ import (
 
 	"janus/internal/attach"
 	"janus/internal/db"
+	"janus/internal/gateway"
 	"janus/internal/httpx"
 	"janus/internal/modelx"
 	"janus/internal/prompt"
@@ -610,13 +611,14 @@ func applyIncomplete(resp *ResponsesResponse, t *turnOutcome) {
 // ---------- handlers ----------
 
 func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkAuth(r); err != nil {
+	p, err := s.principal(r)
+	if err != nil {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
 		return
 	}
 	if !s.cfg.ResponsesEnabled {
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
-			"Responses API disabled (BRIDGE_RESPONSES_ENABLED=false)", "disabled")
+			"Responses API disabled (responses_enabled=false)", "disabled")
 		return
 	}
 
@@ -625,6 +627,14 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error(), "")
 		return
 	}
+
+	// 模型面直连：agent key / agent=direct 时原样透传（不建会话、不存 response）。
+	if s.directMode(r, p) {
+		if s.proxyModel(w, r, p, gateway.ProtocolOpenAIResponses, body, openAIFail(w)) {
+			return
+		}
+	}
+
 	var req ResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body: "+err.Error(), "")
@@ -651,7 +661,6 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
 		return
 	}
-	s.ensureAccountForModel(r.Context(), ref)
 	if effort := responsesEffort(req); effort != "" && ref.Variant == "" {
 		if m := modelx.Find(ocModels, ref); m != nil {
 			if v, ok := modelx.PickVariant(*m, effort); ok {

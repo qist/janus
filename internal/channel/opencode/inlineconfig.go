@@ -3,7 +3,6 @@ package opencode
 import (
 	"encoding/json"
 
-	"janus/internal/channel/workbuddy"
 	"janus/internal/config"
 )
 
@@ -50,27 +49,12 @@ func InlineConfig(cfg *config.Config, toolPrefix string) string {
 	}
 
 	// 扩展点：后续可按 role/模型生成 providers / 每模型 settings 等，
-	// 都从这里一并注入（见 docs/ARCHITECTURE.md 的「模型访问层」）。
+	// 都从这里一并注入（见 docs/REFACTOR.md 的「Agent 面」）。
+	//
+	// providers 的注入（把 janus 注册成 openai-compatible provider）需要
+	// agent key，由 AgentRuntime 在 P2 阶段负责；此处只产出 agents 定义。
 
 	inline := map[string]any{"agents": agents}
-
-	// WorkBuddy provider（可选）：运行时就绪时把 WorkBuddy 注册成 OpenCode
-	// 的 openai-compatible provider，baseURL 指向 janus 的 /workbuddy/<token>/v1
-	// （token 即鉴权，OpenCode 与 janus 同机回环）。模型列表来自 /v3/config，
-	// 会话/工具桥/权限复用现有链路，WorkBuddy 模型以 workbuddy/<id> 出现。
-	if wb, ok := workbuddy.ProviderConfig(); ok {
-		inline["provider"] = map[string]any{
-			"workbuddy": map[string]any{
-				"npm":  "@ai-sdk/openai-compatible",
-				"name": "WorkBuddy",
-				"options": map[string]any{
-					"baseURL": wb.BaseURL,
-					"apiKey":  wb.APIKey,
-				},
-				"models": wb.Models,
-			},
-		}
-	}
 
 	b, err := json.Marshal(inline)
 	if err != nil {

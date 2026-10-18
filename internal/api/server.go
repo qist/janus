@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,10 +18,10 @@ import (
 	"time"
 
 	"janus/internal/channel/opencode"
-	"janus/internal/channel/workbuddy"
 	"janus/internal/config"
 	"janus/internal/db"
 	"janus/internal/forensics"
+	"janus/internal/gateway"
 	"janus/internal/httpx"
 	"janus/internal/logx"
 	"janus/internal/mcpbridge"
@@ -30,6 +29,7 @@ import (
 	"janus/internal/modelx"
 	"janus/internal/paths"
 	"janus/internal/ratelimit"
+	"janus/internal/ui"
 	"janus/internal/upstream"
 	"janus/internal/usage"
 	"janus/internal/useragent"
@@ -52,6 +52,7 @@ type Server struct {
 	globalLimit *ratelimit.RateLimiter
 	metrics     *metricx.Metrics
 	httpc       *http.Client         // 用于下载远程附件，与上游客户端分开
+	proxyc      *http.Client         // 模型面直连厂商：不设总超时（流式），只限连接阶段
 	forensics   *forensics.Forensics // 楔死取证落盘器；nil = 未启用
 
 	known map[string]struct{} // 曾经创建过的上游 session，供 janitor 回收
@@ -74,10 +75,19 @@ type Server struct {
 	// db 为 nil 时纯内存；非 nil 时响应与会话映射落 SQLite。
 	db *db.Store
 
+	// router 是模型面路由解析器（providers / credentials / routes）。
+	router *gateway.Router
+
+	// keyCache 缓存 API key 摘要 → 记录（30s）。
+	keyCache keyCache
+
 	// defaultModel 是运行时可切换的默认模型（web 里选），持久化在 DB。
 	// 非空时优先于 cfg.DefaultModel；空则回落 cfg.DefaultModel / 上游默认。
 	defaultMu    sync.RWMutex
 	defaultModel string
+
+	// settingsMu 串行化运行期设置的读改写（PATCH /api/v1/settings）。
+	settingsMu sync.Mutex
 
 	// clientSeen 用于「客户端诊断日志」去重：每个不同的客户端签名只打一次，
 	// 方便看不同 IDE / 设备到底发了什么（user / 头 / 目录 / 首条 user）。
@@ -200,6 +210,16 @@ func NewServer(cfg config.Config, log *logx.Logger) *Server {
 				IdleConnTimeout:     30 * time.Second,
 			}),
 		},
+		proxyc: &http.Client{
+			// 不设总超时：流式回答可能跑很久。靠请求 ctx 与连接超时兜底。
+			Transport: useragent.Wrap(&http.Transport{
+				DialContext:         (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+				TLSHandshakeTimeout: 15 * time.Second,
+				MaxIdleConnsPerHost: 32,
+				IdleConnTimeout:     90 * time.Second,
+				ForceAttemptHTTP2:   true,
+			}),
+		},
 		known: map[string]struct{}{},
 		owned: map[string]time.Time{},
 	}
@@ -214,15 +234,25 @@ func NewServer(cfg config.Config, log *logx.Logger) *Server {
 		if opened, err := db.Open(cfg.DBPath); err != nil {
 			log.Warnf("sqlite open failed (%s): %v; falling back to in-memory", cfg.DBPath, err)
 		} else {
-			opened.SetAccountKey(cfg.DBKey)
 			srv.db = opened
 			srv.store.attachDB(opened)
 			srv.responses.attachDB(opened)
+			// 运行期设置整体存在 settings.runtime（env 只负责 bootstrap）。
+			if raw, ok := opened.GetSettingRaw(db.SettingRuntime); ok {
+				if err := srv.cfg.ApplySettings(raw, json.Unmarshal); err != nil {
+					log.Warnf("runtime settings ignored: %v", err)
+				}
+			}
 			if v, ok := opened.GetSetting("default_model"); ok {
 				srv.defaultModel = v
 			}
+			srv.router = gateway.New(opened)
 			log.Infof("persistence enabled: %s", cfg.DBPath)
 		}
+	}
+	if srv.router == nil {
+		// 内存模式（测试）：没有 providers/credentials，路由解析一律失败。
+		srv.router = gateway.New(nil)
 	}
 	srv.metrics = metricx.New(func() int { return srv.store.Count() })
 	srv.bus.SetOwnedFunc(srv.isOwnedSession)
@@ -387,21 +417,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /ui", s.handleUI)
-	// 根路径直接进用量面板，省得记地址。
+	mux.HandleFunc("GET /ui/{$}", s.handleUI)
+	// 前端静态资源（vendor / 页面模块）。路径不带内容指纹，靠 no-cache 校验。
+	mux.Handle("GET /assets/", http.StripPrefix("/assets/", ui.Handler()))
+	// 根路径直接进控制台，省得记地址。
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui", http.StatusFound)
 	})
+	// 登录：用户名 + 密码换 admin key（面板首访引导用）。
+	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 	mux.HandleFunc("GET /v1/usage", s.handleUsage)
 	mux.HandleFunc("GET /v1/requests", s.handleRequests)
-	mux.HandleFunc("GET /v1/settings", s.handleGetSettings)
-	mux.HandleFunc("GET /v1/accounts", s.handleListAccounts)
-	mux.HandleFunc("POST /v1/accounts", s.handleCreateAccount)
-	mux.HandleFunc("GET /v1/accounts/{id}", s.handleGetAccount)
-	mux.HandleFunc("DELETE /v1/accounts/{id}", s.handleDeleteAccount)
-	mux.HandleFunc("POST /v1/accounts/{id}/activate", s.handleActivateAccount)
-	mux.HandleFunc("GET /v1/accounts/{id}/models", s.handleAccountModels)
-	mux.HandleFunc("POST /v1/accounts/{id}/discover", s.handleDiscoverAccount)
 	mux.HandleFunc("POST /v1/responses", s.handleCreateResponse)
 	mux.HandleFunc("GET /v1/responses/{id}", s.handleGetResponse)
 	mux.HandleFunc("DELETE /v1/responses/{id}", s.handleDeleteResponse)
@@ -424,9 +451,8 @@ func (s *Server) Handler() http.Handler {
 	// 既是路由，也当鉴权（URL 里的 token 是 128 位随机串）。
 	mux.HandleFunc("/mcp/{token}", s.handleMCP)
 
-	// WorkBuddy provider（可选）：OpenAI 兼容面挂在自己的 token 路径下，
-	// OpenCode 经注入的 provider 配置访问它（见 channel/workbuddy）。
-	workbuddy.RegisterRoutes(mux)
+	// 控制面：/api/v1/*（admin key）。所有资源都是数据库里的数据。
+	s.registerAdminRoutes(mux)
 
 	// 其余 /v1/* 一律返回 OpenAI 格式 404（客户端不会因解析失败而崩）
 	mux.HandleFunc("/v1/", s.handleUnknownV1)
@@ -477,6 +503,10 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.checkAuth(r); err != nil {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
+		return
+	}
+	if p, err := s.principal(r); err == nil && s.directMode(r, p) {
+		s.listCatalogModels(w, p)
 		return
 	}
 	q := r.URL.Query()
@@ -582,11 +612,39 @@ func atoiOrZero(s string) int {
 }
 
 func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkAuth(r); err != nil {
+	p, err := s.principal(r)
+	if err != nil {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
 		return
 	}
 	id := r.PathValue("id")
+	// 直连模式：目录在数据库里，不依赖 OpenCode 上游。
+	if s.directMode(r, p) {
+		var st *db.Store
+		if s.router != nil {
+			st = s.router.Store()
+		}
+		if st != nil {
+			key := id
+			if !strings.Contains(key, "/") {
+				key = "" // 裸 id：按 upstream 找
+			}
+			var m db.Model
+			var ok bool
+			if key != "" {
+				m, ok = st.GetModel(key)
+			} else {
+				m, ok = st.FindModelByUpstream("", id)
+			}
+			if ok {
+				httpx.WriteJSON(w, http.StatusOK, catalogModelDetail(m))
+				return
+			}
+		}
+		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error",
+			fmt.Sprintf("model %q not found", id), "model_not_found")
+		return
+	}
 	list, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
 	if err != nil {
 		st, typ, msg := s.mapUpstreamError(err)
@@ -601,12 +659,7 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 	for _, m := range list {
 		if m.ProviderID == ref.ProviderID && m.ID == ref.ID {
 			detail := modelx.ToDetail(m)
-			if c := workbuddy.CreditsFor(m.ProviderID, m.ID); c != "" {
-				detail.WorkBuddyCredits = c
-			}
-			if ctx := workbuddy.ContextOverride(m.ProviderID, m.ID); ctx > 0 {
-				detail.ContextLength = ctx
-			} else if s.cfg.OpenCodeContext > 0 && m.ProviderID != workbuddy.ProviderID {
+			if s.cfg.OpenCodeContext > 0 {
 				detail.ContextLength = s.cfg.OpenCodeContext
 			}
 			if strings.EqualFold(strings.TrimSpace(id), "default") {
@@ -671,18 +724,18 @@ func (s *Server) handleLegacyCompletions(w http.ResponseWriter, r *http.Request)
 	s.handleChatCompletions(w, rec)
 }
 
-// handleUsage 暴露账号余额与用量。
+// handleUsage 暴露上游用量（OpenCode console API）。
 //
-// 这是本桥的扩展端点（OpenAI 没有对应接口）：OpenCode 的本地 server 只给
+// 这是 janus 的扩展端点（OpenAI 没有对应接口）：OpenCode 的本地 server 只给
 // 「已消耗」，余额得走 console API。客户端一般不会调它，主要给人/监控用。
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkAuth(r); err != nil {
-		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
+	if _, err := s.principal(r); err != nil {
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized", "invalid API key", nil)
 		return
 	}
 	if !s.cfg.UsageEnabled {
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
-			"usage endpoint disabled (BRIDGE_USAGE_ENABLED=false)", "disabled")
+			"usage endpoint disabled (usage_enabled=false)", "disabled")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -694,13 +747,6 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
 			"cannot read usage: "+err.Error(), "usage_unavailable")
 		return
-	}
-	// WorkBuddy 积分（可选）：失败/未启用时字段缺省，绝不拖垮主报告。
-	// Recent（最近请求）每次现取，不随积分缓存。
-	if c := workbuddy.CreditsSnapshot(ctx); c != nil {
-		cc := *c
-		cc.Recent = workbuddy.RecentRequests()
-		rep.WorkBuddy = &cc
 	}
 	httpx.WriteJSON(w, http.StatusOK, rep)
 }
@@ -750,23 +796,6 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGetSettings 返回运行时可改的设置（default_model / workbuddy_context）
-// 与 UI 偏好（ui_prefs：面板的标签页与渠道选择，浏览器刷新后恢复）。
-func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkAuth(r); err != nil {
-		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"default_model":            s.runtimeDefaultModel(),
-		"configured_default_model": s.cfg.DefaultModel, // env 兜底，只读
-		"workbuddy_enabled":        workbuddy.Enabled(),
-		"workbuddy_context":        s.cfg.WorkBuddyContext,
-		"opencode_context":         s.cfg.OpenCodeContext,
-		"ui_prefs":                 s.uiPrefs(),
-	})
-}
-
 // uiPrefs 读持久化的 UI 偏好（无/坏值返回 null，由前端兜底）。
 func (s *Server) uiPrefs() map[string]any {
 	if s.db == nil {
@@ -783,98 +812,6 @@ func (s *Server) uiPrefs() map[string]any {
 	return out
 }
 
-// handleSetSettings 设置运行时设置：body 可带任意子集——
-//
-//	{"default_model": "provider/id[:variant]"}   运行时默认模型（空=清除）
-//	{"workbuddy_context": "max"|"default"}        WorkBuddy 上下文预算档位
-//	{"ui_prefs": {"tab": "models", "chan": "…"}}  面板 UI 偏好（刷新/重启后恢复）
-func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkAuth(r); err != nil {
-		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
-		return
-	}
-	body, err := readBody(r, s.cfg.MaxBodyBytes)
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error(), "")
-		return
-	}
-	var in struct {
-		DefaultModel     *string        `json:"default_model"`
-		WorkBuddyContext *string        `json:"workbuddy_context"`
-		OpenCodeContext  *int           `json:"opencode_context"`
-		UIPrefs          map[string]any `json:"ui_prefs"`
-	}
-	if err := json.Unmarshal(body, &in); err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
-			"invalid JSON body: "+err.Error(), "invalid_request")
-		return
-	}
-	if in.DefaultModel == nil && in.WorkBuddyContext == nil && in.OpenCodeContext == nil && in.UIPrefs == nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
-			`body must contain default_model / workbuddy_context / opencode_context / ui_prefs`, "invalid_request")
-		return
-	}
-	out := map[string]any{}
-	if in.DefaultModel != nil {
-		v := strings.TrimSpace(*in.DefaultModel)
-		if v != "" {
-			list, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
-			if err != nil {
-				writeOpenAIError(w, http.StatusBadGateway, "api_error", "cannot list models: "+err.Error(), "")
-				return
-			}
-			if _, err := modelx.Resolve(v, list); err != nil {
-				writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
-				return
-			}
-		}
-		s.setRuntimeDefaultModel(v)
-		s.log.Infof("runtime default model set to %q", v)
-		out["default_model"] = v
-	}
-	if in.WorkBuddyContext != nil {
-		v := strings.TrimSpace(*in.WorkBuddyContext)
-		if v != "max" && v != "default" {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
-				`workbuddy_context must be "max" or "default"`, "invalid_request")
-			return
-		}
-		// 生效点在 OpenCode 拉起时的内联配置注入（modelConfigs），运行中改
-		// 只影响下次拉起；先落库再同步运行时对象，重启后自动带上。
-		s.cfg.WorkBuddyContext = v
-		workbuddy.SetContext(v)
-		if s.db != nil {
-			s.db.SetSetting("workbuddy_context", v)
-		}
-		s.log.Infof("workbuddy context budget set to %q (takes effect on next janus restart)", v)
-		out["workbuddy_context"] = v
-	}
-	if in.OpenCodeContext != nil {
-		v := *in.OpenCodeContext
-		if v < 0 {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
-				`opencode_context must be >= 0 (0 = 跟随目录默认)`, "invalid_request")
-			return
-		}
-		// 只影响 /v1/models 的展示预算，立即生效并持久化。
-		s.cfg.OpenCodeContext = v
-		if s.db != nil {
-			s.db.SetSetting("opencode_context", strconv.Itoa(v))
-		}
-		s.log.Infof("opencode context budget override set to %d", v)
-		out["opencode_context"] = v
-	}
-	if in.UIPrefs != nil {
-		if s.db != nil {
-			if b, err := json.Marshal(in.UIPrefs); err == nil {
-				s.db.SetSetting("ui_prefs", string(b))
-			}
-		}
-		out["ui_prefs"] = in.UIPrefs
-	}
-	httpx.WriteJSON(w, http.StatusOK, out)
-}
-
 func (s *Server) handleUnknownV1(w http.ResponseWriter, r *http.Request) {
 	if err := s.checkAuth(r); err != nil {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", err.Error(), "invalid_api_key")
@@ -888,16 +825,13 @@ func (s *Server) handleUnknownV1(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 鉴权 ----------
 
+// checkAuth 是旧调用点的兼容包装：走统一的 principal 解析。
+//
+// 未配置任何 key 且没有持久化层（纯内存/测试）时放行，便于本地起服务；
+// 一旦有 DB，就必须带 api_keys 里的 key。
 func (s *Server) checkAuth(r *http.Request) error {
-	if s.cfg.APIKey == "" {
-		return nil // 未配置 → 放行（启动时已打 WARN）
-	}
-	got := httpx.Bearer(r)
-	if got == "" {
-		got = r.Header.Get("x-api-key")
-	}
-	if subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.APIKey)) != 1 {
-		return fmt.Errorf("invalid API key")
+	if _, err := s.principal(r); err != nil {
+		return err
 	}
 	return nil
 }
@@ -909,6 +843,10 @@ func (s *Server) checkAuth(r *http.Request) error {
 func isPublicPath(p string) bool {
 	switch p {
 	case "/", "/ui", "/healthz":
+		return true
+	}
+	// 控制台静态资源：页面与 JS/CSS 本身不含数据，跨源加载无风险。
+	if strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/ui/") {
 		return true
 	}
 	return false

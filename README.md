@@ -383,6 +383,28 @@ BRIDGE_TOOL_CALLING=false    # 也不暴露客户端工具 → agent 手里没�
 
 > 小结：**A = 服务端原生执行**，**B = 客户端桥接执行**，**C = 不执行工具**。
 
+#### 方式 D（扩展）：由 janus 直接驱动 CLI 型 harness
+
+上面的 A/B/C 描述的是「IDE → janus → agent」这条链路。对 **codex / claude-code**
+这类 CLI harness，janus 也可以**直接起子进程**驱动它们跑一轮，并把事件流回放出来：
+
+```bash
+curl -N -H "Authorization: Bearer <admin key>" \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"解释一下这个仓库","stream":true}' \
+  http://127.0.0.1:2810/api/v1/runtimes/codex/prompt
+```
+
+- `POST /api/v1/runtimes/{name}/prompt`，`name` 取 `codex` / `claude-code`。
+  事件按 SSE 逐条回放（`stream=false` 则收齐后一次返回），`[DONE]` 收尾。
+- 可选字段：`session_key`（**复用同一 key 即续接同一 harness 会话**，内部走
+  `codex exec resume` / `claude --resume`）、`directory`（子进程工作目录）、
+  `model`、`api_key`（注入给 CLI 当 janus 的 key；不填则用 CLI 自带认证）、
+  `mcp_url`（把 janus 的 MCP 端点注册给 CLI，即方式 B 的工具桥）。
+- 可执行文件名由设置项 `codex_bin` / `claude_bin` 覆盖（默认 `codex` / `claude`）。
+- 当前 IDE 请求路径（`/v1/chat/completions` 等）仍走 opencode / direct runtime；
+  两条链路合一见 `docs/REFACTOR.md`。
+
 ### 输出与事件
 
 | 变量 | 默认 | 说明 |
@@ -985,6 +1007,7 @@ Janus 背后是一个**能执行 shell、读写文件**的 agent（默认以启�
 - **必须设 `BRIDGE_API_KEY`**；绑定非回环且 key 为空时任何人都能消耗你的额度。
 - 桥自身**不做 TLS**，公网/不可信网络务必套反向代理（Caddy/nginx）加 HTTPS。
 - **内置 MCP 端点** `/mcp/{token}` 用 128 位随机 token 鉴权，随会话短命（**会话重置 / 客户端不再声明 tools / TTL** 时注销，不再每轮注销）；仍可用 `BRIDGE_MCP_ALLOW` 按来源 IP/CIDR 再收一层。防串会话：空闲会话的工具调用会被立即拒绝。
+  另有**稳定端点** `/mcp/<bindingToken>`：token 由 agent key 确定性派生（`b`+sha256("janus-mcp:"+keyID)[:16]），解析到该 key 名下**最近活跃的会话**，供 codex / claude-code 等 CLI harness 写进静态配置（见 `POST /api/v1/agents/{id}/provision`）；无活跃会话时回落到空会话可恢复响应。
 - **权限自动应答** `BRIDGE_PERMISSION_REPLY`：`once`（默认）只放行单次，`always` 会写入 OpenCode 的持久权限，`reject` 更保守。
 - 想要"agent 不碰本机、工具在客户端执行"，用 `orchestrator` agent（由 janus 自动生成并注入，见「工具执行模式」方式 B）。
 

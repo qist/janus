@@ -4,6 +4,110 @@
 
 ---
 
+## [未发布]
+
+### 新增
+**多账号多渠道凭据授权（刷新 / 重新授权）**：
+
+- Provider 新增 `auth_kind=workbuddy`：凭据是 WorkBuddy 明文 JSON
+  （`accessToken` / `refreshToken` / `domain` / `uid` / `enterpriseId`），
+  直连时自动补桌面身份头、强制 stream，401 用 refreshToken 续期并回写数据库。
+- 新增 `POST /api/v1/credentials/{id}/refresh`：`workbuddy` 走私有续期接口，
+  `oauth` 走标准 OAuth2 refresh_token（secret 里带 `token_url` 即可）；
+  凭据页对这两类鉴权显示「刷新授权」按钮与对应 secret 模板。
+- WorkBuddy 客户端导出 `Chat` / `Refresh` / `SetOnRefresh` / `PrepareBody` 等
+  接口，供网关复用（原渠道代码不再是被绕过的死代码）。
+
+**本地用量记账 + 分渠道聚合**：
+
+- 新增 `usage_events` 表：每次直连模型面请求落一行，记录
+  provider / credential / key / model / tokens（含缓存读写、推理）/ 成本 / 耗时 / 状态。
+- 直连透传在非流式 JSON 与流式 SSE 里都能解析 usage（OpenAI chat、
+  OpenAI responses、Anthropic messages），按模型目录价格估算成本。
+- 新增 `GET /api/v1/usage/local`（聚合）与 `GET /api/v1/usage/events`（逐条），
+  可按时间窗 / provider / credential / model 过滤。
+- 面板新增「用量」页：按渠道、凭据、模型、天聚合，与上游 console 的
+  全局账单（`/api/v1/usage`）互补。
+
+**远程分渠道用量**：
+
+- 新增 `GET /api/v1/usage/remote`：按**每份凭据**去它自己的上游账单接口
+  拉余额 / 积分，多账号多渠道各自独立，不再是一份全局数据；
+  支持 `provider_id` / `credential_id` / `refresh=1` 过滤与强制重拉。
+- `oauth` 凭据 → 各自的 OpenCode console（`billing/status` +
+  `usage/{summary,models,cost-by-day}`，secret 可用 `console_url` / `org_id`
+  覆盖）；`access_token` 过期且可续期时先自动续期再拉。
+- `workbuddy` 凭据 → 账号剩余积分 / 套餐明细（个人套餐列表 / CN 企业单周期配额）。
+- 结果按凭据做 TTL 缓存（含失败负缓存），最多 4 路并发，避免面板刷新反复打上游；
+  「用量」页新增「远程渠道用量」区块，逐凭据展示余额 / 积分 / 累计 tokens 与失败原因。
+
+**Agent 面抽象（AgentRuntime）+ 反向注入 janus provider**：
+
+- 新增 `internal/agent` 包：`AgentRuntime` 接口（`EnsureReady` / `CreateSession` /
+  `Prompt`（返回 `<-chan Event` 事件流）/ `SetModel` / `Interrupt` / `Close`）与
+  运行时注册表；harness 细节收敛到接口之后，模型面与工具面保持 harness 无关。
+- 内置两个适配器：`opencode`（薄适配现有会话桥，复用 `upstream` + EventBus 原语）
+  与 `direct`（不建会话，直接走模型面透传并把响应解析成事件流）。
+- 新增 `GET /api/v1/runtimes`：列出已注册 harness；带 `model` 时额外返回该模型的
+  路由解析结果与「会走哪个 runtime」，便于排查「为什么没直连 / 没走会话」。
+- 反向注入：开启 `opencode_provider_inject` 并配好 `opencode_provider_api_key`
+  （base URL 缺省时从监听地址推导，模型清单 `opencode_provider_models`）后，
+  janus 拉起的 OpenCode 会通过 `OPENCODE_CONFIG_CONTENT` 自动注入 janus provider，
+  OpenCode 不再持有厂商凭据（凭据只留在 janus 的 credentials 表）；
+  `POST /api/v1/agents/{id}/provision` 的配置片段与该注入共用同一份生成逻辑。
+
+**Harness 无关的接入配置（Provision）**：
+
+- `internal/agent` 新增 `Harness` 接口与 `ToolMode`（`native` / `bridge` / `none`，
+  对应 README 的 A/B/C 三种工具执行模式），把「怎么让某个 harness 用上 janus」
+  从 handler 里抽成纯函数实现。
+- 新增两个 harness 实现：
+  - `internal/channel/codex`：生成 `~/.codex/config.toml` 片段
+    （`model_providers.janus` 走 Responses API + `mcp_servers.janus` 注册工具桥），
+    模型经 `JANUS_API_KEY` 给 key，建议命令 `codex exec --json`。
+  - `internal/channel/claudecode`：生成 `.mcp.json`
+    （远程 HTTP 需显式 `"type":"http"`）与 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`。
+  - `opencode`：把 provider 注入与 orchestrator agent 收敛成同一实现，与内联注入共用。
+- `POST /api/v1/agents/{id}/provision` 改为按 `agents.kind` 分发到注册表；
+  响应新增 `tool_mode` / `files`（路径 + 内容）/ `command` / `notes`，
+  面板按 harness 分别展示配置文件、启动命令与注意事项（不再只认 opencode）。
+
+**稳定 MCP 端点（按 agent key 绑定）**：
+
+- 工具桥的 token 原先是「一次聊天会话一个」，CLI harness（codex / claude-code）
+  启动时无从预知，没法写进静态配置。新增由 agent key 派生的**确定性 token**
+  （`b` + sha256("janus-mcp:"+keyID)[:16]，见 `internal/api/mcpbind.go`）：
+  `/mcp/<bindingToken>` 解析到该 key 名下**最近活跃的会话**的工具集。
+- 每次客户端请求注册工具时都会重新绑定，因此绑定始终指向最近活跃会话；
+  会话注销时绑定一并摘除，端点回落到「空会话」可恢复响应（200，不 404）。
+- `/agents/{id}/provision` 直接把稳定地址写进 codex/CC 的 MCP 配置；
+  未绑定 agent key 的 agent 仍给 `<token>` 占位并附提示。响应另加 `mcp_url`。
+
+**CLI 驱动（codex / claude-code 子进程 + 事件流）**：
+
+- `internal/agent` 新增通用 CLI 子进程驱动 `cliproc.go`（`StartLineProc`：
+  起子进程、按行读 stdout、`Kill` / `Wait`）与通用运行时 `cliruntime.go`
+  （`CLIRuntime` 实现 `AgentRuntime`：一 Prompt 一子进程，多轮靠 harness 侧
+  会话 id + resume 续接）。harness 特有的 argv / env / 事件解析由 `CLISpec` 注入。
+- `internal/channel/codex/runtime.go`：`codex exec --json` 的 argv 与事件解析
+  （`thread.started` / `item.*` / `turn.completed|failed` / `error`），
+  续接用 `codex exec resume <thread_id>`；用 `-c model_provider="janus" ...`
+  把模型指向 janus，`-c mcp_servers.<name>.url=...` 注册工具桥。
+- `internal/channel/claudecode/runtime.go`：`claude -p --output-format stream-json
+  --verbose` 的 argv 与事件解析（`system/init`、`assistant`、`user` 的
+  `tool_result`、`result`），续接用 `--resume <session_id>`；
+  经 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 指向 janus，`--mcp-config`
+  内联注册 MCP（显式 `"type":"http"`）。
+- 新增 `POST /api/v1/runtimes/{name}/prompt`（admin）：驱动指定 harness 跑一轮，
+  事件按 SSE 回放（`stream=false` 则收齐后一次返回）。body 可选
+  `session_key`（复用它即续接）、`directory` / `model` / `api_key` / `mcp_url`。
+- `GET /api/v1/runtimes` 现在也会列出 `codex` / `claude-code`；
+  可执行文件名由设置项 `codex_bin` / `claude_bin` 覆盖（默认同名）。
+- 说明：IDE 请求路径（`/v1/chat/completions` 等）目前仍走 opencode / direct
+  runtime，CLI 型 harness 走上面的 runtime 端点；两条链路合一见 `docs/REFACTOR.md`。
+
+---
+
 ## [v0.3.55] - 2026-10-16
 
 ### 新增

@@ -540,6 +540,39 @@ hash 路由（`#/providers`），无需服务端 rewrite。`GET /ui/*` 提供静
 
 P2 完成即可删除：`accounts`/`account_models` 表、`auth switch` 调用、`workbuddy` 反向注入、`inlineconfig.go` 里的 provider 拼装。
 
+> **P2 进度（未完全）**：`AgentRuntime` 接口与注册表（`internal/agent`）、
+> `opencode` / `direct` 两个适配器、`GET /api/v1/runtimes`、反向注入 janus provider
+> （`opencode_provider_inject`，`inlineconfig.go` 统一生成）已落地；`accounts` /
+> `account_models` / `auth switch` 在 P1 已删除。
+> **仍待做**：把 `internal/api/chat.go` 的会话/流式/工具/权限逻辑物理搬进
+> `internal/agent/opencode`（当前 opencode 适配器是薄适配，复用 `upstream` + EventBus，
+> 未搬迁），以及把反向注入从「可选开关」变成默认路径。
+
+> **harness 接入层（Provision，新增）**：`AgentRuntime` 只解决「怎么驱动一个已在跑的
+> harness」，但「怎么让任意 harness 用上 janus（模型 provider + MCP 注册）」原先硬编码在
+> `handleProvisionAgent` 里、只认 opencode。现抽出 `agent.Harness` 接口 +
+> `agent.ToolMode`（`native`/`bridge`/`none`，即旧 README 的 A/B/C 三模式），
+> 由 `internal/channel/{opencode,codex,claudecode}` 各自实现，`/agents/{id}/provision`
+> 按 `kind` 分发。
+>
+> **仍待做（按优先级）**：
+> 1. ~~**稳定 MCP 端点**~~ **已做**：`/mcp/<bindingToken>`，token 由 agent key
+>    确定性派生（`b`+sha256("janus-mcp:"+keyID)[:16]），解析到该 key 名下最近活跃
+>    的会话；provision 已把真实地址写进 codex/CC 的配置。
+> 2. **工具来源**：模式 B 现在只能消费「客户端在请求里声明的 tools」。CLI harness
+>    独立运行时无人声明 → 需要「janus 侧按项目声明的工具目录」作为回退。
+> 3. ~~**CLI 型 harness 驱动**~~ **已做（核心链路）**：`internal/agent/cliproc.go`
+>    （通用子进程驱动：按行读 stdout、`Kill`/`Wait`）+ `internal/agent/cliruntime.go`
+>    （通用 `CLIRuntime`：一 Prompt 一子进程，多轮靠 harness 会话 id + resume），
+>    `internal/channel/{codex,claudecode}/runtime.go` 提供各自的 argv / env /
+>    事件解析（codex `exec --json` + `exec resume`；claude `-p --output-format
+>    stream-json` + `--resume`）。`GET /api/v1/runtimes` 已列出二者，
+>    `POST /api/v1/runtimes/{name}/prompt` 可直接驱动一轮并按 SSE 回放事件。
+>    **仍待做**：把 CLI runtime 接进 IDE 请求路径（`/v1/chat/completions` 等）——
+>    `chat.go` 的会话路径目前与 OpenCode（`up` + EventBus）深度耦合，需要先把
+>    「事件来源」抽象成「来自 EventBus 还是来自 runtime 的事件流」，CLI harness
+>    才能真正与 opencode/direct 平级。
+
 ---
 
 ## 7. 待确认

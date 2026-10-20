@@ -37,6 +37,16 @@ type Conversation struct {
 	agent     string
 	model     upstream.OCModelRef
 	directory string
+	// runtime 是本会话绑定的 harness 名（空=尚未确定，沿用请求选中的那个）。
+	// 与 opencode 的 sessionID 不同，CLI 型的会话状态在子进程/runtime 内，
+	// 只有绑定同一个 runtime 才能续接；换 harness 必须先 reset。
+	runtime string
+	// CLI 会话的模型面回调凭据（会话级临时 agent key）。
+	// 只在持 conv.mu 的请求路径上读写；cliKeyRelease 在 reset 时撤销。
+	cliKey        string
+	cliKeyExpires time.Time
+	cliBaseURL    string
+	cliKeyRelease func()
 	// 出向路径改写（远程 mode B：工作区目录 → 客户端项目路径）。
 	// 只在持 conv.mu 的请求路径上读写（与上面三个字段同一约定）。
 	rewriteFrom string
@@ -205,6 +215,7 @@ func (s *Store) restoreLocked(c *Conversation, incoming []ChatMessage) {
 	c.model = upstream.OCModelRef{ProviderID: row.ProviderID, ID: row.ModelID, Variant: row.Variant}
 	c.agent = row.Agent
 	c.directory = row.Directory
+	c.runtime = row.Runtime
 	if len(msgs) > 0 {
 		c.setLast(msgs)
 	}

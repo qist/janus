@@ -39,6 +39,10 @@ type Conversation struct {
 	AgentID    string `gorm:"size:64"`
 	Credential string `gorm:"size:64"`
 	Directory  string `gorm:"size:512"`
+	// Runtime 是本会话使用的 harness（opencode / direct / codex / claude-code）。
+	// 跨进程重启后仍按原 harness 分流，避免把 OpenCode 的 sessionID 交给 CLI
+	// 子进程（反之亦然）导致上下文断裂。
+	Runtime string `gorm:"size:40"`
 	// History 是 Chat 的规范化历史快照（[]ChatMessage 的 JSON），
 	// 用于跨进程重启后仍能做历史前缀匹配、只发增量。
 	History   []byte

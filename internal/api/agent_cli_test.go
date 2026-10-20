@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"janus/internal/agent"
 	"janus/internal/config"
 	"janus/internal/logx"
 )
@@ -156,6 +158,191 @@ func TestRuntimePromptErrors(t *testing.T) {
 	missing.handleRuntimePrompt(rec, runtimePromptReq(`{"prompt":"hi"}`, "codex"))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("二进制缺失应 503，得到 %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// newCLIIdeServer 构造一个可走 IDE 请求路径（/v1/chat/completions）的 CLI 环境。
+// 上游 OpenCode 只用于探活（CLI 路径不查它的模型目录）。
+func newCLIIdeServer(t *testing.T, bin string) *Server {
+	t.Helper()
+	stub := stubUpstream(t)
+	cfg := config.Config{
+		Upstream: stub.URL, Username: "o", Password: "p",
+		Directory: t.TempDir(), APIKey: "sk-test", ConsoleURL: stub.URL,
+		MaxBodyBytes: 1 << 20, ToolAnnotations: false,
+		RequestTimeout:    10 * time.Second,
+		ReconcileInterval: 200 * time.Millisecond,
+		CodexBin:          bin,
+		ClaudeBin:         bin,
+	}
+	return NewServer(cfg, logx.NewLogger("error"))
+}
+
+// IDE 请求路径走 CLI harness：X-Janus-Runtime 显式选择 codex 时，
+// /v1/chat/completions 应起子进程、把事件流回放成 OpenAI 响应，
+// 并把模型名交给 CLI（而不是去查 OpenCode 模型目录）。
+func TestChatCompletionsWithCLIRuntime(t *testing.T) {
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	srv := newCLIIdeServer(t, fakeCodex(t, argvLog))
+
+	body := `{"model":"vendor/cheap","stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Janus-Runtime", "codex")
+	req.Header.Set("X-Session-ID", "cli-ide")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content != "hello from codex" {
+		t.Fatalf("content = %+v (body=%s)", resp.Choices, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Janus-Runtime"); got != "codex" {
+		t.Fatalf("X-Janus-Runtime = %q, want codex", got)
+	}
+	raw, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("argv log: %v", err)
+	}
+	argv := string(raw)
+	if !strings.Contains(argv, "vendor/cheap") {
+		t.Fatalf("CLI 未收到解析后的模型名：\n%s", argv)
+	}
+	if !strings.Contains(argv, "exec") {
+		t.Fatalf("argv 不是 codex exec 形态：\n%s", argv)
+	}
+}
+
+// 同一个会话键的第二轮应走 harness 的 resume，而不是重开新线程。
+func TestChatCompletionsCLIResumesSession(t *testing.T) {
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	srv := newCLIIdeServer(t, fakeCodex(t, argvLog))
+
+	turns := []string{
+		`{"model":"vendor/cheap","stream":false,"messages":[{"role":"user","content":"first"}]}`,
+		`{"model":"vendor/cheap","stream":false,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"hello from codex"},{"role":"user","content":"second"}]}`,
+	}
+	for i, body := range turns {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer sk-test")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Janus-Runtime", "codex")
+		req.Header.Set("X-Session-ID", "cli-resume")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("第 %d 轮 status = %d, body = %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	raw, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := string(raw)
+	if strings.Count(joined, "\nresume\n") != 1 || !strings.Contains(joined, "th-1") {
+		t.Fatalf("第二轮应 resume th-1，argv 日志：\n%s", joined)
+	}
+}
+
+// 上一轮被放弃（客户端断连/超时）后，旧子进程可能还停在旧回合上。
+// 新一轮必须先清掉它再订阅：既不能撞上 "already has a running turn"，
+// 也不能把旧进程的收尾事件当成本轮结果。
+func TestChatCompletionsCLIAbandonsStaleTurn(t *testing.T) {
+	dir := t.TempDir()
+	argvLog := filepath.Join(dir, "argv.log")
+	ready := filepath.Join(dir, "ready")
+	bin := filepath.Join(dir, "codex")
+	// 第一次调用：只报 thread.started 就长期挂起（模拟停在工具调用上的一轮）；
+	// 第二次调用：正常吐一条回答。ready 文件标记「第一轮已经挂住」。
+	body := "#!/bin/sh\n" +
+		`printf '%s\n' "$@" >> ` + argvLog + "\n" +
+		`if [ -f ` + ready + ` ]; then` + "\n" +
+		`  printf '%s\n' '{"type":"thread.started","thread_id":"th-1"}'` + "\n" +
+		`  printf '%s\n' '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"fresh turn"}}'` + "\n" +
+		`  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'` + "\n" +
+		`  exit 0` + "\n" +
+		`fi` + "\n" +
+		`touch ` + ready + "\n" +
+		`printf '%s\n' '{"type":"thread.started","thread_id":"th-1"}'` + "\n" +
+		`exec sleep 60` + "\n"
+	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newCLIIdeServer(t, bin)
+	rt := srv.cliRuntimeByName("codex")
+	ctx := context.Background()
+	sid := "stale-sid"
+	if _, err := rt.CreateSession(ctx, agent.SessionSpec{Key: sid, Directory: dir, Model: "vendor/cheap"}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := rt.Start(ctx, sid, agent.PromptReq{
+		Model:    "vendor/cheap",
+		Messages: []agent.Message{{Role: "user", Content: "old"}},
+	}); err != nil {
+		t.Fatalf("start stale turn: %v", err)
+	}
+	// 等到旧进程真的报出 thread_id 且还活着。
+	deadline := time.Now().Add(5 * time.Second)
+	for rt.HarnessID(sid) == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("stale turn 未报出 harness id")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 模拟「上一轮已经返回、进程仍在跑」的会话：会话里记着旧 sid。
+	conv := srv.store.Acquire("x:cli-stale", nil)
+	conv.setSessionID(sid)
+	conv.runtime = "codex"
+	srv.store.Release(conv)
+
+	reqBody := `{"model":"vendor/cheap","stream":false,"messages":[{"role":"user","content":"new"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Janus-Runtime", "codex")
+	req.Header.Set("X-Session-ID", "cli-stale")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content != "fresh turn" {
+		t.Fatalf("content = %+v (body=%s)", resp.Choices, rec.Body.String())
+	}
+	// 旧线程已学到，新一轮应续接它而不是重开。
+	raw, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := string(raw); !strings.Contains(joined, "\nresume\nth-1") {
+		t.Fatalf("新一轮应 resume 旧线程，argv 日志：\n%s", joined)
 	}
 }
 

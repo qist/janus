@@ -573,10 +573,25 @@ P2 完成即可删除：`accounts`/`account_models` 表、`auth switch` 调用�
 >    `POST /api/v1/runtimes/{name}/prompt` 可直接驱动一轮并按 SSE 回放事件。
 >    ~~**事件来源抽象**~~ **已做**：`internal/api/turn.go` 引入 `turnDriver` /
 >    `turnSession`，`chat.go` 的 executor 只消费 `agent.Event`，不再直接碰
->    `upstream.Upstream` + EventBus；`opencodeTurnSession` 是当前唯一实现，行为与
->    原路径一致。**仍待做**：CLI runtime 尚未接进 `/v1/chat/completions`——除事件流
->    外还差对账（`ListMessages` 无对应物）、会话状态（`GetSession` / `WaitUntilIdle`）
->    与 tool bridge 生命周期；MCP 绑定已改为确定性解析（见上）。
+>    `upstream.Upstream` + EventBus。
+>    ~~**CLI 接进 IDE 请求路径**~~ **已做**：`internal/api/cli_turn.go` 提供
+>    `cliTurnDriver` / `cliTurnSession`，`/v1/chat/completions`、`/v1/responses`、
+>    `/v1/messages` 均可用 `X-Janus-Runtime: codex|claude-code` 显式选择 CLI
+>    harness；不带该头时行为不变（agent key / `agent=direct` → direct，其余 →
+>    opencode）。三处缺口按下面的方式补齐：
+>
+>    | 缺口 | 处理 |
+>    |---|---|
+>    | 对账（无 `ListMessages`） | `Reconcile` 返回 false、`ReconcileSupported` 为 false，收尾不再退避重试；事件流是唯一真相 |
+>    | 会话状态 / 空闲（无 `GetSession` / `WaitUntilIdle`） | `State` 恒 false、`WaitIdle` 只等 ctx；收尾由 `EventDone` 驱动 |
+>    | 工具桥生命周期 | MCP 地址写进子进程 argv/env（`ensureCLITools` 复用 `prepareToolSession`），不走 `s.up.AddMCP`；超时中断换成 `rt.Interrupt`（杀子进程） |
+>
+>    跨请求续流依赖 `CLIRuntime` 的会话级 `eventHub`：子进程事件始终广播，订阅者
+>    每请求一个、来去自由；`Cancel` 只解绑订阅，不杀进程（工具调用回合要停在
+>    MCP `tools/call` 上等下一次请求回填）。新一轮开始前 `PrepareTurn` 清理被
+>    放弃的旧进程，避免撞上 `already has a running turn` 或把旧收尾事件混进
+>    新订阅。**仍待做**：`tool source` 回退目录（见上第 2 条）仍只对 opencode
+>    生效；CLI 独立运行（无客户端 `tools` 声明）时暂无 janus 侧工具目录。
 
 ---
 

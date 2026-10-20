@@ -407,6 +407,11 @@ func (e *executor) reconcile(ctx context.Context, promptAt int64) bool {
 // reconcileTerminal 在收尾时对账：终态事件（succeeded / idle）有时早于
 // assistant 消息落库，若首次没看到消息就短退避重试，避免把"有输出"误判成空回复。
 func (e *executor) reconcileTerminal(ctx context.Context, promptAt int64) {
+	if !e.turn.ReconcileSupported() {
+		// CLI 型 runtime 没有独立的消息接口：事件流已经给出全部正文，
+		// 再等 5 秒只会让每轮收尾都凭空多一次退避。
+		return
+	}
 	if e.reconcile(ctx, promptAt) {
 		return
 	}
@@ -710,38 +715,52 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 本请求选中的 harness：显式 X-Janus-Runtime 优先，其次沿用原判定
+	//（agent key / agent=direct → direct，其余 → opencode）。
+	// CLI 型（codex / claude-code）在这里就确定下来，后续模型解析不再依赖
+	// OpenCode 的模型目录。
+	rr := s.runtimeForRequest(r, p, gateway.ProtocolOpenAIChat, req.Model)
+
 	// 模型面直连：agent key（harness 自己跑工具循环）或显式 agent=direct。
 	// 只换 model 字段后原样转发，不建上游会话。
-	// 由 Agent 面 runtime 注册表选择（见 agent_registry.go）：direct 才直连。
-	if rt := s.agentRuntimeFor(r, p); rt != nil && rt.Name() == agent.NameDirect {
+	if rr.rt != nil && rr.rt.Name() == agent.NameDirect {
 		if s.proxyModel(w, r, p, gateway.ProtocolOpenAIChat, body, openAIFail(w)) {
 			return
 		}
 	}
 
 	// ---- 模型解析 ----
-	ocModels, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
-	if err != nil {
-		st, typ, msg := s.mapUpstreamError(err)
-		writeOpenAIError(w, st, typ, msg, "")
-		return
-	}
-	ref, err := s.resolveModel(r.Context(), req.Model, ocModels)
-	if err != nil {
-		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
-		return
-	}
+	var ocModels []upstream.OCModel
+	var ref upstream.OCModelRef
+	if rr.scene != nil {
+		// CLI 型不查 OpenCode 模型目录：模型只用于回调 janus 时路由，
+		// 由 routeDirect 归一（失败再按 provider/model 拆分）。
+		ref = rr.scene.ref
+		s.log.Debugf("cli request: client model=%q → %s (runtime=%s)", req.Model, ref.String(), rr.rt.Name())
+	} else {
+		ocModels, err = s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
+		if err != nil {
+			st, typ, msg := s.mapUpstreamError(err)
+			writeOpenAIError(w, st, typ, msg, "")
+			return
+		}
+		ref, err = s.resolveModel(r.Context(), req.Model, ocModels)
+		if err != nil {
+			writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
+			return
+		}
 
-	// 思考强度：标准字段 reasoning_effort → 上游 model variant。
-	// 若客户端已经在 model 串里写了 ":variant"，以它为准（更具体）。
-	if ref.Variant == "" && strings.TrimSpace(req.ReasoningEffort) != "" {
-		if m := modelx.Find(ocModels, ref); m != nil {
-			if v, ok := modelx.PickVariant(*m, req.ReasoningEffort); ok {
-				ref.Variant = v
-			} else {
-				// 模型没有可选思考档位时忽略 effort 是预期行为，降为 DEBUG 免刷屏
-				s.log.Debugf("model %s has no reasoning variant for effort %q (available: %v); ignoring",
-					ref.ProviderID+"/"+ref.ID, req.ReasoningEffort, modelx.VariantIDs(*m))
+		// 思考强度：标准字段 reasoning_effort → 上游 model variant。
+		// 若客户端已经在 model 串里写了 ":variant"，以它为准（更具体）。
+		if ref.Variant == "" && strings.TrimSpace(req.ReasoningEffort) != "" {
+			if m := modelx.Find(ocModels, ref); m != nil {
+				if v, ok := modelx.PickVariant(*m, req.ReasoningEffort); ok {
+					ref.Variant = v
+				} else {
+					// 模型没有可选思考档位时忽略 effort 是预期行为，降为 DEBUG 免刷屏
+					s.log.Debugf("model %s has no reasoning variant for effort %q (available: %v); ignoring",
+						ref.ProviderID+"/"+ref.ID, req.ReasoningEffort, modelx.VariantIDs(*m))
+				}
 			}
 		}
 	}
@@ -760,6 +779,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 不会阻塞在在飞会话的会话锁上；跨设备同话题仍共享同一会话（前缀命中复用）。
 	conv := s.store.Acquire(key, req.Messages)
 	defer s.store.Release(conv)
+
+	// 会话绑定的 harness 与本次请求不一致时先重置：两套会话 id 不能互换。
+	s.alignRuntime(conv, rr.rt)
 
 	// 出向路径改写：远程 mode B 下把回答里的工作区路径改写回客户端项目路径。
 	s.setPathRewrite(conv, dir, r.Header.Get("X-OpenCode-Directory"), req.Messages)
@@ -780,6 +802,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if conv.snapshotTerminated() {
 		wasTerminated = true
 		s.consumeTerminated(conv)
+	}
+
+	// 从库里恢复的 CLI 会话：进程重启后 harness 侧线程已随子进程消失，
+	// 必须重置并全量重放历史，否则模型只看到增量、上下文断裂。
+	if rr.cli != nil && s.cliRestoredSessionLost(conv, rr.cli) {
+		s.log.Warnf("db-restored cli session %s is gone (runtime=%s key=%s); recreating",
+			conv.snapshotSessionID(), rr.rt.Name(), conv.Key)
+		s.resetSession(conv)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
@@ -810,7 +840,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			conv.setLast(cloneMessages(req.Messages))
 			s.persistConv(conv)
 			sid := conv.snapshotSessionID()
-			ts := s.turnDriver().Subscribe(ctx, sid)
+			ts := s.turnDriverFor(rr.rt, rr.scene).Subscribe(ctx, sid)
 			defer ts.Cancel()
 
 			// 先订阅再回填，避免漏掉 agent 继续执行时的开头增量
@@ -846,7 +876,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.ToolCalling {
 		switch {
 		case len(req.Tools) > 0:
-			if err := s.ensureTools(ctx, conv, dir, req.Tools, MCPBindingToken(p.Key.ID)); err != nil {
+			if err := s.prepareTools(ctx, conv, rr.rt, dir, req.Tools, MCPBindingToken(p.Key.ID)); err != nil {
 				// 客户端明确声明了 tools 却注册不上：必须让它知道。
 				// 静默降级成"无工具"更糟 —— 模型会凭自己的能力硬答，
 				// 客户端却以为工具可用（实测上游对某些 directory 会 500）。
@@ -892,7 +922,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ---- 会话就绪 ----
-	newSession, err := s.ensureSession(ctx, conv, ref, agent, dir, req.Messages)
+	newSession, err := s.ensureRuntimeSession(ctx, conv, rr, ref, agent, dir, req.Messages)
 	if err != nil {
 		st, typ, msg := s.mapUpstreamError(err)
 		writeOpenAIError(w, st, typ, msg, "")
@@ -911,8 +941,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 图片：data URI 直传，http(s) 下载转 base64。失败的 URL 以文字说明补进 prompt，
 	// 免得模型以为用户根本没发图（实测会出现"未看到图片"这种误导性回答）。
 	files, failed := attach.Extract(ctx, delta, s.httpc)
-	// 模型不支持该模态就别硬塞（例如纯文本模型收到图片）：丢弃并说明。
-	if m := modelx.Find(ocModels, ref); len(files) > 0 {
+	if rr.scene != nil {
+		// CLI 型 v1 不支持附件：把附件降级成文字说明，别让模型以为用户没发图。
+		for _, f := range files {
+			failed = append(failed, f.Name)
+		}
+		files = nil
+	} else if m := modelx.Find(ocModels, ref); len(files) > 0 {
 		var dropped []upstream.OCFileAttach
 		files, dropped = attach.FilterByModel(files, m)
 		for _, f := range dropped {
@@ -929,7 +964,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	sid := conv.snapshotSessionID()
 	setSessionHeaders(w, conv)
-	drv := s.turnDriver()
+	drv := s.turnDriverFor(rr.rt, rr.scene)
+	// 上一轮被放弃时子进程可能还在跑：先清理，再订阅本轮事件流。
+	drv.PrepareTurn(ctx, sid)
 	ts := drv.Subscribe(ctx, sid)
 	defer ts.Cancel()
 
@@ -1160,11 +1197,22 @@ func (s *Server) consumeTerminated(conv *Conversation) {
 func (s *Server) resetSession(conv *Conversation) {
 	old := conv.snapshotSessionID()
 	oldMCP := conv.mcpName
+	oldRuntime := conv.runtime
 	conv.setSessionID("")
 	conv.clearLast()
 	conv.setResponse(nil)
 	conv.model = upstream.OCModelRef{}
 	conv.agent = ""
+	// 恢复标记也一并清掉：会话已经重建，不能再按「库里恢复的」去探活。
+	conv.restoredFromDB.Store(false)
+	// 撤销 CLI 回调用的临时 key：旧子进程属于被丢弃的会话，不应再能调模型面。
+	if conv.cliKeyRelease != nil {
+		conv.cliKeyRelease()
+	}
+	conv.cliKey = ""
+	conv.cliKeyExpires = time.Time{}
+	conv.cliBaseURL = ""
+	conv.cliKeyRelease = nil
 	// 重开会话意味着 agent 状态全丢，挂起的工具调用也必须作废，
 	if conv.mcpName != "" {
 		conv.mcpName = ""
@@ -1177,7 +1225,8 @@ func (s *Server) resetSession(conv *Conversation) {
 	// 立刻把旧 MCP server 从上游删掉：OpenCode 会把同 location 的所有 MCP
 	// server 暴露给每个 session，残留的旧 server 会被 agent 调用并得到
 	// "stale (session was reset)"。以前只靠 janitor 兜底，中间有空窗。
-	if oldMCP != "" {
+	// CLI 型的 MCP 配置在 argv/env 里，没有上游注册可删。
+	if oldMCP != "" && !s.isCLIRuntime(oldRuntime) {
 		dir := conv.directory
 		if dir == "" {
 			dir = s.cfg.Directory
@@ -1193,6 +1242,18 @@ func (s *Server) resetSession(conv *Conversation) {
 		}(oldMCP)
 	}
 	if old == "" {
+		return
+	}
+	// CLI 型：丢弃 harness 侧会话 id，下一轮必须开真正的新会话而不是 resume。
+	if rt := s.cliRuntimeByName(oldRuntime); rt != nil {
+		s.log.Infof("history reset, dropping cli session %s (runtime=%s key=%s)", old, rt.Name(), conv.Key)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := rt.RemoveSession(ctx, old); err != nil {
+				s.log.Debugf("remove stale cli session %s: %v", old, err)
+			}
+		}()
 		return
 	}
 	s.log.Infof("history reset, dropping session %s (key=%s)", old, conv.Key)

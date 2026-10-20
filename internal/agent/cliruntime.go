@@ -23,6 +23,13 @@ import (
 // 与 opencode 型 runtime 的差别：opencode 是一个常驻 server（janus 通过 HTTP
 // 驱动、事件走 EventBus 广播）；CLI 型是「一 Prompt 一进程」，事件直接从
 // 子进程 stdout 来。
+//
+// 事件为什么不是「Prompt 返回的通道」独占：
+//
+//	工具调用回合里，子进程会停在 MCP tools/call 上等客户端回填结果；本轮 HTTP
+//	请求必须先带着 tool_calls 返回，等下一次请求再把结果喂回去。若事件通道随
+//	第一次请求结束关闭，续流时的增量就全丢了。因此每个会话有一个 eventHub：
+//	子进程输出始终往 hub 广播，订阅者（每次 HTTP 请求一个）来去自由。
 
 // SessionConfig 是 CLI harness 跑一轮所需的配置。
 type SessionConfig struct {
@@ -68,7 +75,8 @@ type CLIRuntime struct {
 
 type cliSession struct {
 	cfg       SessionConfig
-	harnessID string // harness 侧会话 id，首轮之后才会有
+	harnessID string    // harness 侧会话 id，首轮之后才会有
+	hub       *eventHub // 本会话的事件广播；进程结束即关闭
 }
 
 // NewCLIRuntime 用 spec 建一个 CLI runtime。
@@ -130,18 +138,47 @@ func (r *CLIRuntime) CreateSession(_ context.Context, spec SessionSpec) (string,
 	return id, nil
 }
 
-// Prompt 起一个子进程跑这一轮，返回事件流。
+// Subscribe 订阅当前会话的事件流（可先于 Prompt 调用）。
 //
-// req.Tools 被忽略：CLI harness 的工具经 janus 的 MCP 端点下发（哪里声明 tools
-// 由调用方决定），不走 argv。
-func (r *CLIRuntime) Prompt(ctx context.Context, sid string, req PromptReq) (<-chan Event, error) {
+// 返回的 cancel 只取消本次订阅，不影响子进程；进程结束或 hub 关闭时通道
+// 自动关闭并排空已产生的事件。会话不存在时返回一个已关闭的通道。
+func (r *CLIRuntime) Subscribe(sid string) (<-chan Event, func()) {
 	r.mu.Lock()
 	s := r.sessions[sid]
-	r.mu.Unlock()
 	if s == nil {
-		return nil, fmt.Errorf("cli: unknown session %q", sid)
+		r.mu.Unlock()
+		ch := make(chan Event)
+		close(ch)
+		return ch, func() {}
 	}
+	if s.hub == nil || s.hub.isClosed() {
+		s.hub = newEventHub()
+	}
+	hub := s.hub
+	r.mu.Unlock()
+	return hub.subscribe()
+}
+
+// Start 启动一轮子进程，事件通过会话 hub 广播（调用前应已 Subscribe）。
+func (r *CLIRuntime) Start(ctx context.Context, sid string, req PromptReq) error {
+	r.mu.Lock()
+	s := r.sessions[sid]
+	if s == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("cli: unknown session %q", sid)
+	}
+	if r.running[sid] != nil {
+		r.mu.Unlock()
+		return fmt.Errorf("cli: session %q already has a running turn", sid)
+	}
+	if s.hub == nil || s.hub.isClosed() {
+		s.hub = newEventHub()
+	}
+	hub := s.hub
 	cfg := s.cfg
+	harnessID := s.harnessID
+	r.mu.Unlock()
+
 	if m := strings.TrimSpace(req.Model); m != "" {
 		cfg.Model = m
 	}
@@ -150,12 +187,12 @@ func (r *CLIRuntime) Prompt(ctx context.Context, sid string, req PromptReq) (<-c
 		prompt = strings.TrimSpace(req.System)
 	}
 	if prompt == "" {
-		return nil, errors.New("cli: empty prompt")
+		return errors.New("cli: empty prompt")
 	}
 
 	var args []string
-	if s.harnessID != "" {
-		args = r.spec.ArgsResume(cfg, s.harnessID, prompt)
+	if harnessID != "" {
+		args = r.spec.ArgsResume(cfg, harnessID, prompt)
 	} else {
 		args = r.spec.ArgsNew(cfg, prompt)
 	}
@@ -171,52 +208,64 @@ func (r *CLIRuntime) Prompt(ctx context.Context, sid string, req PromptReq) (<-c
 		Env:  env,
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	r.mu.Lock()
 	r.running[sid] = proc
 	r.mu.Unlock()
 
-	out := make(chan Event, 64)
-	go func() {
-		defer close(out)
-		defer r.clearRunning(sid, proc)
+	go r.pump(ctx, sid, proc, hub)
+	return nil
+}
 
-		var harnessID string
-		for line := range proc.Lines() {
-			evs, id := r.spec.Parse(line)
-			if id != "" {
-				harnessID = id
-			}
-			for _, e := range evs {
-				if !sendEvent(ctx, out, e) {
-					go drain(proc) // 消费方不读了：排空 stdout 让扫描协程能退出
-					return
-				}
-			}
+// Prompt 起一个子进程跑这一轮，返回事件流。
+//
+// 兼容旧调用方：先订阅再启动，返回的通道就是本次订阅。需要「跨请求续流」的
+// 调用方应改用 Subscribe + Start（见 api 层的 turnDriver）。
+func (r *CLIRuntime) Prompt(ctx context.Context, sid string, req PromptReq) (<-chan Event, error) {
+	ch, _ := r.Subscribe(sid)
+	if err := r.Start(ctx, sid, req); err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// pump 消费子进程输出并广播到 hub，最后补一条 EventDone 并关闭 hub。
+func (r *CLIRuntime) pump(ctx context.Context, sid string, proc *LineProc, hub *eventHub) {
+	defer r.clearRunning(sid, proc)
+	defer hub.close()
+
+	for line := range proc.Lines() {
+		evs, id := r.spec.Parse(line)
+		if id != "" {
+			// 当场记住：进程可能在 turn.completed 前被打断（工具调用等待、
+			// 客户端断连），等到收尾才记会让下一轮丢掉可续接的 harness 会话。
+			r.setHarnessID(sid, id)
 		}
-		// 收尾。被打断时不等进程收尸：孙进程可能占着 stderr 管道，cmd.Wait
-		// 会被 WaitDelay 拖住，而打断场景本来也不关心退出码。
-		if harnessID != "" {
-			r.setHarnessID(sid, harnessID)
-		}
-		finish := "stop"
-		switch {
-		case ctx.Err() != nil, proc.Killed():
-			finish = "interrupted"
-		default:
-			if werr := proc.Wait(); werr != nil {
-				msg := strings.TrimSpace(proc.Stderr())
-				if msg == "" {
-					msg = werr.Error()
-				}
-				sendEvent(ctx, out, Event{Type: EventError, Error: msg})
-				finish = "error"
+		for _, e := range evs {
+			if e.At == 0 {
+				e.At = time.Now().UnixMilli()
 			}
+			hub.publish(e)
 		}
-		sendEvent(ctx, out, Event{Type: EventDone, Finish: finish})
-	}()
-	return out, nil
+	}
+	// 收尾。被打断时不等进程收尸：孙进程可能占着 stderr 管道，cmd.Wait
+	// 会被 WaitDelay 拖住，而打断场景本来也不关心退出码。
+	finish := "stop"
+	switch {
+	case ctx.Err() != nil, proc.Killed():
+		finish = "interrupted"
+	default:
+		if werr := proc.Wait(); werr != nil {
+			msg := strings.TrimSpace(proc.Stderr())
+			if msg == "" {
+				msg = werr.Error()
+			}
+			hub.publish(Event{Type: EventError, Error: msg, At: time.Now().UnixMilli()})
+			finish = "error"
+		}
+	}
+	hub.publish(Event{Type: EventDone, Finish: finish, At: time.Now().UnixMilli()})
 }
 
 // SetModel 只影响后续轮次（进程一轮一换，无持久状态）。
@@ -238,6 +287,60 @@ func (r *CLIRuntime) Interrupt(_ context.Context, sid string) error {
 	r.mu.Unlock()
 	if proc != nil {
 		proc.Kill()
+	}
+	return nil
+}
+
+// AbandonTurn 结束该会话上可能仍在跑的上一轮，并等它的事件流收尾。
+//
+// 用于「客户端放弃了上一轮」：断连/超时后子进程可能还停在旧回合上（工具
+// 调用等待中尤其常见）。下一轮必须在 Subscribe 之前调用它 —— 旧进程的
+// 收尾事件（EventDone interrupted）要留给旧订阅者，不能先进新订阅。
+//
+// 返回值只表示「清理已尽力」：ctx 到期时也返回，让调用方继续尝试开新轮，
+// 真正的互斥仍由 Start 的 running 检查兜底。
+func (r *CLIRuntime) AbandonTurn(ctx context.Context, sid string) {
+	r.mu.Lock()
+	proc := r.running[sid]
+	r.mu.Unlock()
+	if proc == nil {
+		return
+	}
+	proc.Kill()
+	t := time.NewTicker(10 * time.Millisecond)
+	defer t.Stop()
+	for {
+		// pump 的 defer 顺序保证：clearRunning 晚于 hub.close，
+		// 所以这里看不到 running 时，旧 hub 一定已经关闭。
+		r.mu.Lock()
+		still := r.running[sid] == proc
+		r.mu.Unlock()
+		if !still {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// RemoveSession 丢弃会话状态（包括已学到的 harness 侧会话 id）。
+//
+// 用于「历史重置」：下一轮必须开一个真正的新会话，而不是 resume 旧线程。
+func (r *CLIRuntime) RemoveSession(_ context.Context, sid string) error {
+	r.mu.Lock()
+	proc := r.running[sid]
+	s := r.sessions[sid]
+	delete(r.sessions, sid)
+	delete(r.running, sid)
+	r.mu.Unlock()
+	if proc != nil {
+		proc.Kill()
+	}
+	if s != nil && s.hub != nil {
+		s.hub.close()
 	}
 	return nil
 }
@@ -283,25 +386,157 @@ func (r *CLIRuntime) clearRunning(sid string, proc *LineProc) {
 	r.mu.Unlock()
 }
 
-// sendEvent 送一个事件；ctx 已取消时返回 false。
-func sendEvent(ctx context.Context, out chan<- Event, e Event) bool {
-	select {
-	case out <- e:
-		return true
-	default:
+// ---------- 事件广播 ----------
+
+// eventHub 把一条子进程事件流广播给任意数量的订阅者。
+//
+// 不做「最近事件缓存」：需要续流的场景（工具调用）里子进程正停在 MCP
+// tools/call 上，订阅空档期不会产生事件；缓存历史反而会让下一次请求重放旧正文。
+type eventHub struct {
+	mu     sync.Mutex
+	subs   map[*eventSub]struct{}
+	closed bool
+}
+
+func newEventHub() *eventHub {
+	return &eventHub{subs: map[*eventSub]struct{}{}}
+}
+
+func (h *eventHub) isClosed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
+}
+
+func (h *eventHub) subscribe() (<-chan Event, func()) {
+	sub := newEventSub(h)
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		sub.finish()
+		return sub.out, func() {}
 	}
-	select {
-	case out <- e:
-		return true
-	case <-ctx.Done():
-		return false
+	h.subs[sub] = struct{}{}
+	h.mu.Unlock()
+	go sub.run()
+	return sub.out, sub.cancel
+}
+
+func (h *eventHub) publish(e Event) {
+	h.mu.Lock()
+	subs := make([]*eventSub, 0, len(h.subs))
+	for s := range h.subs {
+		subs = append(subs, s)
+	}
+	h.mu.Unlock()
+	for _, s := range subs {
+		s.push(e)
 	}
 }
 
-// drain 排空一个 LineProc 的输出（消费方提前退出时用）。
-func drain(p *LineProc) {
-	for range p.Lines() {
+// close 表示「不会再有事件」：订阅者排空队列后关闭通道。
+func (h *eventHub) close() {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
 	}
+	h.closed = true
+	subs := make([]*eventSub, 0, len(h.subs))
+	for s := range h.subs {
+		subs = append(subs, s)
+	}
+	h.subs = nil
+	h.mu.Unlock()
+	for _, s := range subs {
+		s.finish()
+	}
+}
+
+func (h *eventHub) remove(s *eventSub) {
+	h.mu.Lock()
+	if h.subs != nil {
+		delete(h.subs, s)
+	}
+	h.mu.Unlock()
+}
+
+// eventSub 是单个订阅者：无界队列 + 独立转发协程，避免慢消费者阻塞子进程。
+type eventSub struct {
+	hub  *eventHub
+	out  chan Event
+	done chan struct{}
+	once sync.Once
+
+	mu       sync.Mutex
+	cond     *sync.Cond
+	queue    []Event
+	finished bool
+	canceled bool
+}
+
+func newEventSub(h *eventHub) *eventSub {
+	s := &eventSub{hub: h, out: make(chan Event, 64), done: make(chan struct{})}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+
+func (s *eventSub) push(e Event) {
+	s.mu.Lock()
+	if s.finished || s.canceled {
+		s.mu.Unlock()
+		return
+	}
+	s.queue = append(s.queue, e)
+	s.cond.Signal()
+	s.mu.Unlock()
+}
+
+func (s *eventSub) run() {
+	defer close(s.out)
+	defer s.hub.remove(s)
+	for {
+		s.mu.Lock()
+		for len(s.queue) == 0 && !s.finished && !s.canceled {
+			s.cond.Wait()
+		}
+		if s.canceled {
+			s.mu.Unlock()
+			return
+		}
+		if len(s.queue) == 0 && s.finished {
+			s.mu.Unlock()
+			return
+		}
+		e := s.queue[0]
+		s.queue = s.queue[1:]
+		s.mu.Unlock()
+		select {
+		case s.out <- e:
+		case <-s.done:
+			return
+		}
+	}
+}
+
+// finish 表示数据源结束：排空队列后退出。
+func (s *eventSub) finish() {
+	s.mu.Lock()
+	s.finished = true
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+// cancel 立即停止订阅（消费者不再需要后续事件）。
+func (s *eventSub) cancel() {
+	s.once.Do(func() {
+		s.mu.Lock()
+		s.canceled = true
+		s.queue = nil
+		s.cond.Broadcast()
+		s.mu.Unlock()
+		close(s.done)
+	})
 }
 
 // LastUserText 取历史里最后一条 user 消息的内容；没有则退到末条。

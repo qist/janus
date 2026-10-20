@@ -434,19 +434,31 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	tools := anthropicToolsToSpecs(req.Tools)
 
-	ocModels, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
-	if err != nil {
-		st, typ, msg := s.anthropicErrorFromUpstream(err)
-		writeAnthropicError(w, st, typ, msg)
-		return
+	// 本请求选中的 harness（X-Janus-Runtime 优先；缺省沿用 opencode/direct 判定）。
+	rr := s.runtimeForRequest(r, p, gateway.ProtocolAnthropic, req.Model)
+
+	var ocModels []upstream.OCModel
+	var ref upstream.OCModelRef
+	if rr.scene != nil {
+		// CLI 型不查 OpenCode 模型目录：模型名由 routeDirect 归一后交给子进程。
+		ref = rr.scene.ref
+		s.log.Debugf("anthropic cli request: client model=%q → %s (runtime=%s)",
+			req.Model, ref.String(), rr.rt.Name())
+	} else {
+		ocModels, err = s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
+		if err != nil {
+			st, typ, msg := s.anthropicErrorFromUpstream(err)
+			writeAnthropicError(w, st, typ, msg)
+			return
+		}
+		ref, err = s.resolveAnthropicModel(r.Context(), req.Model, ocModels)
+		if err != nil {
+			writeAnthropicError(w, http.StatusNotFound, "not_found_error", err.Error())
+			return
+		}
+		s.log.Debugf("anthropic request: client model=%q → resolved=%s (anthropic-version=%q)",
+			req.Model, ref.String(), r.Header.Get("anthropic-version"))
 	}
-	ref, err := s.resolveAnthropicModel(r.Context(), req.Model, ocModels)
-	if err != nil {
-		writeAnthropicError(w, http.StatusNotFound, "not_found_error", err.Error())
-		return
-	}
-	s.log.Debugf("anthropic request: client model=%q → resolved=%s (anthropic-version=%q)",
-		req.Model, ref.String(), r.Header.Get("anthropic-version"))
 
 	// 会话目录：客户端项目路径在 janus 主机上不存在时用 per-scope 中性目录。
 	scopeK, _ := s.scopeOf(r, r.Header.Get("X-OpenCode-Directory"), inputMsgs)
@@ -464,6 +476,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	conv := s.store.Acquire(key, inputMsgs)
 	defer s.store.Release(conv)
 
+	// 会话绑定的 harness 与本次请求不一致时先重置（两套会话 id 不能互换）。
+	s.alignRuntime(conv, rr.rt)
+
 	// 出向路径改写：远程 mode B 下把回答里的工作区路径改写回客户端项目路径。
 	s.setPathRewrite(conv, dir, r.Header.Get("X-OpenCode-Directory"), inputMsgs)
 
@@ -475,8 +490,17 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, 499, "api_error", "generation was interrupted by the client; the previous turn will not be re-run automatically", "canceled")
 		return
 	}
+	wasTerminated := false
 	if conv.snapshotTerminated() {
+		wasTerminated = true
 		s.consumeTerminated(conv)
+	}
+
+	// 从库里恢复的 CLI 会话：harness 侧线程已随进程消失，重置并全量重放。
+	if rr.cli != nil && s.cliRestoredSessionLost(conv, rr.cli) {
+		s.log.Warnf("db-restored cli session %s is gone (runtime=%s key=%s); recreating",
+			conv.snapshotSessionID(), rr.rt.Name(), conv.Key)
+		s.resetSession(conv)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
@@ -500,10 +524,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			conv.setLast(cloneMessages(inputMsgs))
 			s.persistConv(conv)
 			sid := conv.snapshotSessionID()
-			sub := s.bus.Subscribe(sid, 512)
-			defer sub.Cancel()
+			ts := s.turnDriverFor(rr.rt, rr.scene).Subscribe(ctx, sid)
+			defer ts.Cancel()
 			s.resumeAnthropic(ctx, w, r, req, ref, conv, pending,
-				toolResults, inputMsgs, dir, sub, time.Now().UnixMilli())
+				toolResults, inputMsgs, dir, ts, time.Now().UnixMilli())
 			return
 		}
 	}
@@ -543,7 +567,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// ---- 工具：注册/更新（必须晚于 DiffReset —— resetSession 会注销工具桥；
 	// 先注册再被重置，新会话就没有工具可调，与 OpenAI 路径顺序保持一致）----
 	if s.cfg.ToolCalling && len(tools) > 0 {
-		if err := s.ensureTools(ctx, conv, dir, tools, MCPBindingToken(p.Key.ID)); err != nil {
+		if err := s.prepareTools(ctx, conv, rr.rt, dir, tools, MCPBindingToken(p.Key.ID)); err != nil {
 			if !s.cfg.ToolSoftFail {
 				writeAnthropicError(w, http.StatusBadGateway, "api_error",
 					fmt.Sprintf("cannot expose your tools to the upstream agent: %v (directory=%s)", err, dir))
@@ -563,7 +587,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	newSession, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs)
+	// ---- 会话就绪（OpenCode 建/复用上游会话；CLI 刷新子进程配置）----
+	newSession, err := s.ensureRuntimeSession(ctx, conv, rr, ref, agent, dir, inputMsgs)
 	if err != nil {
 		st, typ, msg := s.anthropicErrorFromUpstream(err)
 		writeAnthropicError(w, st, typ, msg)
@@ -572,8 +597,18 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	planText := prompt.FlattenDelta(delta)
 	planText += s.firstTurnNote(conv, newSession)
+	// 会话因上一轮被用户中止而重置：末尾显式告知放弃旧任务，避免模型接着答中断的半截话。
+	if wasTerminated {
+		planText += interruptedTaskNote()
+	}
 	files, failed := attach.Extract(ctx, delta, s.httpc)
-	if m := modelx.Find(ocModels, ref); len(files) > 0 {
+	if rr.scene != nil {
+		// CLI 型 v1 不支持附件：降级成文字说明，别让模型以为用户没发图。
+		for _, f := range files {
+			failed = append(failed, f.Name)
+		}
+		files = nil
+	} else if m := modelx.Find(ocModels, ref); len(files) > 0 {
 		var dropped []upstream.OCFileAttach
 		files, dropped = attach.FilterByModel(files, m)
 		for _, f := range dropped {
@@ -586,14 +621,20 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	sid := conv.snapshotSessionID()
 	setSessionHeaders(w, conv)
-	sub := s.bus.Subscribe(sid, 512)
-	defer sub.Cancel()
+	drv := s.turnDriverFor(rr.rt, rr.scene)
+	// 上一轮被放弃时子进程可能还在跑：先清理，再订阅本轮事件流。
+	drv.PrepareTurn(ctx, sid)
+	// 必须先订阅再发 prompt，否则丢掉本轮开头的增量。
+	ts := drv.Subscribe(ctx, sid)
+	defer ts.Cancel()
 
 	promptAt := time.Now().UnixMilli()
-	resp, err := s.up.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText, Files: files})
+	created, err := drv.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText, Files: files})
 	if err != nil && len(files) > 0 {
 		s.log.Warnf("anthropic prompt with %d attachment(s) failed, retrying plain: %v", len(files), err)
-		resp, err = s.up.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText})
+		planText = prompt.FlattenDelta(delta) + s.firstTurnNote(conv, newSession) + attach.FailureNote(failed)
+		files = nil
+		created, err = drv.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText})
 	}
 	if err != nil {
 		s.resetSession(conv)
@@ -601,20 +642,20 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, st, typ, msg)
 		return
 	}
-	if resp != nil && resp.Data.Time.Created > 0 {
-		promptAt = resp.Data.Time.Created
+	if created > 0 {
+		promptAt = created
 	}
 	conv.setLast(cloneMessages(inputMsgs))
 	s.persistConv(conv)
 
-	s.finishAnthropic(ctx, w, r, req, ref, conv, sub, promptAt)
+	s.finishAnthropic(ctx, w, r, req, ref, conv, ts, promptAt)
 }
 
 // resumeAnthropic 回填挂起的工具结果，然后按 Anthropic 形状收尾。
 func (s *Server) resumeAnthropic(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	req AnthropicRequest, ref upstream.OCModelRef, conv *Conversation,
 	pending []*pendingCall, results map[string]ToolResult, inputMsgs []ChatMessage,
-	dir string, sub *upstream.Subscription, promptAt int64) {
+	dir string, ts turnSession, promptAt int64) {
 
 	// 客户端回填的 tool_result 里的 tool_use_id 可能被客户端换成它自己生成的
 	// id（实测会换成 toolu_…），与 janus 下发到下游的 call_xxx 对不上。
@@ -636,15 +677,14 @@ func (s *Server) resumeAnthropic(ctx context.Context, w http.ResponseWriter, r *
 		p.complete(res)
 	}
 	s.log.Infof("anthropic tool results delivered: conv=%s answered=%d/%d", conv.Key, answered, len(pending))
-	s.finishAnthropic(ctx, w, r, req, ref, conv, sub, promptAt)
+	s.finishAnthropic(ctx, w, r, req, ref, conv, ts, promptAt)
 }
 
 // finishAnthropic 跑完一轮并按 Anthropic 形状输出。
 func (s *Server) finishAnthropic(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	req AnthropicRequest, ref upstream.OCModelRef, conv *Conversation, sub *upstream.Subscription, promptAt int64) {
+	req AnthropicRequest, ref upstream.OCModelRef, conv *Conversation, turn turnSession, promptAt int64) {
 
 	model := s.echoModel(ref, req.Model)
-	turn := s.adoptTurnSession(ctx, conv.snapshotSessionID(), sub)
 	if req.Stream {
 		s.streamAnthropic(ctx, w, r, req, ref, conv, turn, promptAt, model)
 		return

@@ -30,11 +30,30 @@ func (s *Server) agentRegistry() *agent.Registry {
 	return s.agents
 }
 
+// runtimeHeader 显式选择本次请求的 harness（opencode / direct / codex / claude-code）。
+//
+// 不设这个头时沿用原判定（agent key 或 agent=direct → direct，其余 → opencode），
+// 保证现有 IDE 请求零回归；设了才切到对应 runtime。
+const runtimeHeader = "X-Janus-Runtime"
+
+// requestedRuntime 读取显式 runtime 选择；未设置或名字未注册时返回 false。
+func (s *Server) requestedRuntime(r *http.Request) (agent.AgentRuntime, bool) {
+	name := strings.ToLower(strings.TrimSpace(r.Header.Get(runtimeHeader)))
+	if name == "" {
+		return nil, false
+	}
+	return s.agentRegistry().Get(name)
+}
+
 // agentRuntimeFor 选本次请求该走哪个 runtime：
 //
+//	X-Janus-Runtime 显式指定     → 对应 runtime
 //	agent key / 显式 agent=direct → direct（不建会话，直接透传）
 //	其余                          → opencode（会话桥）
 func (s *Server) agentRuntimeFor(r *http.Request, p Principal) agent.AgentRuntime {
+	if rt, ok := s.requestedRuntime(r); ok {
+		return rt
+	}
 	name := agent.NameOpenCode
 	if s.directMode(r, p) {
 		name = agent.NameDirect

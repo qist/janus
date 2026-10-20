@@ -30,35 +30,8 @@ import (
 // token 的候选之一。解析只在候选唯一（或唯一有在飞请求）时命中，避免多个
 // 会话并发时绑定随请求顺序漂移。
 func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string, tools []ToolSpec, binding string) error {
-	// 客户端声明了 RunCommand 这类「异步命令」工具时，配套的状态查询工具
-	//（check_command_status）只在客户端本地存在、不会写进 tools[] 声明，
-	// agent 既看不到也调不到 → 长命令（build）跑起来后没法得知结果、卡住。
-	// 这里按需补上配套工具，走同一透传链路给客户端执行。
-	if s.cfg.ToolCompanions {
-		tools = augmentCompanionTools(tools)
-	}
-	// 异步命令引导：改写 RunCommand 类工具的描述（对 kill/重启/长命令强制
-	// blocking=false + 状态查询轮询），绕开客户端同步执行器的楔死窗口。
-	// 必须在指纹计算之前改——描述变化要体现在指纹里，驱动 opencode 重新拉
-	// tools/list（它对同名 server 的重新 PUT 不重列工具）。
-	for i := range tools {
-		tools[i].Function.Description = steerAsyncCommandDesc(s.cfg.ToolCompanions, tools[i].Function.Name, tools[i].Function.Description)
-	}
-	sess := s.tools.Register(conv.Key, tools)
-	// 稳定绑定：每次请求都重新指向本会话，因此始终是「最近活跃的那个」。
-	s.tools.Bind(binding, sess)
-	// 工具结果超时时标记会话 terminated：下一轮请求若重发相同内容（Trae 自动重试）
-	// 会被 499 挡掉，不白跑一遍；若发了新内容则走 terminated 路径重建。
-	sess.onTimeout = conv.markTerminated
-	// 记录当前上游 session id：parked 工具调用超时时用它中断上游，避免孤儿 agent。
-	sess.setSessionID(conv.snapshotSessionID())
-	// 同步出向路径改写规则：客户端工具的 args 在 park 前用它改写（远程 mode B）。
-	sess.setRewritePaths(conv.rewriteFrom, conv.rewriteTo)
-	fp := toolsFingerprint(tools)
-
-	// 注册名带工具集指纹：OpenCode 对"已存在的 MCP server 重新 PUT"不会重拉
-	// tools/list，模型会一直看到旧工具。换个名字 = 新 server，必然重新连接、重列。
-	name := mcpRegName(sess.mcpName, fp)
+	// 中断实现走 OpenCode 上游（CLI 型在 ensureCLITools 里换成杀子进程）。
+	sess, name, fp := s.prepareToolSession(conv, tools, binding, s.up.Interrupt)
 
 	fresh := conv.mcpName == name && conv.toolsFP == fp && conv.toolSess != nil
 	if fresh && s.cfg.ToolReregister > 0 && time.Since(conv.toolsRegAt) < s.cfg.ToolReregister {
@@ -87,6 +60,48 @@ func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string
 	s.metrics.IncToolReg()
 	s.log.Infof("tool bridge %s: server=%s tools=%d dir=%s", verb, name, len(sess.snapshotTools()), dir)
 	return nil
+}
+
+// prepareToolSession 做「登记工具 + 稳定绑定 + 出向改写 + 指纹」这段与 runtime
+// 无关的准备工作，返回会话、注册名与指纹。
+//
+// OpenCode 与 CLI 型共用它，差别只在后续：前者把 MCP server 注册到上游，
+// 后者把 MCP 地址写进子进程 argv/env。interrupt 是「工具结果超时时中断 agent」
+// 的实现（OpenCode 走上游，CLI 杀子进程）。
+func (s *Server) prepareToolSession(conv *Conversation, tools []ToolSpec, binding string,
+	interrupt func(ctx context.Context, sid string) error) (*toolSession, string, string) {
+
+	// 客户端声明了 RunCommand 这类「异步命令」工具时，配套的状态查询工具
+	//（check_command_status）只在客户端本地存在、不会写进 tools[] 声明，
+	// agent 既看不到也调不到 → 长命令（build）跑起来后没法得知结果、卡住。
+	// 这里按需补上配套工具，走同一透传链路给客户端执行。
+	if s.cfg.ToolCompanions {
+		tools = augmentCompanionTools(tools)
+	}
+	// 异步命令引导：改写 RunCommand 类工具的描述（对 kill/重启/长命令强制
+	// blocking=false + 状态查询轮询），绕开客户端同步执行器的楔死窗口。
+	// 必须在指纹计算之前改——描述变化要体现在指纹里，驱动 opencode 重新拉
+	// tools/list（它对同名 server 的重新 PUT 不重列工具）。
+	for i := range tools {
+		tools[i].Function.Description = steerAsyncCommandDesc(s.cfg.ToolCompanions, tools[i].Function.Name, tools[i].Function.Description)
+	}
+	sess := s.tools.Register(conv.Key, tools)
+	// 稳定绑定：每次请求都重新指向本会话，因此始终是「最近活跃的那个」。
+	s.tools.Bind(binding, sess)
+	// 工具结果超时时标记会话 terminated：下一轮请求若重发相同内容（Trae 自动重试）
+	// 会被 499 挡掉，不白跑一遍；若发了新内容则走 terminated 路径重建。
+	sess.onTimeout = conv.markTerminated
+	// 记录当前上游 session id：parked 工具调用超时时用它中断上游，避免孤儿 agent。
+	sess.setSessionID(conv.snapshotSessionID())
+	// 同步出向路径改写规则：客户端工具的 args 在 park 前用它改写（远程 mode B）。
+	sess.setRewritePaths(conv.rewriteFrom, conv.rewriteTo)
+	sess.setInterrupt(interrupt)
+	fp := toolsFingerprint(tools)
+
+	// 注册名带工具集指纹：OpenCode 对"已存在的 MCP server 重新 PUT"不会重拉
+	// tools/list，模型会一直看到旧工具。换个名字 = 新 server，必然重新连接、重列。
+	name := mcpRegName(sess.mcpName, fp)
+	return sess, name, fp
 }
 
 // registerBridge 把工具桥注册到 OpenCode。
@@ -126,11 +141,34 @@ func (s *Server) removeTools(ctx context.Context, conv *Conversation, dir string
 	if name == "" {
 		return
 	}
+	// CLI 型的 MCP 配置写在子进程 argv/env 里，不在上游注册，没有可删的 server；
+	// 下一轮 ensureCLISession 会带着「无工具」的新配置启动。
+	if s.isCLIRuntime(conv.runtime) {
+		s.log.Infof("cli tool bridge unregistered: server=%s", name)
+		return
+	}
 	if err := s.up.RemoveMCP(ctx, dir, name); err != nil {
 		s.log.Debugf("remove mcp %s: %v", name, err)
 		return
 	}
 	s.log.Infof("tool bridge unregistered: server=%s", name)
+}
+
+// interruptToolSession 在工具调用超时后中断该调用所属的 agent。
+//
+// OpenCode 走上游 Interrupt；CLI 型在 prepareToolSession 里把中断实现换成了
+// 「杀掉子进程」，所以这里统一按会话登记的实现转发，避免超时路径去调
+// OpenCode（CLI 会话在 opencode 侧根本不存在）。
+func (s *Server) interruptToolSession(sess *toolSession, sid string) {
+	if sid == "" {
+		return
+	}
+	iCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if sess != nil && sess.interruptAgentWith(iCtx, sid) {
+		return
+	}
+	_ = s.up.Interrupt(iCtx, sid)
 }
 
 // sweepTools 清理"会话已经不在 store 里"的 MCP 注册，避免上游越积越多。

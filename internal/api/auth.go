@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -105,6 +107,11 @@ func (s *Server) principal(r *http.Request) (Principal, error) {
 	if s.cfg.APIKey != "" && plain == s.cfg.APIKey {
 		return Principal{Kind: db.KeyKindAdmin, Static: true}, nil
 	}
+	// 进程内临时 key：janus 拉起 CLI harness 时给子进程的回调凭据
+	// （见 mintInternalAgentKey）。不外泄、不落库，turn 结束即失效。
+	if p, ok := s.lookupInternalKey(plain); ok {
+		return p, nil
+	}
 	if s.db == nil {
 		return Principal{}, errors.New("invalid API key")
 	}
@@ -198,4 +205,63 @@ func describeKind(kind string) string {
 	default:
 		return fmt.Sprintf("unknown(%s)", kind)
 	}
+}
+
+// ---------- 进程内临时 agent key ----------
+
+// internalKey 是 janus 自己拉起 CLI harness 时发给子进程的回调凭据。
+//
+// 为什么需要：CLI 的模型面请求要打回 janus（provider 指向 janus）。子进程不能
+// 复用外层客户端的 key —— 客户端 key 会再次落到会话桥，形成「CLI 请求 → janus
+// → 同一个 CLI」的递归。临时 agent key 走 direct 分支（模型面直连厂商），
+// 权限沿用外层 principal 的 provider/credential 白名单，不做提权。
+type internalKey struct {
+	principal Principal
+	expires   time.Time
+}
+
+// mintInternalAgentKey 生成一个只在本次请求生命周期内有效的 agent key。
+// 返回值 release 必须在本轮结束（或子进程退出）后调用。
+func (s *Server) mintInternalAgentKey(ttl time.Duration, outer Principal) (string, func()) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", func() {}
+	}
+	plain := db.KeyPrefix(db.KeyKindAgent) + base64.RawURLEncoding.EncodeToString(buf)
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	p := Principal{
+		Kind:        db.KeyKindAgent,
+		Providers:   append([]string(nil), outer.Providers...),
+		Credentials: append([]string(nil), outer.Credentials...),
+	}
+	s.internalMu.Lock()
+	if s.internalKeys == nil {
+		s.internalKeys = map[string]internalKey{}
+	}
+	s.internalKeys[plain] = internalKey{principal: p, expires: time.Now().Add(ttl)}
+	s.internalMu.Unlock()
+
+	release := func() {
+		s.internalMu.Lock()
+		delete(s.internalKeys, plain)
+		s.internalMu.Unlock()
+	}
+	return plain, release
+}
+
+// lookupInternalKey 解析进程内临时 key（过期即删除）。
+func (s *Server) lookupInternalKey(plain string) (Principal, bool) {
+	s.internalMu.Lock()
+	defer s.internalMu.Unlock()
+	k, ok := s.internalKeys[plain]
+	if !ok {
+		return Principal{}, false
+	}
+	if time.Now().After(k.expires) {
+		delete(s.internalKeys, plain)
+		return Principal{}, false
+	}
+	return k.principal, true
 }

@@ -108,8 +108,19 @@
   `session_key`（复用它即续接）、`directory` / `model` / `api_key` / `mcp_url`。
 - `GET /api/v1/runtimes` 现在也会列出 `codex` / `claude-code`；
   可执行文件名由设置项 `codex_bin` / `claude_bin` 覆盖（默认同名）。
-- 说明：IDE 请求路径（`/v1/chat/completions` 等）目前仍走 opencode / direct
-  runtime，CLI 型 harness 走上面的 runtime 端点；两条链路合一见 `docs/REFACTOR.md`。
+- **CLI 接入 IDE 请求路径**：`/v1/chat/completions`、`/v1/responses`、
+  `/v1/messages` 现在可通过 `X-Janus-Runtime: codex|claude-code` 直接走 CLI 型
+  harness，会话绑定、历史差分、工具桥与流式/非流式收尾和 OpenCode 路径一致。
+  - 事件来源统一到 `turnDriver` / `turnSession`，CLI 实现见
+    `internal/api/cli_turn.go`；子进程事件经会话级 eventHub 广播，工具调用回合
+    可跨 HTTP 请求续流，子进程不随单次请求结束而退出。
+  - 会话级临时 agent key 的 TTL 覆盖「工具等待 + 请求超时」，续流后仍能回调
+    模型面；reset 时丢弃 harness 侧会话 id，DB 恢复后发现线程已丢失会自动重建。
+  - 新一轮开始前清理被放弃的旧子进程（断连/超时残留），并用已学到的 harness
+    线程 id 续接，避免旧收尾事件污染新订阅。
+  - 可执行文件名仍由 `codex_bin` / `claude_bin` 覆盖；不带
+    `X-Janus-Runtime` 时按 agent key / `agent=direct` 的既有规则选择
+    opencode / direct。
 
 ---
 

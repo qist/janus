@@ -402,8 +402,12 @@ curl -N -H "Authorization: Bearer <admin key>" \
   `model`、`api_key`（注入给 CLI 当 janus 的 key；不填则用 CLI 自带认证）、
   `mcp_url`（把 janus 的 MCP 端点注册给 CLI，即方式 B 的工具桥）。
 - 可执行文件名由设置项 `codex_bin` / `claude_bin` 覆盖（默认 `codex` / `claude`）。
-- 当前 IDE 请求路径（`/v1/chat/completions` 等）仍走 opencode / direct runtime；
-  两条链路合一见 `docs/REFACTOR.md`。
+- IDE 请求路径现在也能直接走 CLI harness：在 `/v1/chat/completions`、
+  `/v1/responses`、`/v1/messages` 上带请求头 `X-Janus-Runtime: codex`
+  （或 `claude-code`）即可；同一 `X-Session-ID` 下自动续接 harness 会话，
+  工具调用跨请求续流。不带该头时仍按 agent key / `agent=direct` 的既有规则
+  选择 opencode / direct。实现见 `internal/api/cli_turn.go` 与
+  `docs/REFACTOR.md`。
 
 ### 输出与事件
 

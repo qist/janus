@@ -110,6 +110,10 @@ type toolSession struct {
 	// 用于「客户端走了」时中断上游，避免孤儿 agent 一直调工具。
 	sessionID string
 
+	// interruptAgent 中断本轮 agent。默认走 OpenCode 上游；CLI 型 runtime
+	// 在 ensureCLITools 里换成「杀掉子进程」。参数是 sessionID。
+	interruptAgent func(ctx context.Context, sid string) error
+
 	// onTimeout 在工具结果超时时被调用，用于标记会话 terminated（下一轮重放保护）。
 	onTimeout func()
 
@@ -562,6 +566,26 @@ func (s *toolSession) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
+}
+
+// setInterrupt 设置「中断本轮 agent」的实现（OpenCode 走上游，CLI 杀子进程）。
+func (s *toolSession) setInterrupt(fn func(ctx context.Context, sid string) error) {
+	s.mu.Lock()
+	s.interruptAgent = fn
+	s.mu.Unlock()
+}
+
+// interruptAgentWith 用已登记的中断实现中断 agent；未登记返回 false，
+// 调用方回落到默认的 OpenCode 上游中断。
+func (s *toolSession) interruptAgentWith(ctx context.Context, sid string) bool {
+	s.mu.Lock()
+	fn := s.interruptAgent
+	s.mu.Unlock()
+	if fn == nil {
+		return false
+	}
+	_ = fn(ctx, sid)
+	return true
 }
 
 // setSessionID 记录当前会话对应的上游 session id（会话重建时更新）。

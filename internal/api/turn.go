@@ -23,8 +23,8 @@ import (
 //	turnDriver  —— 建一轮（必须先订阅再 prompt，否则丢开头增量）
 //	turnSession —— 事件流、对账、状态、等待空闲、打断
 //
-// opencodeTurnSession 是当前唯一实现，行为与原代码逐一对应；CLI 实现只需
-// 把 agent.Event 流接上，对账返回 false、空闲由事件流收尾驱动即可。
+// opencodeTurnSession 是 OpenCode 的实现，行为与原代码逐一对应；CLI 实现
+// 见 cli_turn.go（事件来自子进程、无对账数据源、State 恒为 false）。
 
 // turnSnapshot 是一次对账的结果（补齐事件流丢失的尾巴）。
 type turnSnapshot struct {
@@ -39,6 +39,9 @@ type turnSnapshot struct {
 type turnSession interface {
 	Events() <-chan agent.Event
 	Reconcile(ctx context.Context, since int64) (turnSnapshot, bool)
+	// ReconcileSupported 表示该 runtime 是否有独立的对账数据源（上游消息接口）。
+	// CLI 型 harness 的事件流就是唯一真相，收尾时不必退避重试对账。
+	ReconcileSupported() bool
 	State(ctx context.Context, promptAt int64, seenStarted bool) (idle bool, outcome string)
 	WaitIdle(ctx context.Context) error
 	Interrupt(ctx context.Context) error
@@ -47,6 +50,13 @@ type turnSession interface {
 
 // turnDriver 负责建立一轮。
 type turnDriver interface {
+	// PrepareTurn 在「开新一轮」前清理会话上的残留执行。
+	//
+	// 必须早于 Subscribe：被放弃的上一轮（客户端断连/超时）可能还留着
+	// 子进程，它的收尾事件（EventDone interrupted / 错误）只属于旧订阅者，
+	// 不能混进新一轮的事件流。OpenCode 的上游会话不存在这种进程残留，
+	// 实现为空操作。
+	PrepareTurn(ctx context.Context, sid string)
 	Subscribe(ctx context.Context, sid string) turnSession
 	Prompt(ctx context.Context, sid string, req upstream.OCPromptReq) (created int64, err error)
 }
@@ -57,18 +67,13 @@ func (s *Server) turnDriver() turnDriver { return opencodeTurnDriver{s: s} }
 // opencodeTurnDriver 把 OpenCode 的 up + EventBus 适配成 turnDriver。
 type opencodeTurnDriver struct{ s *Server }
 
+// PrepareTurn 无需清理：OpenCode 是常驻服务，一轮结束由上游会话状态收敛，
+// 不存在「上一轮子进程还占着会话」的残留。
+func (d opencodeTurnDriver) PrepareTurn(context.Context, string) {}
+
 func (d opencodeTurnDriver) Subscribe(ctx context.Context, sid string) turnSession {
 	ts := &opencodeTurnSession{s: d.s, sid: sid, sub: d.s.bus.Subscribe(sid, 512)}
 	ts.cancelSub = ts.sub.Cancel
-	ts.startForward(ctx)
-	return ts
-}
-
-// adoptTurnSession 把调用方已持有的 EventBus 订阅包装成 turnSession。
-// Anthropic / Responses 两条协议各自管理订阅生命周期（handler 里 defer Cancel），
-// 因此这里不接管取消，只做事件转换。
-func (s *Server) adoptTurnSession(ctx context.Context, sid string, sub *upstream.Subscription) turnSession {
-	ts := &opencodeTurnSession{s: s, sid: sid, sub: sub}
 	ts.startForward(ctx)
 	return ts
 }
@@ -122,6 +127,9 @@ func (t *opencodeTurnSession) startForward(ctx context.Context) {
 }
 
 func (t *opencodeTurnSession) Events() <-chan agent.Event { return t.ch }
+
+// ReconcileSupported /message 接口是 opencode 独有的对账来源。
+func (t *opencodeTurnSession) ReconcileSupported() bool { return true }
 
 func (t *opencodeTurnSession) Cancel() {
 	t.cancelOnce.Do(func() {

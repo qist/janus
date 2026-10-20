@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"janus/internal/agent"
 	"janus/internal/db"
 	"janus/internal/gateway"
 	"janus/internal/httpx"
@@ -220,6 +221,11 @@ type protoFail func(status int, typ, msg, code string)
 
 // directMode 判断本次请求是否走直连厂商，而不是 OpenCode 会话桥。
 func (s *Server) directMode(r *http.Request, p Principal) bool {
+	// 显式选择 runtime 时以它为准：X-Janus-Runtime: codex / claude-code 必须
+	// 走 CLI 会话桥，不能因为外层是 agent key 就被当成直连透传。
+	if name := strings.ToLower(strings.TrimSpace(r.Header.Get(runtimeHeader))); name != "" {
+		return name == agent.NameDirect
+	}
 	if p.Static || s.router == nil || s.router.Store() == nil {
 		return false
 	}

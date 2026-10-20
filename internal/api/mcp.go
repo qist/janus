@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -243,11 +242,7 @@ func (s *Server) mcpToolCall(w http.ResponseWriter, r *http.Request, id json.Raw
 			}
 			if sid := sess.getSessionID(); sid != "" {
 				s.log.Warnf("tool result timeout: interrupting upstream %s (%s) to stop orphaned agent", sid, sess.key)
-				go func() {
-					iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
-					defer c()
-					_ = s.up.Interrupt(iCtx, sid)
-				}()
+				go s.interruptToolSession(sess, sid)
 			}
 		} else if sid := sess.ghostInterruptSid(pend); sid != "" {
 			// 幽灵调用：中断它自己所属的旧会话（孤儿 agent 的宿主）——否则
@@ -256,11 +251,7 @@ func (s *Server) mcpToolCall(w http.ResponseWriter, r *http.Request, id json.Raw
 			// 中断目标是旧会话本身，绝不碰当前绑定的新会话。
 			s.log.Warnf("stale tool call timed out: tool=%s callSid=%s current=%s (conv=%s); interrupting abandoned session %s",
 				pend.ToolName, pend.CallSid, sess.getSessionID(), sess.key, sid)
-			go func() {
-				iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
-				defer c()
-				_ = s.up.Interrupt(iCtx, sid)
-			}()
+			go s.interruptToolSession(sess, sid)
 		} else {
 			// 有 waiters：可能是并发 bucket-mate 的活跃调用，保守不中断。
 			s.log.Warnf("stale tool call timed out: tool=%s callSid=%s current=%s (conv=%s); dropping (waiter active)",

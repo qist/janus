@@ -41,6 +41,14 @@ type AgentRuntime interface {
 	Close(ctx context.Context) error
 }
 
+// SessionRemover 是可选接口：丢弃 harness 侧会话状态。
+//
+// opencode 型 runtime 用上游删除接口；CLI 型没有远端状态，只需忘掉已学到的
+// harness 会话 id，下一轮才会开新会话而不是 resume 旧线程。
+type SessionRemover interface {
+	RemoveSession(ctx context.Context, sid string) error
+}
+
 // SessionSpec 是建会话所需的最小信息。
 type SessionSpec struct {
 	Key          string // 逻辑会话键（janus 侧分桶用，可作会话标题）

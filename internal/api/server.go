@@ -82,6 +82,11 @@ type Server struct {
 	// keyCache 缓存 API key 摘要 → 记录（30s）。
 	keyCache keyCache
 
+	// internalKeys 是进程内临时 agent key（janus 拉起 CLI harness 时发给子进程
+	// 的模型面回调凭据）。不落库，turn 结束即删除。
+	internalMu   sync.Mutex
+	internalKeys map[string]internalKey
+
 	// defaultModel 是运行时可切换的默认模型（web 里选），持久化在 DB。
 	// 非空时优先于 cfg.DefaultModel；空则回落 cfg.DefaultModel / 上游默认。
 	defaultMu    sync.RWMutex
@@ -379,6 +384,7 @@ func (s *Server) persistConv(conv *Conversation) {
 		Variant:    conv.model.Variant,
 		Agent:      conv.agent,
 		Directory:  conv.directory,
+		Runtime:    conv.runtime,
 		History:    hist,
 	})
 }

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"janus/internal/agent"
 	"janus/internal/attach"
 	"janus/internal/db"
 	"janus/internal/gateway"
@@ -628,13 +629,6 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 模型面直连：agent key / agent=direct 时原样透传（不建会话、不存 response）。
-	if s.directMode(r, p) {
-		if s.proxyModel(w, r, p, gateway.ProtocolOpenAIResponses, body, openAIFail(w)) {
-			return
-		}
-	}
-
 	var req ResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body: "+err.Error(), "")
@@ -649,22 +643,41 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	tools := responsesToolsToSpecs(req.Tools)
 
+	// 本请求选中的 harness：显式 X-Janus-Runtime 优先，其次沿用原判定
+	//（agent key / agent=direct → direct，其余 → opencode）。
+	rr := s.runtimeForRequest(r, p, gateway.ProtocolOpenAIResponses, req.Model)
+	// 模型面直连：agent key / 显式 direct 时原样透传（不建会话、不存 response）。
+	if rr.rt != nil && rr.rt.Name() == agent.NameDirect {
+		if s.proxyModel(w, r, p, gateway.ProtocolOpenAIResponses, body, openAIFail(w)) {
+			return
+		}
+	}
+
 	// ---- 模型 ----
-	ocModels, err := s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
-	if err != nil {
-		st, typ, msg := s.mapUpstreamError(err)
-		writeOpenAIError(w, st, typ, msg, "")
-		return
-	}
-	ref, err := s.resolveModel(r.Context(), req.Model, ocModels)
-	if err != nil {
-		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
-		return
-	}
-	if effort := responsesEffort(req); effort != "" && ref.Variant == "" {
-		if m := modelx.Find(ocModels, ref); m != nil {
-			if v, ok := modelx.PickVariant(*m, effort); ok {
-				ref.Variant = v
+	var ocModels []upstream.OCModel
+	var ref upstream.OCModelRef
+	if rr.scene != nil {
+		// CLI 型不查 OpenCode 模型目录：模型只用于回调 janus 时路由。
+		ref = rr.scene.ref
+		s.log.Debugf("responses cli request: client model=%q → %s (runtime=%s)",
+			req.Model, ref.String(), rr.rt.Name())
+	} else {
+		ocModels, err = s.models.Get(r.Context(), s.up, s.cfg.Directory, false)
+		if err != nil {
+			st, typ, msg := s.mapUpstreamError(err)
+			writeOpenAIError(w, st, typ, msg, "")
+			return
+		}
+		ref, err = s.resolveModel(r.Context(), req.Model, ocModels)
+		if err != nil {
+			writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error(), "model_not_found")
+			return
+		}
+		if effort := responsesEffort(req); effort != "" && ref.Variant == "" {
+			if m := modelx.Find(ocModels, ref); m != nil {
+				if v, ok := modelx.PickVariant(*m, effort); ok {
+					ref.Variant = v
+				}
 			}
 		}
 	}
@@ -716,6 +729,9 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	s.logClientInfo(r, "", dir, convKey, inputMsgs)
 	defer s.store.Release(conv)
 
+	// 会话绑定的 harness 与本次请求不一致时先重置（两套会话 id 不能互换）。
+	s.alignRuntime(conv, rr.rt)
+
 	// 出向路径改写：远程 mode B 下把回答里的工作区路径改写回客户端项目路径。
 	s.setPathRewrite(conv, dir, r.Header.Get("X-OpenCode-Directory"), inputMsgs)
 
@@ -732,6 +748,14 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		s.consumeTerminated(conv)
 	}
 
+	// 从库里恢复的 CLI 会话：进程重启后 harness 侧线程已随子进程消失，
+	// 必须重置并全量重放历史，否则模型只看到增量、上下文断裂。
+	if rr.cli != nil && s.cliRestoredSessionLost(conv, rr.cli) {
+		s.log.Warnf("db-restored cli session %s is gone (runtime=%s key=%s); recreating",
+			conv.snapshotSessionID(), rr.rt.Name(), conv.Key)
+		s.resetSession(conv)
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 
@@ -745,7 +769,6 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	// 回填请求 150s 无响应、模型侧永远等不到结果）。
 	// 条件只看挂起调用：它只能由工具桥创建（ToolCalling 开启时的某一轮），
 	// 它的存在本身就是要件；回填请求甚至可能不再携带 tools 声明。
-	var sub *upstream.Subscription
 	if conv.snapshotSessionID() != "" &&
 		len(toolResults) > 0 && len(conv.pendingToolCalls()) > 0 {
 		pending := livePending(conv.pendingToolCalls())
@@ -763,17 +786,19 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			// 依赖它，缺了会把 function_call / tool result 当增量重发（数据回放）。
 			conv.setLast(cloneMessages(inputMsgs))
 			s.persistConv(conv)
-			if _, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs); err != nil {
+			if _, err := s.ensureRuntimeSession(ctx, conv, rr, ref, agent, dir, inputMsgs); err != nil {
 				st, typ, msg := s.mapUpstreamError(err)
 				writeOpenAIError(w, st, typ, msg, "")
 				return
 			}
-			sub = s.bus.Subscribe(conv.snapshotSessionID(), 512)
-			defer sub.Cancel()
+			sid := conv.snapshotSessionID()
+			// 先订阅再回填，避免漏掉 agent 继续执行时的开头增量。
+			ts := s.turnDriverFor(rr.rt, rr.scene).Subscribe(ctx, sid)
+			defer ts.Cancel()
 			promptAt := time.Now().UnixMilli()
 			s.deliverToolResults(conv, pending, toolResults, inputMsgs)
 			setSessionHeaders(w, conv)
-			s.finishResponses(ctx, w, r, req, ref, conv, sub, promptAt, dir)
+			s.finishResponses(ctx, w, r, req, ref, conv, ts, promptAt, dir)
 			return
 		}
 	}
@@ -806,7 +831,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 工具 ----
 	if s.cfg.ToolCalling && len(tools) > 0 {
-		if err := s.ensureTools(ctx, conv, dir, tools, MCPBindingToken(p.Key.ID)); err != nil {
+		if err := s.prepareTools(ctx, conv, rr.rt, dir, tools, MCPBindingToken(p.Key.ID)); err != nil {
 			if s.cfg.ToolSoftFail {
 				s.log.Warnf("tool bridge registration failed (soft-fail): %v", err)
 			} else {
@@ -828,7 +853,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ---- 新的一轮：把 input 作为 prompt 发出 ----
-	newSession, err := s.ensureSession(ctx, conv, ref, agent, dir, inputMsgs)
+	newSession, err := s.ensureRuntimeSession(ctx, conv, rr, ref, agent, dir, inputMsgs)
 	if err != nil {
 		st, typ, msg := s.mapUpstreamError(err)
 		writeOpenAIError(w, st, typ, msg, "")
@@ -871,7 +896,13 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	// 附件：data URI 直传 / http(s) 下载；模型不支持该模态就丢弃并说明。
 	files, failed := attach.Extract(ctx, inputMsgs, s.httpc)
-	if m := modelx.Find(ocModels, ref); len(files) > 0 {
+	if rr.scene != nil {
+		// CLI 型 v1 不支持附件：降级成文字说明，别让模型以为用户没发图。
+		for _, f := range files {
+			failed = append(failed, f.Name)
+		}
+		files = nil
+	} else if m := modelx.Find(ocModels, ref); len(files) > 0 {
 		var dropped []upstream.OCFileAttach
 		files, dropped = attach.FilterByModel(files, m)
 		for _, f := range dropped {
@@ -882,15 +913,23 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		s.log.Warnf("responses attachments dropped: %d item(s)", len(failed))
 		planText += attach.FailureNote(failed)
 	}
-	sub = s.bus.Subscribe(conv.snapshotSessionID(), 512)
-	defer sub.Cancel()
+	sid := conv.snapshotSessionID()
+	setSessionHeaders(w, conv)
+	drv := s.turnDriverFor(rr.rt, rr.scene)
+	// 上一轮被放弃时子进程可能还在跑：先清理，再订阅本轮事件流。
+	drv.PrepareTurn(ctx, sid)
+	// 必须先订阅再发 prompt，否则丢掉本轮开头的增量。
+	ts := drv.Subscribe(ctx, sid)
+	defer ts.Cancel()
 
 	promptAt := time.Now().UnixMilli()
-	resp, err := s.up.Prompt(ctx, conv.snapshotSessionID(), upstream.OCPromptReq{Text: planText, Files: files})
+	created, err := drv.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText, Files: files})
 	if err != nil && len(files) > 0 {
 		// 附件让上游失败时降级重发纯文本，保住对话本身（与 chat 路径一致）
 		s.log.Warnf("responses prompt with %d attachment(s) failed, retrying as plain text: %v", len(files), err)
-		resp, err = s.up.Prompt(ctx, conv.snapshotSessionID(), upstream.OCPromptReq{Text: planText})
+		planText += attach.FailureNote(failed)
+		files = nil
+		created, err = drv.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText})
 	}
 	if err != nil {
 		if newSession {
@@ -900,18 +939,17 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, st, typ, msg, "")
 		return
 	}
-	if resp != nil && resp.Data.Time.Created > 0 {
-		promptAt = resp.Data.Time.Created
+	if created > 0 {
+		promptAt = created
 	}
 	// 无论成败都快照历史（与 chat 一致）：历史归属链的差分、会话复用、
 	// terminatedReplay 防重放全都依赖它——缺了它 stored 永远为空，
 	// 每轮 DiffReset → 全量重发 → 新 session（实测 40 秒 13 个）。
 	conv.setLast(cloneMessages(inputMsgs))
 	s.persistConv(conv)
-	s.log.Debugf("responses prompt sid=%s key=%s model=%s", conv.snapshotSessionID(), convKey, ref.String())
+	s.log.Debugf("responses prompt sid=%s key=%s model=%s", sid, convKey, ref.String())
 
-	setSessionHeaders(w, conv)
-	s.finishResponses(ctx, w, r, req, ref, conv, sub, promptAt, dir)
+	s.finishResponses(ctx, w, r, req, ref, conv, ts, promptAt, dir)
 }
 
 // setSessionHeaders 把本轮的 Janus 会话键与上游 sessionID 回吐给客户端。
@@ -921,6 +959,11 @@ func setSessionHeaders(w http.ResponseWriter, conv *Conversation) {
 		return
 	}
 	w.Header().Set("X-Janus-Conversation", conv.Key)
+	// 回吐实际使用的 harness：客户端/排查都能确认本次请求走了哪条链路
+	//（X-Janus-Runtime 也可能来自请求头，这里是解析后的真实值）。
+	if conv.runtime != "" {
+		w.Header().Set("X-Janus-Runtime", conv.runtime)
+	}
 	if sid := conv.snapshotSessionID(); sid != "" {
 		w.Header().Set("X-Janus-Session", sid)
 	}
@@ -929,10 +972,9 @@ func setSessionHeaders(w http.ResponseWriter, conv *Conversation) {
 // finishResponses 跑完一轮并按 Responses 格式输出。
 func (s *Server) finishResponses(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	req ResponsesRequest, ref upstream.OCModelRef, conv *Conversation,
-	sub *upstream.Subscription, promptAt int64, dir string) {
+	turn turnSession, promptAt int64, dir string) {
 
 	model := s.echoModel(ref, req.Model)
-	turn := s.adoptTurnSession(ctx, conv.snapshotSessionID(), sub)
 
 	if req.Stream {
 		s.streamResponses(ctx, w, r, req, conv, turn, promptAt, model, dir)

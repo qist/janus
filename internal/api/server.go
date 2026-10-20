@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"janus/internal/agent"
 	"janus/internal/channel/opencode"
 	"janus/internal/config"
 	"janus/internal/db"
@@ -88,6 +89,13 @@ type Server struct {
 
 	// settingsMu 串行化运行期设置的读改写（PATCH /api/v1/settings）。
 	settingsMu sync.Mutex
+
+	// agents 是 Agent 面（harness）runtime 注册表，惰性构建；agentMu 保护它。
+	agentMu sync.Mutex
+	agents  *agent.Registry
+	// harnesses 是 harness provisioner 注册表（codex/claude-code/opencode），
+	// 同样惰性构建，agentMu 保护。
+	harnesses *agent.HarnessRegistry
 
 	// clientSeen 用于「客户端诊断日志」去重：每个不同的客户端签名只打一次，
 	// 方便看不同 IDE / 设备到底发了什么（user / 头 / 目录 / 首条 user）。

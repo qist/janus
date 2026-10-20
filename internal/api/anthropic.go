@@ -543,7 +543,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// ---- 工具：注册/更新（必须晚于 DiffReset —— resetSession 会注销工具桥；
 	// 先注册再被重置，新会话就没有工具可调，与 OpenAI 路径顺序保持一致）----
 	if s.cfg.ToolCalling && len(tools) > 0 {
-		if err := s.ensureTools(ctx, conv, dir, tools); err != nil {
+		if err := s.ensureTools(ctx, conv, dir, tools, MCPBindingToken(p.Key.ID)); err != nil {
 			if !s.cfg.ToolSoftFail {
 				writeAnthropicError(w, http.StatusBadGateway, "api_error",
 					fmt.Sprintf("cannot expose your tools to the upstream agent: %v (directory=%s)", err, dir))

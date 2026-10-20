@@ -132,8 +132,9 @@ type ToolBridge struct {
 	byToken   map[string]*toolSession
 	byKey     map[string]*toolSession
 	byName    map[string]*toolSession
-	wait      time.Duration // 长等待（执行类工具，或未列出的工具）
-	waitFast  time.Duration // 短等待（只读/编辑类工具）；0=不启用
+	byBinding map[string]*toolSession // 稳定 token（按 agent key）→ 该 key 最近活跃的会话
+	wait      time.Duration           // 长等待（执行类工具，或未列出的工具）
+	waitFast  time.Duration           // 短等待（只读/编辑类工具）；0=不启用
 	fastTools map[string]bool
 	log       *logx.Logger
 }
@@ -149,6 +150,7 @@ func NewToolBridge(log *logx.Logger, wait, waitFast time.Duration, fastTools map
 		byToken:   map[string]*toolSession{},
 		byKey:     map[string]*toolSession{},
 		byName:    map[string]*toolSession{},
+		byBinding: map[string]*toolSession{},
 		wait:      wait,
 		waitFast:  waitFast,
 		fastTools: fastTools,
@@ -231,6 +233,30 @@ func (b *ToolBridge) ByKey(key string) *toolSession {
 	return b.byKey[key]
 }
 
+// Bind 把稳定 MCP token（见 mcpbind.go）指向会话。
+//
+// 同一个 agent key 名下可能同时有多个会话（多 IDE/多项目）；每次有请求进来都会
+// 重新指向该会话，因此绑定始终是「最近活跃的那个」。解析不到时会话时，
+// handleMCP 走空会话路径，不会报错。
+func (b *ToolBridge) Bind(binding string, s *toolSession) {
+	if b == nil || s == nil || binding == "" {
+		return
+	}
+	b.mu.Lock()
+	b.byBinding[binding] = s
+	b.mu.Unlock()
+}
+
+// GetBinding 按稳定 token 找最近绑定的会话。
+func (b *ToolBridge) GetBinding(binding string) *toolSession {
+	if b == nil || binding == "" {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.byBinding[binding]
+}
+
 // ResolveToolName 按暴露给 agent 的工具名（ob_<key>_<tool>）反查活跃会话。
 //
 // 用途：上游拿着已失效 token 的 MCP 配置（会话重置/工具集换指纹后的残留 server）
@@ -285,6 +311,13 @@ func (b *ToolBridge) Unregister(key string) {
 		for n, x := range b.byName {
 			if x == s {
 				delete(b.byName, n)
+			}
+		}
+		// 稳定绑定指向本会话的一并摘除：之后 /mcp/<binding> 落到空会话路径
+		// （可恢复），而不是对着一个已关闭的会话说话。
+		for n, x := range b.byBinding {
+			if x == s {
+				delete(b.byBinding, n)
 			}
 		}
 	}

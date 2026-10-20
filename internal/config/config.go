@@ -60,6 +60,13 @@ type Config struct {
 	ReuseExternal     bool   `json:"reuse_external"`
 	UpstreamCleanup   bool   `json:"upstream_cleanup"`
 
+	// 反向注入：把 janus 自己注册成 OpenCode 的模型 provider，让 OpenCode 不再
+	// 持有厂商凭据（凭据只在 janus 的 credentials 表里）。默认关闭。
+	OpencodeProviderInject  bool     `json:"opencode_provider_inject"`
+	OpencodeProviderBaseURL string   `json:"opencode_provider_base_url"`
+	OpencodeProviderAPIKey  string   `json:"opencode_provider_api_key"`
+	OpencodeProviderModels  []string `json:"opencode_provider_models"`
+
 	Username string `json:"username"`
 	Password string `json:"password"`
 
@@ -123,6 +130,10 @@ type Config struct {
 	ToolCompanions   bool            `json:"tool_companions"`
 	ToolOrphanWait   time.Duration   `json:"tool_orphan_wait"`
 	MCPPublicURL     string          `json:"mcp_public_url"`
+
+	// CLI 型 harness（codex / claude-code）的可执行文件：janus 驱动它们时启动的子进程。
+	CodexBin  string `json:"codex_bin"`
+	ClaudeBin string `json:"claude_bin"`
 
 	PermissionReply string `json:"permission_reply"`
 	MCPAllow        string `json:"mcp_allow"`
@@ -402,6 +413,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ToolOrphanWait <= 0 {
 		c.ToolOrphanWait = 30 * time.Second
+	}
+	if c.CodexBin == "" {
+		c.CodexBin = "codex"
+	}
+	if c.ClaudeBin == "" {
+		c.ClaudeBin = "claude"
 	}
 	if c.ToolFastTools == nil {
 		c.ToolFastTools = ParseToolSet(defaultFastTools)

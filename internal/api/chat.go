@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"janus/internal/agent"
 	"janus/internal/attach"
 	"janus/internal/gateway"
 	"janus/internal/httpx"
@@ -770,7 +771,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 模型面直连：agent key（harness 自己跑工具循环）或显式 agent=direct。
 	// 只换 model 字段后原样转发，不建上游会话。
-	if s.directMode(r, p) {
+	// 由 Agent 面 runtime 注册表选择（见 agent_registry.go）：direct 才直连。
+	if rt := s.agentRuntimeFor(r, p); rt != nil && rt.Name() == agent.NameDirect {
 		if s.proxyModel(w, r, p, gateway.ProtocolOpenAIChat, body, openAIFail(w)) {
 			return
 		}
@@ -903,7 +905,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.ToolCalling {
 		switch {
 		case len(req.Tools) > 0:
-			if err := s.ensureTools(ctx, conv, dir, req.Tools); err != nil {
+			if err := s.ensureTools(ctx, conv, dir, req.Tools, MCPBindingToken(p.Key.ID)); err != nil {
 				// 客户端明确声明了 tools 却注册不上：必须让它知道。
 				// 静默降级成"无工具"更糟 —— 模型会凭自己的能力硬答，
 				// 客户端却以为工具可用（实测上游对某些 directory 会 500）。

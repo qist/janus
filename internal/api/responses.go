@@ -806,7 +806,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 工具 ----
 	if s.cfg.ToolCalling && len(tools) > 0 {
-		if err := s.ensureTools(ctx, conv, dir, tools); err != nil {
+		if err := s.ensureTools(ctx, conv, dir, tools, MCPBindingToken(p.Key.ID)); err != nil {
 			if s.cfg.ToolSoftFail {
 				s.log.Warnf("tool bridge registration failed (soft-fail): %v", err)
 			} else {

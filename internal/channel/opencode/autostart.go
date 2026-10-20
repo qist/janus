@@ -28,8 +28,10 @@ import (
 //	没有就检查 opencode 是否安装——装了就以随机端口拉一个，没装就给出安装提示；
 //	已在跑就直接复用（现有发现逻辑，密码从进程环境读取）。
 //
-// 模型授权（OAuth/token）仍由 OpenCode 自己存在它的库里，janus 不参与；
-// /v1/usage 时只读读同一个库。
+// 模型授权（OAuth/token）默认仍由 OpenCode 自己存在它的库里，janus 不参与；
+// /v1/usage 时只读读同一个库。开启 opencode_provider_inject 后改为反向注入：
+// 把 janus 注册成 OpenCode 的模型 provider（见 inlineconfig.go），厂商凭据只留在
+// janus 的 credentials 表，OpenCode 不再持有。
 //
 // 注意：本桥拉起的 opencode 用随机端口 + 随机密码，密码只在本次进程的
 // 环境变量里，janus 自己知道并直接使用；已在跑的那个则按其进程环境里的密码连。

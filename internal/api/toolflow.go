@@ -25,7 +25,10 @@ import (
 //  2. 工具集变化：客户端换了 tools
 //  3. 注册过期：上游（OpenCode）重启会丢掉所有 MCP 注册，而桥不知道；
 //     所以超过 ToolReregister 就主动续注册一次，代价只是一次 PUT。
-func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string, tools []ToolSpec) error {
+//
+// binding 是稳定 MCP token（见 mcpbind.go，可为空）：非空时把该 token 指向本会话，
+// 让 CLI harness 的静态 MCP 配置能解析到「该 agent key 名下最近活跃的会话」。
+func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string, tools []ToolSpec, binding string) error {
 	// 客户端声明了 RunCommand 这类「异步命令」工具时，配套的状态查询工具
 	//（check_command_status）只在客户端本地存在、不会写进 tools[] 声明，
 	// agent 既看不到也调不到 → 长命令（build）跑起来后没法得知结果、卡住。
@@ -41,6 +44,8 @@ func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string
 		tools[i].Function.Description = steerAsyncCommandDesc(s.cfg.ToolCompanions, tools[i].Function.Name, tools[i].Function.Description)
 	}
 	sess := s.tools.Register(conv.Key, tools)
+	// 稳定绑定：每次请求都重新指向本会话，因此始终是「最近活跃的那个」。
+	s.tools.Bind(binding, sess)
 	// 工具结果超时时标记会话 terminated：下一轮请求若重发相同内容（Trae 自动重试）
 	// 会被 499 挡掉，不白跑一遍；若发了新内容则走 terminated 路径重建。
 	sess.onTimeout = conv.markTerminated

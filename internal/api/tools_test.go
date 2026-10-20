@@ -564,10 +564,10 @@ func TestEnsureToolsReregistersAfterTTL(t *testing.T) {
 	conv := &Conversation{Key: "f:k"}
 	ctx := context.Background()
 
-	if err := srv.ensureTools(ctx, conv, "/tmp", toolSpecs()); err != nil {
+	if err := srv.ensureTools(ctx, conv, "/tmp", toolSpecs(), ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.ensureTools(ctx, conv, "/tmp", toolSpecs()); err != nil {
+	if err := srv.ensureTools(ctx, conv, "/tmp", toolSpecs(), ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := atomic.LoadInt32(puts); n != 1 {
@@ -577,7 +577,7 @@ func TestEnsureToolsReregistersAfterTTL(t *testing.T) {
 	// 工具集变化 → 立即重注册
 	if err := srv.ensureTools(ctx, conv, "/tmp", []ToolSpec{
 		{Type: "function", Function: funcSpec("get_time", "查时间")},
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := atomic.LoadInt32(puts); n != 2 {
@@ -589,7 +589,7 @@ func TestEnsureToolsReregistersAfterTTL(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	if err := srv.ensureTools(ctx, conv, "/tmp", []ToolSpec{
 		{Type: "function", Function: funcSpec("get_time", "查时间")},
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := atomic.LoadInt32(puts); n != 3 {
@@ -600,7 +600,7 @@ func TestEnsureToolsReregistersAfterTTL(t *testing.T) {
 func TestEnsureToolsPropagatesError(t *testing.T) {
 	srv, _ := newToolTestServer(t, http.StatusInternalServerError, time.Hour, false)
 	conv := &Conversation{Key: "f:k"}
-	err := srv.ensureTools(context.Background(), conv, "/tmp", toolSpecs())
+	err := srv.ensureTools(context.Background(), conv, "/tmp", toolSpecs(), "")
 	if err == nil {
 		t.Fatal("上游 500 时 ensureTools 应报错")
 	}
@@ -657,7 +657,7 @@ func TestRemoveToolsClearsState(t *testing.T) {
 	srv, _ := newToolTestServer(t, http.StatusNoContent, time.Hour, false)
 	conv := &Conversation{Key: "f:k"}
 	ctx := context.Background()
-	if err := srv.ensureTools(ctx, conv, "/tmp", toolSpecs()); err != nil {
+	if err := srv.ensureTools(ctx, conv, "/tmp", toolSpecs(), ""); err != nil {
 		t.Fatal(err)
 	}
 	if conv.mcpName == "" || srv.tools.ByKey("f:k") == nil {

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"janus/internal/agent"
+	"janus/internal/channel/opencode"
 	"janus/internal/config"
 	"janus/internal/db"
 	"janus/internal/gateway"
@@ -67,6 +69,10 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/v1/agents/{id}", s.adminGuard(s.handlePatchAgent))
 	mux.HandleFunc("DELETE /api/v1/agents/{id}", s.adminGuard(s.handleDeleteAgent))
 	mux.HandleFunc("POST /api/v1/agents/{id}/provision", s.adminGuard(s.handleProvisionAgent))
+
+	// runtimes（Agent 面 harness 适配器）
+	mux.HandleFunc("GET /api/v1/runtimes", s.adminGuard(s.handleListRuntimes))
+	mux.HandleFunc("POST /api/v1/runtimes/{name}/prompt", s.adminGuard(s.handleRuntimePrompt))
 
 	// settings
 	mux.HandleFunc("GET /api/v1/settings", s.adminGuard(s.handleGetRuntimeSettings))
@@ -184,10 +190,10 @@ func (in providerInput) toRow(base db.Provider) (db.Provider, error) {
 	}
 	if in.AuthKind != "" {
 		switch in.AuthKind {
-		case "api_key", "oauth", "none":
+		case "api_key", "oauth", "none", "workbuddy":
 			row.AuthKind = in.AuthKind
 		default:
-			return row, errors.New("auth_kind must be api_key|oauth|none")
+			return row, errors.New("auth_kind must be api_key|oauth|none|workbuddy")
 		}
 	}
 	if in.Headers != nil {
@@ -299,6 +305,7 @@ type credentialView struct {
 	Label      string   `json:"label"`
 	Priority   int      `json:"priority"`
 	Enabled    bool     `json:"enabled"`
+	AuthKind   string   `json:"auth_kind"` // 来自 provider，UI 据此决定能否「刷新授权」
 	SecretKeys []string `json:"secret_keys"`
 	LastUsedAt int64    `json:"last_used_at"`
 	LastError  string   `json:"last_error"`
@@ -307,11 +314,16 @@ type credentialView struct {
 	UpdatedAt  int64    `json:"updated_at"`
 }
 
-func credentialToView(c db.Credential) credentialView {
+func credentialToView(st *db.Store, c db.Credential) credentialView {
 	v := credentialView{
 		ID: c.ID, ProviderID: c.ProviderID, Label: c.Label, Priority: c.Priority,
 		Enabled: c.Enabled, LastUsedAt: c.LastUsedAt, LastError: c.LastError,
 		FailUntil: c.FailUntil, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
+	}
+	if st != nil {
+		if p, ok := st.GetProvider(c.ProviderID); ok {
+			v.AuthKind = p.AuthKind
+		}
 	}
 	if plain, err := db.DecryptBlob(c.Secret); err == nil {
 		var m map[string]any
@@ -333,7 +345,7 @@ func (s *Server) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 	rows := st.ListCredentials(r.URL.Query().Get("provider_id"))
 	out := make([]credentialView, 0, len(rows))
 	for _, c := range rows {
-		out = append(out, credentialToView(c))
+		out = append(out, credentialToView(st, c))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"credentials": out})
 }
@@ -348,7 +360,7 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "not_found", "credential not found", nil)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, credentialToView(row))
+	httpx.WriteJSON(w, http.StatusOK, credentialToView(st, row))
 }
 
 type credentialInput struct {
@@ -382,7 +394,7 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, credentialToView(row))
+	httpx.WriteJSON(w, http.StatusCreated, credentialToView(st, row))
 }
 
 func (s *Server) handlePatchCredential(w http.ResponseWriter, r *http.Request) {
@@ -404,7 +416,7 @@ func (s *Server) handlePatchCredential(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, credentialToView(row))
+	httpx.WriteJSON(w, http.StatusOK, credentialToView(st, row))
 }
 
 func (s *Server) handleDeleteCredential(w http.ResponseWriter, r *http.Request) {
@@ -994,6 +1006,9 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProvisionAgent 返回把该 harness 接到 janus 所需的配置片段。
+//
+// 具体形态交给该 harness 的 agent.Harness 实现（见 internal/api/provision.go）：
+// opencode/claude-code/codex 各自产出 env + 配置文件片段 + 建议命令。
 func (s *Server) handleProvisionAgent(w http.ResponseWriter, r *http.Request) {
 	st, ok := s.storeOrError(w)
 	if !ok {
@@ -1005,31 +1020,77 @@ func (s *Server) handleProvisionAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base := s.publicBaseURL(r)
-	snippet := map[string]any{
-		"agent": a.ID,
-		"env": map[string]string{
+	mode := s.toolMode()
+	out := map[string]any{
+		"agent":     a.ID,
+		"kind":      a.Kind,
+		"tool_mode": string(mode),
+	}
+	if a.APIKeyID != "" {
+		out["api_key_id"] = a.APIKeyID
+	}
+
+	h, ok := s.harnessFor(a.Kind)
+	if !ok {
+		out["env"] = map[string]string{
 			"OPENAI_BASE_URL":      base + "/v1",
 			"OPENAI_API_KEY":       "<agent key: POST /api/v1/keys {\"kind\":\"agent\"}>",
 			"ANTHROPIC_BASE_URL":   base + "/anthropic",
 			"ANTHROPIC_AUTH_TOKEN": "<agent key>",
-		},
-	}
-	if a.APIKeyID != "" {
-		snippet["api_key_id"] = a.APIKeyID
-	}
-	if a.Kind == "opencode" {
-		snippet["config"] = map[string]any{
-			"provider": map[string]any{
-				"janus": map[string]any{
-					"npm":     "@ai-sdk/openai-compatible",
-					"name":    "Janus",
-					"options": map[string]any{"baseURL": base + "/v1", "apiKey": "<agent key>"},
-					"models":  map[string]any{},
-				},
-			},
 		}
+		out["notes"] = []string{
+			"未知 harness kind=" + a.Kind + "；可选 opencode / codex / claude-code。",
+		}
+		httpx.WriteJSON(w, http.StatusOK, out)
+		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, snippet)
+
+	// MCP 端点的稳定 token 由 agent key 派生（见 mcpbind.go）：harness 可以把它
+	// 写进静态配置，不必等某次聊天会话。未绑 agent key 时给占位。
+	mcpToken := MCPBindingToken(a.APIKeyID)
+	mcpPlaceholder := mcpToken == ""
+	if mcpPlaceholder {
+		mcpToken = "<token>"
+	}
+	mcpURL := base + "/mcp/" + mcpToken
+	out["mcp_url"] = mcpURL
+
+	res, err := h.Provision(agent.ProvisionInput{
+		Harness:   a.ID,
+		BaseURL:   base,
+		APIKey:    "<agent key: POST /api/v1/keys {\"kind\":\"agent\"}>",
+		MCPURL:    mcpURL,
+		MCPName:   "janus",
+		Models:    s.cfg.OpencodeProviderModels,
+		Mode:      mode,
+		Directory: s.cfg.Directory,
+	})
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
+		return
+	}
+	if mcpPlaceholder {
+		res.Notes = append(res.Notes,
+			"该 agent 未绑定 agent key，MCP URL 里的 <token> 无法自动派生；"+
+				"在 agents 页绑定 key 后重取本片段即可得到稳定地址。")
+	}
+	if len(res.Env) > 0 {
+		out["env"] = res.Env
+	}
+	if len(res.Files) > 0 {
+		out["files"] = res.Files
+	}
+	if len(res.Command) > 0 {
+		out["command"] = res.Command
+	}
+	if len(res.Notes) > 0 {
+		out["notes"] = res.Notes
+	}
+	if a.Kind == opencode.Name {
+		// 开启注入时，janus 拉起的 OpenCode 会自动带上这段配置，无需手改 opencode.jsonc。
+		out["auto_inject"] = s.cfg.OpencodeProviderInject
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) publicBaseURL(r *http.Request) string {

@@ -135,6 +135,7 @@ function ProvisionModal({ id, onClose }) {
       <div class="alert">
         把片段里的 <code>&lt;agent key&gt;</code> 换成真实 key；
         key 在「API Keys」页签发，只显示一次。
+        ${snippet.tool_mode ? html`当前工具执行模式：<code>${snippet.tool_mode}</code>。` : null}
       </div>
       ${snippet.env ? html`<div class="cardhead"><h2>环境变量</h2></div>
         <div class="kv">
@@ -142,8 +143,17 @@ function ProvisionModal({ id, onClose }) {
             <span class="k mono">${k}</span><span class="mono wrap">${v}</span>
           <//>`)}
         </div>` : null}
-      ${snippet.config ? html`<div class="cardhead" style="margin-top:16px"><h2>opencode.json</h2></div>
-        <pre class="code">${jsonPretty(snippet.config)}</pre>` : null}
+      ${(snippet.files || []).map((f) => html`<${Fragment}>
+        <div class="cardhead" style="margin-top:16px">
+          <h2>配置文件：<code>${f.path}</code></h2>
+        </div>
+        <pre class="code">${f.content}</pre>
+      <//>`)}
+      ${snippet.command ? html`<div class="cardhead" style="margin-top:16px"><h2>启动命令</h2></div>
+        <pre class="code">${snippet.command.join(' ')}</pre>` : null}
+      ${snippet.notes ? html`<ul class="notes">
+        ${snippet.notes.map((n) => html`<li>${n}</li>`)}
+      </ul>` : null}
       <div class="cardhead" style="margin-top:16px"><h2>原始响应</h2></div>
       <pre class="code">${text}</pre>
     </div>` : null}

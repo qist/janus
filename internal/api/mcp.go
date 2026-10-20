@@ -18,7 +18,10 @@ import (
 //   - 客户端会额外 GET 一次 Accept: text/event-stream 开服务端推送通道；
 //     我们不需要服务端主动推送，回 405 即可（实测客户端会正常回退到 POST）
 //
-// 一个 token 对应一个会话（URL 里的 /mcp/{token} 就是凭据）。
+// URL 里的 /mcp/{token} 就是凭据。token 有两种：
+//   - 随机会话 token（32 位 hex）：一次聊天会话一个，janus 主动注册给上游；
+//   - 稳定绑定 token（见 mcpbind.go，`b`+32 hex）：由 agent key 派生，供
+//     CLI harness 写进静态配置，解析到该 key 名下最近活跃的会话。
 
 type mcpRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -41,6 +44,11 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	token := r.PathValue("token")
 	sess := s.tools.Get(token)
+	// 稳定端点：token 是 keyID 的确定性派生（CLI harness 的静态配置用）。
+	// 解析到该 agent key 名下最近活跃的会话；没有则落到空会话路径。
+	if sess == nil && isMCPBindingToken(token) {
+		sess = s.tools.GetBinding(token)
+	}
 
 	switch r.Method {
 	case http.MethodGet:

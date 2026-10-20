@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -245,16 +246,39 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request, p Principal,
 		fail(http.StatusBadRequest, "invalid_request_error", "invalid JSON body: "+err.Error(), "")
 		return true
 	}
+
+	// 本地记账：解码完成后开始计一条；失败也记，便于按渠道看错误率与耗时。
+	started := time.Now()
+	ev := db.UsageEvent{
+		Ts: started.Unix(), Model: model, Stream: stream,
+		KeyID: p.Key.ID, KeyKind: p.Kind, Protocol: protocol,
+	}
+	status, errCode := 0, ""
+	var tail tailBuffer
+	failRec := func(code int, typ, msg, c string) {
+		status, errCode = code, c
+		fail(code, typ, msg, c)
+	}
+	defer func() {
+		if status == 0 {
+			status = http.StatusOK
+		}
+		ev.Status, ev.ErrorCode = status, errCode
+		ev.DurationMs = time.Since(started).Milliseconds()
+		s.commitUsage(st, ev, tail.Bytes())
+	}()
+
 	res, err := s.routeDirect(p, protocol, model,
 		firstNonEmpty(r.Header.Get("X-Janus-Credential"), r.Header.Get("X-Janus-Account")))
 	if err != nil {
-		writeRouteFailure(fail, err)
+		writeRouteFailure(failRec, err)
 		return true
 	}
+	ev.ProviderID, ev.CredentialID, ev.UpstreamModel = res.ProviderID, res.CredentialID, res.UpstreamID
 
 	prov, ok := st.GetProvider(res.ProviderID)
 	if !ok || !prov.Enabled {
-		fail(http.StatusNotFound, "invalid_request_error",
+		failRec(http.StatusNotFound, "invalid_request_error",
 			fmt.Sprintf("provider %q is not available", res.ProviderID), "model_not_found")
 		return true
 	}
@@ -263,7 +287,7 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request, p Principal,
 	upstreamProto := protocol
 	if protocol != "" && prov.Type != "" && prov.Type != protocol {
 		if !gateway.CanTranslate(protocol, prov.Type) {
-			fail(http.StatusBadRequest, "invalid_request_error",
+			failRec(http.StatusBadRequest, "invalid_request_error",
 				fmt.Sprintf("provider %s speaks %s but this endpoint is %s; route this model to a %s provider",
 					prov.ID, prov.Type, protocol, protocol),
 				"protocol_mismatch")
@@ -271,20 +295,27 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request, p Principal,
 		}
 		upstreamProto = prov.Type
 	}
+	ev.Protocol = upstreamProto
 	cred, ok := st.GetCredential(res.CredentialID)
 	if !ok || !cred.Enabled {
-		fail(http.StatusServiceUnavailable, "api_error",
+		failRec(http.StatusServiceUnavailable, "api_error",
 			fmt.Sprintf("credential for provider %s is not available", prov.ID), "no_available_credential")
+		return true
+	}
+	// WorkBuddy 渠道走专用路径：桌面身份头 + refreshToken 续期 + 强制 stream。
+	if prov.AuthKind == "workbuddy" {
+		hs, hc := s.proxyWorkBuddy(w, r, model, protocol, body, stream, failRec, st, prov, cred, res, &tail)
+		status, errCode = hs, hc
 		return true
 	}
 	headers, err := credentialHTTP(prov, cred)
 	if err != nil {
-		fail(http.StatusBadGateway, "api_error", err.Error(), "invalid_credential")
+		failRec(http.StatusBadGateway, "api_error", err.Error(), "invalid_credential")
 		return true
 	}
 	endpoint := upstreamEndpoint(prov, upstreamProto)
 	if endpoint == "" {
-		fail(http.StatusBadRequest, "invalid_request_error",
+		failRec(http.StatusBadRequest, "invalid_request_error",
 			fmt.Sprintf("provider %s has no base_url", prov.ID), "invalid_provider")
 		return true
 	}
@@ -293,20 +324,20 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request, p Principal,
 	if upstreamProto != protocol {
 		payload, err = gateway.TranslateRequest(protocol, upstreamProto, body)
 		if err != nil {
-			fail(http.StatusBadRequest, "invalid_request_error",
+			failRec(http.StatusBadRequest, "invalid_request_error",
 				"cannot translate request: "+err.Error(), "invalid_request")
 			return true
 		}
 	}
 	forwarded, err := replaceWireModel(payload, res.UpstreamID)
 	if err != nil {
-		fail(http.StatusBadRequest, "invalid_request_error", "cannot rewrite model: "+err.Error(), "")
+		failRec(http.StatusBadRequest, "invalid_request_error", "cannot rewrite model: "+err.Error(), "")
 		return true
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(forwarded))
 	if err != nil {
-		fail(http.StatusBadRequest, "invalid_request_error", err.Error(), "")
+		failRec(http.StatusBadRequest, "invalid_request_error", err.Error(), "")
 		return true
 	}
 	copyProxyHeaders(req.Header, r.Header)
@@ -322,10 +353,11 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request, p Principal,
 	resp, err := s.proxyHTTP().Do(req)
 	if err != nil {
 		st.MarkCredentialError(cred.ID, err.Error(), time.Now().Add(30*time.Second).Unix())
-		fail(http.StatusBadGateway, "api_error", "upstream request failed: "+err.Error(), "upstream_error")
+		failRec(http.StatusBadGateway, "api_error", "upstream request failed: "+err.Error(), "upstream_error")
 		return true
 	}
 	defer resp.Body.Close()
+	status = resp.StatusCode
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
@@ -335,9 +367,13 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request, p Principal,
 		// 凭据/上游问题：进冷却窗口，路由层随后会跳过它。
 		st.MarkCredentialError(cred.ID,
 			fmt.Sprintf("upstream http %d", resp.StatusCode), cooldownUntil(resp.StatusCode))
+		errCode = "upstream_http_" + strconv.Itoa(resp.StatusCode)
 	default:
 		// 400/404/422 是请求本身的问题（模型名、参数、上下文超限），
 		// 惩罚凭据只会让下一轮无谓地换 key，这里不记。
+		if resp.StatusCode >= 400 {
+			errCode = "upstream_http_" + strconv.Itoa(resp.StatusCode)
+		}
 	}
 
 	// 响应里的 model 字段按 settings.model_echo 回显（§3.4）。
@@ -347,6 +383,7 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request, p Principal,
 	if translated && resp.StatusCode >= 300 {
 		// 错误体也要换信封：客户端只认得自己那套 error 形状。
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		tail.Write(raw)
 		copyProxyResponseHeaders(w.Header(), resp.Header)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
@@ -364,18 +401,22 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request, p Principal,
 
 	if stream {
 		// 流式：逐行转发并 flush，保持首包延迟；仅按需改写 model 字段。
+		// TeeReader 把尾部字节留给 usage 解析（usage 总在最后的事件里）。
+		tapped := io.TeeReader(resp.Body, &tail)
 		if translated {
-			copyTranslatedStream(w, resp.Body, upstreamProto, protocol, echo)
+			copyTranslatedStream(w, tapped, upstreamProto, protocol, echo)
 			return true
 		}
-		copyStream(w, resp.Body, echo)
+		copyStream(w, tapped, echo)
 		return true
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
+		status, errCode = http.StatusBadGateway, "read_error"
 		return true
 	}
+	tail.Write(data)
 	if translated {
 		if out, terr := gateway.TranslateResponse(upstreamProto, protocol, data, echo); terr == nil {
 			data = out

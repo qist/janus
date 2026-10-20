@@ -45,6 +45,14 @@ func credentialHTTP(p db.Provider, c db.Credential) (map[string]string, error) {
 			return nil, fmt.Errorf("credential has no access_token")
 		}
 		h["Authorization"] = "Bearer " + tok
+	case "workbuddy":
+		// WorkBuddy 明文凭据用 camelCase 的 accessToken；chat 走专用路径
+		// （设备身份头 + 401 续期），这里只给目录/探测请求用。
+		tok := str("accessToken")
+		if tok == "" {
+			return nil, fmt.Errorf("credential has no accessToken")
+		}
+		h["Authorization"] = "Bearer " + tok
 	default:
 		key := str("api_key")
 		if key == "" {

@@ -301,7 +301,24 @@ func (c *Client) fetch(ctx context.Context) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
+	return c.fetchWith(ctx, cred, c.base, c.goURL)
+}
 
+// ReportFor 用显式凭据与 console 基址拉一份报告（不走缓存）。
+//
+// 供「分渠道用量」使用：每份 credentials 各自的 access_token 打各自的 console，
+// 不再依赖全局 OPENCODE_DB。goURL 为空时跳过 Go 套餐用量。
+func (c *Client) ReportFor(ctx context.Context, access, orgID, base, goURL string) (*Report, error) {
+	if strings.TrimSpace(access) == "" {
+		return nil, fmt.Errorf("credential has no access_token")
+	}
+	if strings.TrimSpace(base) == "" {
+		return nil, fmt.Errorf("console url is empty (set credential console_url or CONSOLE_URL)")
+	}
+	return c.fetchWith(ctx, &consoleCredential{Access: access, OrgID: orgID}, base, goURL)
+}
+
+func (c *Client) fetchWith(ctx context.Context, cred *consoleCredential, base, goURL string) (*Report, error) {
 	// console 的四个端点并发拉，任一失败整体失败（余额最关键）。
 	// Go 套餐用量走另一个域，属可选数据：失败只降级为不展示。
 	var (
@@ -318,27 +335,27 @@ func (c *Client) fetch(ctx context.Context) (*Report, error) {
 	wg.Add(5)
 	go func() {
 		defer wg.Done()
-		errB = c.get(ctx, cred, "/billing/status", &billing)
+		errB = c.getURL(ctx, cred, base+"/billing/status", &billing)
 	}()
 	go func() {
 		defer wg.Done()
-		errS = c.get(ctx, cred, "/usage/summary", &summary)
+		errS = c.getURL(ctx, cred, base+"/usage/summary", &summary)
 	}()
 	go func() {
 		defer wg.Done()
-		errM = c.get(ctx, cred, "/usage/models", &models)
+		errM = c.getURL(ctx, cred, base+"/usage/models", &models)
 	}()
 	go func() {
 		defer wg.Done()
-		errD = c.get(ctx, cred, "/usage/cost-by-day", &byDay)
+		errD = c.getURL(ctx, cred, base+"/usage/cost-by-day", &byDay)
 	}()
 	go func() {
 		defer wg.Done()
-		if c.goURL == "" {
+		if goURL == "" {
 			errG = fmt.Errorf("go usage endpoint not configured")
 			return
 		}
-		errG = c.getURL(ctx, cred, c.goURL, &goRaw)
+		errG = c.getURL(ctx, cred, goURL, &goRaw)
 	}()
 	wg.Wait()
 
@@ -357,7 +374,7 @@ func (c *Client) fetch(ctx context.Context) (*Report, error) {
 
 	rep := &Report{
 		FetchedAt: time.Now().UTC(),
-		Source:    c.base,
+		Source:    base,
 		Billing: BillingStatus{
 			Mode:            billing.Mode,
 			BillingMode:     billing.BillingMode,
@@ -408,11 +425,7 @@ func (c *Client) fetch(ctx context.Context) (*Report, error) {
 	return rep, nil
 }
 
-func (c *Client) get(ctx context.Context, cred *consoleCredential, path string, out any) error {
-	return c.getURL(ctx, cred, c.base+path, out)
-}
-
-// getURL 与 get 相同，但接受完整 URL（Go 套餐用量在另一个域）。
+// getURL 用凭据请求完整 URL（console 与 Go 套餐在不同域）。
 func (c *Client) getURL(ctx context.Context, cred *consoleCredential, url string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -625,7 +638,7 @@ func (c *Client) RequestLogs(ctx context.Context, sinceMs int64, limit int) ([]R
 	var wrap struct {
 		Items []requestLogRaw `json:"items"`
 	}
-	if err := c.get(ctx, cred, path, &wrap); err != nil {
+	if err := c.getURL(ctx, cred, c.base+path, &wrap); err != nil {
 		return fail(err)
 	}
 

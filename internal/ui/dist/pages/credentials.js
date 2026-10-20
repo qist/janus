@@ -10,9 +10,19 @@ import { fmtUnix } from '../util.js';
 // 每类鉴权方式期望的 secret 键名。
 const SECRET_TEMPLATE = {
   api_key: '{\n  "api_key": ""\n}',
-  oauth: '{\n  "access_token": "",\n  "refresh_token": ""\n}',
+  oauth: '{\n  "access_token": "",\n  "refresh_token": "",\n  "token_url": "",\n  "client_id": ""\n}',
+  workbuddy: '{\n  "accessToken": "",\n  "refreshToken": "",\n  "domain": "workbuddy.ai",\n  "uid": "",\n  "enterpriseId": ""\n}',
   none: '{}',
 };
+
+function templateFor(provider) {
+  return SECRET_TEMPLATE[(provider && provider.auth_kind) || 'api_key'] || SECRET_TEMPLATE.api_key;
+}
+
+// 能自动续期的鉴权方式（对应 POST /credentials/{id}/refresh）。
+function canRefresh(authKind) {
+  return authKind === 'oauth' || authKind === 'workbuddy';
+}
 
 function CredentialForm({ providers, initial, onClose, onSaved }) {
   const isNew = !initial;
@@ -21,13 +31,18 @@ function CredentialForm({ providers, initial, onClose, onSaved }) {
     secretText: '', priority: String(initial.priority || 0), enabled: !!initial.enabled,
   } : {
     provider_id: providers.length ? providers[0].id : '',
-    label: '', secretText: SECRET_TEMPLATE.api_key, priority: '0', enabled: true,
+    label: '', secretText: templateFor(providers[0]), priority: '0', enabled: true,
   });
   const [busy, setBusy] = useState(false);
   const set = (k) => (v) => setF((s) => ({ ...s, [k]: v }));
 
   const provider = providers.find((p) => p.id === f.provider_id);
-  const template = SECRET_TEMPLATE[(provider && provider.auth_kind) || 'api_key'] || SECRET_TEMPLATE.api_key;
+  const template = templateFor(provider);
+  // 换 provider 时（仅新建）同步换成对应的 secret 模板，避免填错键名。
+  const pickProvider = (pid) => setF((s) => ({
+    ...s, provider_id: pid,
+    secretText: isNew ? templateFor(providers.find((p) => p.id === pid)) : s.secretText,
+  }));
 
   const save = async (e) => {
     if (e) e.preventDefault();
@@ -67,7 +82,7 @@ function CredentialForm({ providers, initial, onClose, onSaved }) {
     <form onSubmit=${save}>
       <div class="formrow">
         <${Field} label="Provider">
-          <select value=${f.provider_id} onChange=${(e) => set('provider_id')(e.target.value)} disabled=${!isNew}>
+          <select value=${f.provider_id} onChange=${(e) => pickProvider(e.target.value)} disabled=${!isNew}>
             ${providers.map((p) => html`<option value=${p.id}>${p.id}</option>`)}
           </select>
         <//>
@@ -113,6 +128,20 @@ export default function Credentials() {
       creds.reload();
     } catch (err) {
       toast('验证失败：' + err.message, 'err');
+      creds.reload();
+    } finally {
+      setBusyId('');
+    }
+  };
+
+  const doRefresh = async (c) => {
+    setBusyId(c.id);
+    try {
+      await api.refreshCredential(c.id);
+      toast('授权已续期', 'ok');
+      creds.reload();
+    } catch (err) {
+      toast('续期失败：' + err.message, 'err');
       creds.reload();
     } finally {
       setBusyId('');
@@ -175,12 +204,13 @@ export default function Credentials() {
           </div>
           <div class="tablewrap"><table>
             <thead><tr>
-              <th>标签</th><th>Secret 键</th><th class="num">优先级</th><th>状态</th>
+              <th>标签</th><th>鉴权</th><th>Secret 键</th><th class="num">优先级</th><th>状态</th>
               <th>最近使用</th><th>错误</th><th>操作</th>
             </tr></thead>
             <tbody>
               ${list.map((c) => html`<tr>
                 <td>${c.label || html`<span class="muted">–</span>`}</td>
+                <td class="small mono">${c.auth_kind || '–'}</td>
                 <td class="mono small">${(c.secret_keys || []).join(', ') || '–'}</td>
                 <td class="num">${c.priority}</td>
                 <td>
@@ -199,6 +229,11 @@ export default function Credentials() {
                     <button class="sm ghost" disabled=${busyId === c.id} onClick=${() => doVerify(c)}>
                       ${busyId === c.id ? '…' : '验证'}
                     </button>
+                    ${canRefresh(c.auth_kind)
+                      ? html`<button class="sm ghost" disabled=${busyId === c.id} onClick=${() => doRefresh(c)}>
+                          ${busyId === c.id ? '…' : '刷新授权'}
+                        </button>`
+                      : null}
                     <button class="sm ghost" onClick=${() => doToggle(c)}>${c.enabled ? '停用' : '启用'}</button>
                     <button class="sm ghost" onClick=${() => setEditing({ mode: 'edit', row: c })}>编辑</button>
                     <button class="sm danger" onClick=${() => doDelete(c)}>删除</button>

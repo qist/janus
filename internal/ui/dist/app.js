@@ -16,11 +16,13 @@ import Agents from './pages/agents.js';
 import Settings from './pages/settings.js';
 import Requests from './pages/requests.js';
 import Sessions from './pages/sessions.js';
+import Usage from './pages/usage.js';
 
 // ---------- 路由表 ----------
 const NAV = [
   { group: '总览' },
   { path: '/overview', label: '概览', ico: '◧', comp: Overview },
+  { path: '/usage', label: '用量', ico: '◨', comp: Usage },
   { path: '/requests', label: '请求日志', ico: '☰', comp: Requests },
   { path: '/sessions', label: '会话', ico: '❏', comp: Sessions },
   { group: '接入' },

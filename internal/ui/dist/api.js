@@ -87,6 +87,7 @@ export const api = {
   patchCredential: (id, b) => request('PATCH', '/api/v1/credentials/' + enc(id), b),
   deleteCredential: (id) => request('DELETE', '/api/v1/credentials/' + enc(id)),
   verifyCredential: (id) => request('POST', '/api/v1/credentials/' + enc(id) + '/verify'),
+  refreshCredential: (id) => request('POST', '/api/v1/credentials/' + enc(id) + '/refresh'),
 
   models: (q) => request('GET', '/api/v1/models' + (q ? '?' + q : '')),
   createModel: (b) => request('POST', '/api/v1/models', b),
@@ -114,6 +115,9 @@ export const api = {
   deleteSession: (key) => request('DELETE', '/api/v1/sessions/' + encPath(key)),
 
   usage: () => request('GET', '/api/v1/usage'),
+  usageLocal: (q) => request('GET', '/api/v1/usage/local' + (q ? '?' + q : '')),
+  usageEvents: (q) => request('GET', '/api/v1/usage/events' + (q ? '?' + q : '')),
+  usageRemote: (q) => request('GET', '/api/v1/usage/remote' + (q ? '?' + q : '')),
   requests: (limit) => request('GET', '/api/v1/requests' + (limit ? '?limit=' + limit : '')),
 };
 

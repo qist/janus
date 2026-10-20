@@ -15,7 +15,8 @@ const PROTOCOLS = [
 
 const AUTH_KINDS = [
   { v: 'api_key', label: 'api_key（Bearer / x-api-key）' },
-  { v: 'oauth', label: 'oauth（access_token）' },
+  { v: 'oauth', label: 'oauth（access_token，可自动续期）' },
+  { v: 'workbuddy', label: 'workbuddy（明文凭据 + 桌面身份头）' },
   { v: 'none', label: 'none（无鉴权）' },
 ];
 
@@ -23,6 +24,11 @@ const BASE_HINT = {
   'openai-chat': 'https://api.openai.com/v1',
   'openai-responses': 'https://api.openai.com/v1',
   'anthropic-messages': 'https://api.anthropic.com',
+};
+
+// 鉴权方式 → 建 provider 时的 Base URL 建议。
+const AUTH_BASE_HINT = {
+  workbuddy: 'https://www.workbuddy.ai',
 };
 
 function emptyForm() {
@@ -93,11 +99,15 @@ function ProviderForm({ initial, isNew, onClose, onSaved }) {
           ${PROTOCOLS.map((p) => html`<option value=${p.v}>${p.label}</option>`)}
         </select>
       <//>
-      <${Field} label="Base URL" hint=${'示例：' + (BASE_HINT[f.type] || '')}>
-        <input value=${f.base_url} onInput=${(e) => set('base_url')(e.target.value)} placeholder=${BASE_HINT[f.type] || ''} spellcheck="false" />
+      <${Field} label="Base URL" hint=${'示例：' + (AUTH_BASE_HINT[f.auth_kind] || BASE_HINT[f.type] || '')}>
+        <input value=${f.base_url} onInput=${(e) => set('base_url')(e.target.value)}
+          placeholder=${AUTH_BASE_HINT[f.auth_kind] || BASE_HINT[f.type] || ''} spellcheck="false" />
       <//>
       <${Field} label="鉴权方式">
-        <select value=${f.auth_kind} onChange=${(e) => set('auth_kind')(e.target.value)}>
+        <select value=${f.auth_kind} onChange=${(e) => {
+          const v = e.target.value;
+          setF((s) => ({ ...s, auth_kind: v, base_url: s.base_url.trim() ? s.base_url : (AUTH_BASE_HINT[v] || s.base_url) }));
+        }}>
           ${AUTH_KINDS.map((p) => html`<option value=${p.v}>${p.label}</option>`)}
         </select>
       <//>

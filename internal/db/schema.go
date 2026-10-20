@@ -106,6 +106,33 @@ type Setting struct {
 	UpdatedAt int64
 }
 
+// UsageEvent 是本地用量记账的一行：每次模型面请求落一条，
+// 按 provider / credential / key / model 维度可聚合（见 docs/ARCHITECTURE.md §11）。
+//
+// Source 区分数据来源：local = janus 自己从响应里解析；upstream = 从上游账单接口导入。
+type UsageEvent struct {
+	ID              string  `gorm:"primaryKey;size:64"`
+	Ts              int64   `gorm:"index"`
+	ProviderID      string  `gorm:"index;size:64"`
+	CredentialID    string  `gorm:"index;size:64"`
+	KeyID           string  `gorm:"index;size:64"`
+	KeyKind         string  `gorm:"size:16"`
+	Protocol        string  `gorm:"size:32"`
+	Model           string  `gorm:"index;size:200"` // 客户端请求的原始模型名
+	UpstreamModel   string  `gorm:"size:200"`
+	Stream          bool
+	Status          int
+	ErrorCode       string  `gorm:"size:80"`
+	InputTokens     int64
+	OutputTokens    int64
+	CacheReadTokens int64
+	CacheWriteTokens int64
+	ReasoningTokens int64
+	CostUSD         float64
+	DurationMs      int64
+	Source          string `gorm:"size:16;index"` // local | upstream
+}
+
 // AdminUser 是首次启动自动生成的管理员账号（用户名 + 密码登录面板）。
 type AdminUser struct {
 	ID           string `gorm:"primaryKey;size:64"`

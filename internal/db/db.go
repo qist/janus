@@ -89,7 +89,7 @@ func Open(path string) (*Store, error) {
 	if err := gdb.AutoMigrate(
 		&response{}, &Conversation{},
 		&Provider{}, &Credential{}, &Model{}, &ModelRoute{},
-		&APIKey{}, &Agent{}, &Setting{}, &AdminUser{},
+		&APIKey{}, &Agent{}, &Setting{}, &AdminUser{}, &UsageEvent{},
 	); err != nil {
 		return nil, err
 	}

@@ -187,6 +187,55 @@ func TestUsageClientGetURL(t *testing.T) {
 	}
 }
 
+// ReportFor 用显式凭据（不读 OpenCode DB）打指定 console，供分渠道用量使用。
+func TestReportForExplicitCredential(t *testing.T) {
+	var auth, org string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth, org = r.Header.Get("Authorization"), r.Header.Get("x-opencode-org-id")
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/billing/status":
+			_, _ = w.Write([]byte(`{"mode":"prepaid","balanceMicroCents":"100000000"}`))
+		case "/usage/summary":
+			_, _ = w.Write([]byte(`{"totalRequests":"3","totalCostMicroCents":"500"}`))
+		case "/usage/models":
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		case "/usage/cost-by-day":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	// 无 OpencodeDB：ReportFor 只认显式凭据，任何情况下都不该去读它。
+	c := New(config.Config{UsageTTL: time.Minute}, logx.NewLogger("error"))
+	rep, err := c.ReportFor(context.Background(), "tok2", "org_y", srv.URL, "")
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if auth != "Bearer tok2" || org != "org_y" {
+		t.Fatalf("auth = %q org = %q", auth, org)
+	}
+	if rep.Totals.Requests != 3 || rep.Source != srv.URL {
+		t.Fatalf("rep = %+v", rep)
+	}
+	if rep.Billing.BalanceUSD != 1 {
+		t.Fatalf("balance = %v", rep.Billing.BalanceUSD)
+	}
+}
+
+// 没有 access_token 或 console 地址时明确报错，而不是打出无鉴权请求。
+func TestReportForRequiresCredentialAndBase(t *testing.T) {
+	c := New(config.Config{UsageTTL: time.Minute}, logx.NewLogger("error"))
+	if _, err := c.ReportFor(context.Background(), "", "org", "http://127.0.0.1:1", ""); err == nil {
+		t.Fatal("want error when access_token is empty")
+	}
+	if _, err := c.ReportFor(context.Background(), "tok", "org", "", ""); err == nil {
+		t.Fatal("want error when console base is empty")
+	}
+}
+
 func TestRequestLogHitRate(t *testing.T) {
 	raw := requestLogRaw{InputTokens: 100, CacheReadTokens: 900, OutputTokens: 5, StartedAt: 1700000000000}
 	raw.RequestedModel = "mimo-v2.6-flash"

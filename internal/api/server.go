@@ -90,6 +90,9 @@ type Server struct {
 	// settingsMu 串行化运行期设置的读改写（PATCH /api/v1/settings）。
 	settingsMu sync.Mutex
 
+	// remoteUsage 是「远程分渠道用量」的每凭据缓存（含失败负缓存）。
+	remoteUsage *remoteUsageCache
+
 	// agents 是 Agent 面（harness）runtime 注册表，惰性构建；agentMu 保护它。
 	agentMu sync.Mutex
 	agents  *agent.Registry
@@ -228,8 +231,9 @@ func NewServer(cfg config.Config, log *logx.Logger) *Server {
 				ForceAttemptHTTP2:   true,
 			}),
 		},
-		known: map[string]struct{}{},
-		owned: map[string]time.Time{},
+		known:       map[string]struct{}{},
+		owned:       map[string]time.Time{},
+		remoteUsage: newRemoteUsageCache(cfg.UsageTTL),
 	}
 	srv.mcpAllow = httpx.ParseCIDRList(cfg.MCPAllow)
 	// 渠道监督器持有 &srv.cfg：热替换端点时读取的是运行时最新配置。

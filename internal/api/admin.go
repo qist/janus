@@ -43,6 +43,7 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/v1/credentials/{id}", s.adminGuard(s.handlePatchCredential))
 	mux.HandleFunc("DELETE /api/v1/credentials/{id}", s.adminGuard(s.handleDeleteCredential))
 	mux.HandleFunc("POST /api/v1/credentials/{id}/verify", s.adminGuard(s.handleVerifyCredential))
+	mux.HandleFunc("POST /api/v1/credentials/{id}/refresh", s.adminGuard(s.handleRefreshCredential))
 
 	// models
 	mux.HandleFunc("GET /api/v1/models", s.adminGuard(s.handleListCatalog))
@@ -85,6 +86,9 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 
 	// 用量 / 请求日志（原 /v1/*，移到控制面）
 	mux.HandleFunc("GET /api/v1/usage", s.adminGuard(s.handleUsage))
+	mux.HandleFunc("GET /api/v1/usage/local", s.adminGuard(s.handleLocalUsage))
+	mux.HandleFunc("GET /api/v1/usage/events", s.adminGuard(s.handleLocalUsageEvents))
+	mux.HandleFunc("GET /api/v1/usage/remote", s.adminGuard(s.handleRemoteUsage))
 	mux.HandleFunc("GET /api/v1/requests", s.adminGuard(s.handleRequests))
 }
 

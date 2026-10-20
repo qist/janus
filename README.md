@@ -1007,7 +1007,7 @@ Janus 背后是一个**能执行 shell、读写文件**的 agent（默认以启�
 - **必须设 `BRIDGE_API_KEY`**；绑定非回环且 key 为空时任何人都能消耗你的额度。
 - 桥自身**不做 TLS**，公网/不可信网络务必套反向代理（Caddy/nginx）加 HTTPS。
 - **内置 MCP 端点** `/mcp/{token}` 用 128 位随机 token 鉴权，随会话短命（**会话重置 / 客户端不再声明 tools / TTL** 时注销，不再每轮注销）；仍可用 `BRIDGE_MCP_ALLOW` 按来源 IP/CIDR 再收一层。防串会话：空闲会话的工具调用会被立即拒绝。
-  另有**稳定端点** `/mcp/<bindingToken>`：token 由 agent key 确定性派生（`b`+sha256("janus-mcp:"+keyID)[:16]），解析到该 key 名下**最近活跃的会话**，供 codex / claude-code 等 CLI harness 写进静态配置（见 `POST /api/v1/agents/{id}/provision`）；无活跃会话时回落到空会话可恢复响应。
+  另有**稳定端点** `/mcp/<bindingToken>`：token 由 agent key 确定性派生（`b`+sha256("janus-mcp:"+keyID)[:16]），供 codex / claude-code 等 CLI harness 写进静态配置（见 `POST /api/v1/agents/{id}/provision`）。它是 key 级回退入口：只在候选会话唯一（或唯一有在飞请求）时命中；并发歧义时返回空工具列表，`tools/call` 仍可按带会话命名空间的工具名精确路由。janus 自己拉起 CLI 时改用会话级精确 token，不做「最近活跃」猜测。
 - **权限自动应答** `BRIDGE_PERMISSION_REPLY`：`once`（默认）只放行单次，`always` 会写入 OpenCode 的持久权限，`reject` 更保守。
 - 想要"agent 不碰本机、工具在客户端执行"，用 `orchestrator` agent（由 janus 自动生成并注入，见「工具执行模式」方式 B）。
 

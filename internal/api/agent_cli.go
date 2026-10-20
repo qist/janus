@@ -75,13 +75,14 @@ func (s *Server) handleRuntimePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionKey := strings.TrimSpace(in.SessionKey)
 	sid, err := rt.CreateSession(ctx, agent.SessionSpec{
-		Key:            strings.TrimSpace(in.SessionKey),
+		Key:            sessionKey,
 		Directory:      strings.TrimSpace(in.Directory),
 		Model:          strings.TrimSpace(in.Model),
 		GatewayBaseURL: s.publicBaseURL(r),
 		GatewayAPIKey:  strings.TrimSpace(in.APIKey),
-		MCPURL:         strings.TrimSpace(in.MCPURL),
+		MCPURL:         s.runtimeMCPURL(in.MCPURL, sessionKey),
 		MCPName:        strings.TrimSpace(in.MCPName),
 	})
 	if err != nil {

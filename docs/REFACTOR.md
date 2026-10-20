@@ -557,8 +557,11 @@ P2 完成即可删除：`accounts`/`account_models` 表、`auth switch` 调用�
 >
 > **仍待做（按优先级）**：
 > 1. ~~**稳定 MCP 端点**~~ **已做**：`/mcp/<bindingToken>`，token 由 agent key
->    确定性派生（`b`+sha256("janus-mcp:"+keyID)[:16]），解析到该 key 名下最近活跃
->    的会话；provision 已把真实地址写进 codex/CC 的配置。
+>    确定性派生（`b`+sha256("janus-mcp:"+keyID)[:16]），provision 已把真实地址
+>    写进 codex/CC 的配置。该地址是 key 级**回退入口**：只在候选会话唯一
+>    （或唯一有在飞请求）时命中，并发歧义时 fail-closed（tools/list 为空，
+>    tools/call 仍可按会话命名空间精确路由）。janus 自己拉起 CLI 时，
+>    `runtimeMCPURL` 会改写为会话级精确 token，不依赖「最近活跃」猜测。
 > 2. **工具来源**：模式 B 现在只能消费「客户端在请求里声明的 tools」。CLI harness
 >    独立运行时无人声明 → 需要「janus 侧按项目声明的工具目录」作为回退。
 > 3. ~~**CLI 型 harness 驱动**~~ **已做（核心链路）**：`internal/agent/cliproc.go`
@@ -572,8 +575,8 @@ P2 完成即可删除：`accounts`/`account_models` 表、`auth switch` 调用�
 >    `turnSession`，`chat.go` 的 executor 只消费 `agent.Event`，不再直接碰
 >    `upstream.Upstream` + EventBus；`opencodeTurnSession` 是当前唯一实现，行为与
 >    原路径一致。**仍待做**：CLI runtime 尚未接进 `/v1/chat/completions`——除事件流
->    外还差对账（`ListMessages` 无对应物）、会话状态（`GetSession` / `WaitUntilIdle`）、
->    tool bridge 生命周期，以及 MCP 绑定按「最近活跃会话」解析在并发下的歧义。
+>    外还差对账（`ListMessages` 无对应物）、会话状态（`GetSession` / `WaitUntilIdle`）
+>    与 tool bridge 生命周期；MCP 绑定已改为确定性解析（见上）。
 
 ---
 

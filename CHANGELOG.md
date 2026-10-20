@@ -77,9 +77,14 @@
 - 工具桥的 token 原先是「一次聊天会话一个」，CLI harness（codex / claude-code）
   启动时无从预知，没法写进静态配置。新增由 agent key 派生的**确定性 token**
   （`b` + sha256("janus-mcp:"+keyID)[:16]，见 `internal/api/mcpbind.go`）：
-  `/mcp/<bindingToken>` 解析到该 key 名下**最近活跃的会话**的工具集。
-- 每次客户端请求注册工具时都会重新绑定，因此绑定始终指向最近活跃会话；
-  会话注销时绑定一并摘除，端点回落到「空会话」可恢复响应（200，不 404）。
+  `/mcp/<bindingToken>` 作为 key 级回退入口，解析到该 key 名下唯一（或唯一
+  有在飞请求）的会话。
+- 绑定不再采用「最后写入者获胜」：每个 token 维护会话候选集合，解析只在
+  候选唯一（或唯一有在飞请求）时命中；并发歧义时 fail-closed，`tools/list`
+  返回空、`tools/call` 仍按带会话命名空间的工具名精确路由，不随请求顺序漂移。
+- 会话注销时从候选集合摘除，端点回落到「空会话」可恢复响应（200，不 404）。
+- janus 自己拉起 CLI harness 时（`/api/v1/runtimes/{name}/prompt` 带 `session_key`），
+  会把 key 级稳定地址改写为会话级精确 token，多个并发 CLI 不再争抢同一个绑定。
 - `/agents/{id}/provision` 直接把稳定地址写进 codex/CC 的 MCP 配置；
   未绑定 agent key 的 agent 仍给 `<token>` 占位并附提示。响应另加 `mcp_url`。
 

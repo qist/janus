@@ -45,9 +45,12 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	sess := s.tools.Get(token)
 	// 稳定端点：token 是 keyID 的确定性派生（CLI harness 的静态配置用）。
-	// 解析到该 agent key 名下最近活跃的会话；没有则落到空会话路径。
+	// 只在候选会话唯一（或唯一有在飞请求）时命中；并发下宁可落到空会话
+	// 路径（tools/call 仍可按命名空间工具名精确路由），也不猜「最近活跃」。
 	if sess == nil && isMCPBindingToken(token) {
-		sess = s.tools.GetBinding(token)
+		if bound, ok := s.tools.ResolveBinding(token); ok {
+			sess = bound
+		}
 	}
 
 	switch r.Method {

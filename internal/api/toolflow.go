@@ -26,8 +26,9 @@ import (
 //  3. 注册过期：上游（OpenCode）重启会丢掉所有 MCP 注册，而桥不知道；
 //     所以超过 ToolReregister 就主动续注册一次，代价只是一次 PUT。
 //
-// binding 是稳定 MCP token（见 mcpbind.go，可为空）：非空时把该 token 指向本会话，
-// 让 CLI harness 的静态 MCP 配置能解析到「该 agent key 名下最近活跃的会话」。
+// binding 是稳定 MCP token（见 mcpbind.go，可为空）：非空时把本会话登记为该
+// token 的候选之一。解析只在候选唯一（或唯一有在飞请求）时命中，避免多个
+// 会话并发时绑定随请求顺序漂移。
 func (s *Server) ensureTools(ctx context.Context, conv *Conversation, dir string, tools []ToolSpec, binding string) error {
 	// 客户端声明了 RunCommand 这类「异步命令」工具时，配套的状态查询工具
 	//（check_command_status）只在客户端本地存在、不会写进 tools[] 声明，

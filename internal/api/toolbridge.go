@@ -128,13 +128,16 @@ type toolSession struct {
 
 // ToolBridge 管理所有会话的 MCP 工具上下文。
 type ToolBridge struct {
-	mu        sync.RWMutex
-	byToken   map[string]*toolSession
-	byKey     map[string]*toolSession
-	byName    map[string]*toolSession
-	byBinding map[string]*toolSession // 稳定 token（按 agent key）→ 该 key 最近活跃的会话
-	wait      time.Duration           // 长等待（执行类工具，或未列出的工具）
-	waitFast  time.Duration           // 短等待（只读/编辑类工具）；0=不启用
+	mu      sync.RWMutex
+	byToken map[string]*toolSession
+	byKey   map[string]*toolSession
+	byName  map[string]*toolSession
+	// byBinding：稳定 token（按 agent key）→ 会话 key → 会话。
+	// 同一个 key 下可能同时有多个会话，这里保存全部候选而不是「最后写入者」；
+	// 解析时只在唯一活动会话时命中，避免并发下绑定随请求顺序漂移。
+	byBinding map[string]map[string]*toolSession
+	wait      time.Duration // 长等待（执行类工具，或未列出的工具）
+	waitFast  time.Duration // 短等待（只读/编辑类工具）；0=不启用
 	fastTools map[string]bool
 	log       *logx.Logger
 }
@@ -150,7 +153,7 @@ func NewToolBridge(log *logx.Logger, wait, waitFast time.Duration, fastTools map
 		byToken:   map[string]*toolSession{},
 		byKey:     map[string]*toolSession{},
 		byName:    map[string]*toolSession{},
-		byBinding: map[string]*toolSession{},
+		byBinding: map[string]map[string]*toolSession{},
 		wait:      wait,
 		waitFast:  waitFast,
 		fastTools: fastTools,
@@ -233,28 +236,72 @@ func (b *ToolBridge) ByKey(key string) *toolSession {
 	return b.byKey[key]
 }
 
-// Bind 把稳定 MCP token（见 mcpbind.go）指向会话。
+// Bind 把稳定 MCP token（见 mcpbind.go）登记到会话的候选集合。
 //
-// 同一个 agent key 名下可能同时有多个会话（多 IDE/多项目）；每次有请求进来都会
-// 重新指向该会话，因此绑定始终是「最近活跃的那个」。解析不到时会话时，
-// handleMCP 走空会话路径，不会报错。
+// 同一个 agent key 名下可能同时有多个会话（多 IDE/多项目），因此这里不采用
+// 「最后写入者获胜」——那会让解析结果随请求到达顺序漂移。候选集合按会话 key
+// 去重，解析交给 ResolveBinding 做确定性判定。
 func (b *ToolBridge) Bind(binding string, s *toolSession) {
 	if b == nil || s == nil || binding == "" {
 		return
 	}
 	b.mu.Lock()
-	b.byBinding[binding] = s
+	set := b.byBinding[binding]
+	if set == nil {
+		set = map[string]*toolSession{}
+		b.byBinding[binding] = set
+	}
+	set[s.key] = s
 	b.mu.Unlock()
 }
 
-// GetBinding 按稳定 token 找最近绑定的会话。
-func (b *ToolBridge) GetBinding(binding string) *toolSession {
+// ResolveBinding 按稳定 token 确定性地选出唯一会话。
+//
+// 规则（与绑定顺序无关）：
+//   - 只有一个候选：直接命中；没有候选：不命中。
+//   - 多个候选：仅在「恰好一个会话有在飞请求（waiter）」时命中它；
+//     零个或两个以上活动会话都视为歧义，拒绝解析。
+//
+// 歧义时调用方走空会话路径，tools/call 仍可按带命名空间的工具名精确路由
+// （见 handleUnknownMCPSession）。真正需要并发的场景（janus 拉起的 CLI）
+// 应使用会话级精确 token，而不是 key 级稳定绑定。
+func (b *ToolBridge) ResolveBinding(binding string) (*toolSession, bool) {
 	if b == nil || binding == "" {
-		return nil
+		return nil, false
 	}
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.byBinding[binding]
+	set := b.byBinding[binding]
+	candidates := make([]*toolSession, 0, len(set))
+	for _, s := range set {
+		if s != nil && !s.isClosed() {
+			candidates = append(candidates, s)
+		}
+	}
+	b.mu.RUnlock()
+
+	switch len(candidates) {
+	case 0:
+		return nil, false
+	case 1:
+		return candidates[0], true
+	}
+
+	var active *toolSession
+	for _, s := range candidates {
+		if !s.hasWaiter() {
+			continue
+		}
+		if active != nil {
+			b.log.Debugf("mcp binding %s is ambiguous: %d candidates, multiple active", binding, len(candidates))
+			return nil, false
+		}
+		active = s
+	}
+	if active != nil {
+		return active, true
+	}
+	b.log.Debugf("mcp binding %s is ambiguous: %d candidates, none active", binding, len(candidates))
+	return nil, false
 }
 
 // ResolveToolName 按暴露给 agent 的工具名（ob_<key>_<tool>）反查活跃会话。
@@ -313,10 +360,16 @@ func (b *ToolBridge) Unregister(key string) {
 				delete(b.byName, n)
 			}
 		}
-		// 稳定绑定指向本会话的一并摘除：之后 /mcp/<binding> 落到空会话路径
-		// （可恢复），而不是对着一个已关闭的会话说话。
-		for n, x := range b.byBinding {
-			if x == s {
+		// 稳定绑定的候选集合里摘除本会话；集合空了连 token 一起删。
+		// 之后 /mcp/<binding> 落到空会话路径（可恢复），而不是对着
+		// 一个已关闭的会话说话。
+		for n, set := range b.byBinding {
+			for k, x := range set {
+				if x == s || k == key {
+					delete(set, k)
+				}
+			}
+			if len(set) == 0 {
 				delete(b.byBinding, n)
 			}
 		}
@@ -502,6 +555,13 @@ func (s *toolSession) hasWaiter() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.waiters) > 0
+}
+
+// isClosed 报告会话是否已注销（用于过滤稳定绑定里的陈旧候选）。
+func (s *toolSession) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // setSessionID 记录当前会话对应的上游 session id（会话重建时更新）。

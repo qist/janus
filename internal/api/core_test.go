@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"janus/internal/agent"
 	"janus/internal/config"
 	"janus/internal/logx"
 	"janus/internal/prompt"
@@ -113,13 +114,13 @@ func TestDiffIgnoresToolCallIDNoise(t *testing.T) {
 
 // 工具结果要作为具名注释写进正文；且不再产生空的 "name:" 噪声注释。
 func TestToolResultAnnotatedOnSuccess(t *testing.T) {
-	ex := newExecutor(&Server{log: logx.NewLogger("error")}, "ses_ok", "m", true)
+	ex := newExecutor(&Server{log: logx.NewLogger("error")}, nil, "ses_ok", "m", true)
 	ctx := context.Background()
 
-	_ = ex.handleEvent(ctx, upstream.OCEvent{Type: "session.tool.input.started",
-		Data: json.RawMessage(`{"sessionID":"ses_ok","id":"call_1","name":"subagent","text":"{}"}`)}, 0)
-	_ = ex.handleEvent(ctx, upstream.OCEvent{Type: "session.tool.success",
-		Data: json.RawMessage(`{"sessionID":"ses_ok","id":"call_1","content":[{"type":"text","text":"审计结论：无高危漏洞"}]}`)}, 0)
+	_ = ex.handleEvent(ctx, agent.Event{Type: agent.EventToolCall,
+		ToolCall: &agent.ToolCall{ID: "call_1", Name: "subagent", Arguments: json.RawMessage(`{}`)}}, 0)
+	_ = ex.handleEvent(ctx, agent.Event{Type: agent.EventToolResult, Text: "审计结论：无高危漏洞",
+		ToolCall: &agent.ToolCall{ID: "call_1"}}, 0)
 
 	got := ex.text.String()
 	if !strings.Contains(got, "subagent: 审计结论") {
@@ -259,7 +260,7 @@ func TestSetFinishMapping(t *testing.T) {
 		"unknown":        "stop",
 	}
 	for in, want := range cases {
-		e := newExecutor(nil, "sid", "m", false)
+		e := newExecutor(nil, nil, "sid", "m", false)
 		e.setFinish(in)
 		if got := e.snapshot().finish; got != want {
 			t.Errorf("setFinish(%q) = %q, want %q", in, got, want)
@@ -268,14 +269,14 @@ func TestSetFinishMapping(t *testing.T) {
 }
 
 func TestSetFinishEmptyStaysStop(t *testing.T) {
-	e := newExecutor(nil, "sid", "m", false)
+	e := newExecutor(nil, nil, "sid", "m", false)
 	if got := e.snapshot().finish; got != "stop" {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestAddTokensAccumulates(t *testing.T) {
-	e := newExecutor(nil, "sid", "m", false)
+	e := newExecutor(nil, nil, "sid", "m", false)
 	tk := &upstream.OCTokens{Input: 100, Output: 50, Reason: 20}
 	tk.Cache.Read = 30
 	e.addTokens(tk)
@@ -301,7 +302,7 @@ func TestAddTokensAccumulates(t *testing.T) {
 
 // 历史回归：工具注释让最终文本比上游纯文本长时，对账不能 panic。
 func TestReconcileNoPanicWhenAnnotationsMakeTextLonger(t *testing.T) {
-	e := newExecutor(&Server{log: logx.NewLogger("error")}, "ses_x", "m", true)
+	e := newExecutor(&Server{log: logx.NewLogger("error")}, nil, "ses_x", "m", true)
 	_ = e.addText("1+1=2")                                 // 上游纯文本 5B
 	_ = e.addToolText(prompt.ToolAnnotation("bash", "ls")) // 注释把 text 撑到 100B+
 
@@ -1088,7 +1089,7 @@ func TestReconcileCapturesAssistantError(t *testing.T) {
 	cfg := config.Config{Upstream: stub.URL, Username: "o", Password: "p", Directory: "/tmp",
 		APIKey: "sk", ConsoleURL: stub.URL}
 	srv := NewServer(cfg, logx.NewLogger("error"))
-	ex := newExecutor(srv, "ses_x", "m", false)
+	ex := newExecutor(srv, &opencodeTurnSession{s: srv, sid: "ses_x"}, "ses_x", "m", false)
 
 	ex.reconcile(context.Background(), 1)
 
@@ -1106,7 +1107,7 @@ func TestReconcileCapturesAssistantError(t *testing.T) {
 
 // 上游 outcome=failed 时不能报 succeeded。
 func TestTerminalSignalFromOutcome(t *testing.T) {
-	ex := newExecutor(&Server{log: logx.NewLogger("error")}, "s", "m", false)
+	ex := newExecutor(&Server{log: logx.NewLogger("error")}, nil, "s", "m", false)
 	cases := map[string]string{
 		"failed":      "failed",
 		"FAILED":      "failed",

@@ -88,6 +88,7 @@ type PromptReq struct {
 type EventType string
 
 const (
+	EventStart      EventType = "start"       // 本轮执行开始（上游 execution/step started）
 	EventText       EventType = "text"        // 正文增量
 	EventReasoning  EventType = "reasoning"   // 思考增量
 	EventToolCall   EventType = "tool_call"   // 工具调用（含入参）
@@ -106,11 +107,12 @@ type ToolCall struct {
 
 // Usage 是一次用量（各 runtime 自行决定含义：分段或累计）。
 type Usage struct {
-	InputTokens     int64
-	OutputTokens    int64
-	CacheReadTokens int64
-	ReasoningTokens int64
-	CostUSD         float64
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	ReasoningTokens  int64
+	CostUSD          float64
 }
 
 // Event 是 Prompt 事件流里的一项。
@@ -121,6 +123,7 @@ type Event struct {
 	Usage    *Usage
 	Error    string
 	Finish   string // done 时的收尾原因（stop/length/interrupted…）
+	At       int64  // 事件时间（Unix 毫秒；0 = 未知，供调用方过滤上一轮遗留事件）
 }
 
 // Registry 是 runtime 注册表：按名注册/查找，保留注册顺序供面板展示。

@@ -260,7 +260,7 @@ func TestSetPathRewrite(t *testing.T) {
 func TestExecutorRewrite(t *testing.T) {
 	from := "/var/lib/janus/workspaces/9a1138b442f6519"
 	to := "/home/dev/proj"
-	ex := newExecutor(&Server{log: logx.NewLogger("error")}, "s", "m", false)
+	ex := newExecutor(&Server{log: logx.NewLogger("error")}, nil, "s", "m", false)
 	ex.setRewrite(from, to)
 	var streamed []string
 	ex.writeText = func(s string) error { streamed = append(streamed, s); return nil }

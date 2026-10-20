@@ -568,10 +568,12 @@ P2 完成即可删除：`accounts`/`account_models` 表、`auth switch` 调用�
 >    事件解析（codex `exec --json` + `exec resume`；claude `-p --output-format
 >    stream-json` + `--resume`）。`GET /api/v1/runtimes` 已列出二者，
 >    `POST /api/v1/runtimes/{name}/prompt` 可直接驱动一轮并按 SSE 回放事件。
->    **仍待做**：把 CLI runtime 接进 IDE 请求路径（`/v1/chat/completions` 等）——
->    `chat.go` 的会话路径目前与 OpenCode（`up` + EventBus）深度耦合，需要先把
->    「事件来源」抽象成「来自 EventBus 还是来自 runtime 的事件流」，CLI harness
->    才能真正与 opencode/direct 平级。
+>    ~~**事件来源抽象**~~ **已做**：`internal/api/turn.go` 引入 `turnDriver` /
+>    `turnSession`，`chat.go` 的 executor 只消费 `agent.Event`，不再直接碰
+>    `upstream.Upstream` + EventBus；`opencodeTurnSession` 是当前唯一实现，行为与
+>    原路径一致。**仍待做**：CLI runtime 尚未接进 `/v1/chat/completions`——除事件流
+>    外还差对账（`ListMessages` 无对应物）、会话状态（`GetSession` / `WaitUntilIdle`）、
+>    tool bridge 生命周期，以及 MCP 绑定按「最近活跃会话」解析在并发下的歧义。
 
 ---
 

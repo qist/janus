@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"janus/internal/tokenbudget"
-	"janus/internal/upstream"
 )
 
 var errNoFlusher = errors.New("response writer does not support flushing")
@@ -244,7 +243,7 @@ func (st *responsesStream) closeAll() {
 
 // streamResponses 以 Responses SSE 格式驱动一轮执行。
 func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	req ResponsesRequest, conv *Conversation, sub *upstream.Subscription, promptAt int64, model, dir string) {
+	req ResponsesRequest, conv *Conversation, turn turnSession, promptAt int64, model, dir string) {
 
 	ss, err := newResponsesSSE(w)
 	if err != nil {
@@ -282,7 +281,7 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 	st.event("response.in_progress", map[string]any{"response": &inProg})
 
 	sid := conv.snapshotSessionID()
-	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
+	ex := newExecutor(s, turn, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
 	ex.setRewrite(conv.rewriteFrom, conv.rewriteTo)
 	ex.parallel = parallelDefault(req.ParallelToolCalls)
@@ -292,7 +291,7 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go ex.runEvents(runCtx, sub, promptAt, s.cfg.ReconcileInterval)
+	go ex.runEvents(runCtx, promptAt, s.cfg.ReconcileInterval)
 
 	clientGone := r.Context().Done()
 	var outcome string
@@ -308,7 +307,7 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 		return
 	}
@@ -331,7 +330,7 @@ func (s *Server) streamResponses(ctx context.Context, w http.ResponseWriter, r *
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 	}
 

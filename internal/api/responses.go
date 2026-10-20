@@ -932,13 +932,14 @@ func (s *Server) finishResponses(ctx context.Context, w http.ResponseWriter, r *
 	sub *upstream.Subscription, promptAt int64, dir string) {
 
 	model := s.echoModel(ref, req.Model)
+	turn := s.adoptTurnSession(ctx, conv.snapshotSessionID(), sub)
 
 	if req.Stream {
-		s.streamResponses(ctx, w, r, req, conv, sub, promptAt, model, dir)
+		s.streamResponses(ctx, w, r, req, conv, turn, promptAt, model, dir)
 		return
 	}
 
-	t, err := s.runBlocking(ctx, conv, model, sub, promptAt, responsesMaxTokens(req), parallelDefault(req.ParallelToolCalls))
+	t, err := s.runBlocking(ctx, conv, model, turn, promptAt, responsesMaxTokens(req), parallelDefault(req.ParallelToolCalls))
 	if t != nil {
 		s.metrics.AddTokens(t.res.usage.PromptTokens, t.res.usage.CompletionTokens)
 	}
@@ -960,7 +961,7 @@ func (s *Server) finishResponses(ctx context.Context, w http.ResponseWriter, r *
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, t.sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 	}
 

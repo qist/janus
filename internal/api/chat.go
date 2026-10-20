@@ -89,6 +89,7 @@ type runResult struct {
 // executor 驱动一个 OpenCode session 完成一次 prompt，把事件汇聚成 OpenAI 语义。
 type executor struct {
 	srv   *Server
+	turn  turnSession
 	sid   string
 	model string // OpenAI 形式的 model 名，用于 chunk
 
@@ -130,8 +131,8 @@ type executor struct {
 	rwReason *pathRewriter
 }
 
-func newExecutor(srv *Server, sid, model string, toolAnn bool) *executor {
-	e := &executor{srv: srv, sid: sid, model: model, toolAnn: toolAnn, parallel: true,
+func newExecutor(srv *Server, turn turnSession, sid, model string, toolAnn bool) *executor {
+	e := &executor{srv: srv, turn: turn, sid: sid, model: model, toolAnn: toolAnn, parallel: true,
 		toolNames: map[string]string{}, done: make(chan string, 4)}
 	e.touchData()
 	return e
@@ -342,64 +343,26 @@ func (e *executor) toolSnapshot() []*pendingCall {
 // 单次对账：周期性 reconcile（tick）调用它；收尾时若还没看到消息，用
 // reconcileTerminal 做短退避重试（终态事件可能早于消息落库）。
 func (e *executor) reconcile(ctx context.Context, promptAt int64) bool {
-	msgs, err := e.srv.up.ListMessages(ctx, e.sid, "asc", 200)
-	if err != nil {
-		e.srv.log.Debugf("reconcile list messages failed: %v", err)
+	snap, ok := e.turn.Reconcile(ctx, promptAt)
+	if !ok {
 		return false
 	}
-
-	var full strings.Builder
-	var reasoning strings.Builder
-	var finish string
-	var sawAssistant bool
-
-	for i := range msgs {
-		m := &msgs[i]
-		if m.Type != "assistant" {
-			continue
-		}
-		if m.Time.Created > 0 && m.Time.Created < promptAt {
-			continue
-		}
-		sawAssistant = true
-		if len(m.Error) > 0 && string(m.Error) != "null" {
-			var f upstreamFailure
-			if json.Unmarshal(m.Error, &f) == nil && (f.Type != "" || f.Message != "") {
-				e.setFailure(&f)
-			}
-		}
-		full.WriteString(m.PlainText())
-		reasoning.WriteString(m.Reasoning())
-		if m.Finish != "" {
-			finish = m.Finish
-		}
-		if m.Tokens != nil {
-			// 对账时 tokens 可能与事件重复，用 max 语义：
-			// 这里只在从未收到 step.ended 时补一次。
-			e.mu.Lock()
-			neverGot := e.usage.CompletionTokens == 0
-			e.mu.Unlock()
-			if neverGot {
-				e.addTokens(m.Tokens)
-			}
-		}
-	}
-	if !sawAssistant {
-		return false
+	if snap.failure != nil {
+		e.setFailure(snap.failure)
 	}
 
 	// 推理：整体补齐（推理通常在正文前，重复发送风险低）
-	if got := reasoning.String(); got != "" {
+	if snap.reasoning != "" {
 		e.mu.Lock()
 		have := e.reasoning.String()
 		e.mu.Unlock()
-		if len(got) > len(have) {
-			_ = e.addReasoning(got[len(have):])
+		if len(snap.reasoning) > len(have) {
+			_ = e.addReasoning(snap.reasoning[len(have):])
 		}
 	}
 
 	// 正文：只和 serverText（上游纯文本，不含工具注释）比，才能拿到精确偏移。
-	want := full.String()
+	want := snap.text
 	e.mu.Lock()
 	have := e.serverText.String()
 	e.mu.Unlock()
@@ -425,8 +388,18 @@ func (e *executor) reconcile(ctx context.Context, promptAt int64) bool {
 		}
 	}
 
-	if finish != "" {
-		e.setFinish(finish)
+	if snap.finish != "" {
+		e.setFinish(snap.finish)
+	}
+	if snap.tokens != nil {
+		// 对账时 tokens 可能与事件重复，用 max 语义：
+		// 这里只在从未收到 step.ended 时补一次。
+		e.mu.Lock()
+		neverGot := e.usage.CompletionTokens == 0
+		e.mu.Unlock()
+		if neverGot {
+			e.addTokens(snap.tokens)
+		}
 	}
 	return true
 }
@@ -455,7 +428,7 @@ func (e *executor) reconcileTerminal(ctx context.Context, promptAt int64) {
 
 // runEvents 阻塞直到终态、超时或 ctx 取消。
 // promptAt 用于过滤上一轮遗留事件。
-func (e *executor) runEvents(ctx context.Context, sub *upstream.Subscription, promptAt int64, reconcileEvery time.Duration) {
+func (e *executor) runEvents(ctx context.Context, promptAt int64, reconcileEvery time.Duration) {
 	srv := e.srv
 
 	reconcileTick := time.NewTicker(reconcileEvery)
@@ -476,7 +449,7 @@ func (e *executor) runEvents(ctx context.Context, sub *upstream.Subscription, pr
 		// 不会残留到 RequestTimeout。用 Background() 会随每次断连泄漏一个协程。
 		wctx, cancel := context.WithTimeout(ctx, srv.cfg.RequestTimeout)
 		defer cancel()
-		if err := srv.up.WaitUntilIdle(wctx, e.sid); err == nil {
+		if err := e.turn.WaitIdle(wctx); err == nil {
 			select {
 			case waitDone <- struct{}{}:
 			default:
@@ -510,7 +483,10 @@ func (e *executor) runEvents(ctx context.Context, sub *upstream.Subscription, pr
 		case <-waitDone:
 			// wait() 返回说明 agent loop 已空闲。再确认一次 idle 时间戳，
 			// 避免"prompt 尚未开始执行"时的误判，并取回上游 outcome。
-			if idle, outcome := e.sessionState(ctx, promptAt); idle {
+			e.mu.Lock()
+			started := e.seenStarted
+			e.mu.Unlock()
+			if idle, outcome := e.turn.State(ctx, promptAt, started); idle {
 				e.reconcileTerminal(ctx, promptAt)
 				e.signal(e.terminalSignal(outcome))
 				return
@@ -527,7 +503,7 @@ func (e *executor) runEvents(ctx context.Context, sub *upstream.Subscription, pr
 				}
 				wctx, cancel := context.WithTimeout(ctx, srv.cfg.RequestTimeout)
 				defer cancel()
-				if err := srv.up.WaitUntilIdle(wctx, e.sid); err == nil {
+				if err := e.turn.WaitIdle(wctx); err == nil {
 					select {
 					case ch <- struct{}{}:
 					default:
@@ -544,7 +520,7 @@ func (e *executor) runEvents(ctx context.Context, sub *upstream.Subscription, pr
 				go func() {
 					iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 					defer c()
-					_ = srv.up.Interrupt(iCtx, e.sid)
+					_ = e.turn.Interrupt(iCtx)
 				}()
 				e.signal("stalled")
 				return
@@ -556,7 +532,10 @@ func (e *executor) runEvents(ctx context.Context, sub *upstream.Subscription, pr
 				return
 			}
 			e.reconcile(ctx, promptAt)
-			if idle, outcome := e.sessionState(ctx, promptAt); idle {
+			e.mu.Lock()
+			started := e.seenStarted
+			e.mu.Unlock()
+			if idle, outcome := e.turn.State(ctx, promptAt, started); idle {
 				// 事件流可能丢了 succeeded 事件，这里才判到空闲；同样要对账
 				// （消息可能还没落库，reconcileTerminal 会退避重试）。
 				e.reconcileTerminal(ctx, promptAt)
@@ -564,7 +543,7 @@ func (e *executor) runEvents(ctx context.Context, sub *upstream.Subscription, pr
 				return
 			}
 
-		case ev, ok := <-sub.Ch:
+		case ev, ok := <-e.turn.Events():
 			if !ok {
 				e.signal("timeout")
 				return
@@ -573,7 +552,7 @@ func (e *executor) runEvents(ctx context.Context, sub *upstream.Subscription, pr
 				e.signal("length")
 				return
 			}
-			if ev.Created > 0 && ev.Created < promptAt-2000 {
+			if ev.At > 0 && ev.At < promptAt-2000 {
 				continue
 			}
 			if e.handleEvent(ctx, ev, promptAt) {
@@ -595,133 +574,95 @@ func (e *executor) terminalSignal(outcome string) string {
 	}
 }
 
-// sessionState 判断「本轮是否已结束」，并带回上游给出的 outcome。
-//
-// 只看 idle 时间戳不够：上游可能以 failed 收尾（例如 provider.quota 余额不足），
-// 而 execution.failed 事件没被我们收到。此时若只报 succeeded，客户端会以为
-// "模型就是这么答的"，拿不到真正的原因。
-func (e *executor) sessionState(ctx context.Context, promptAt int64) (idle bool, outcome string) {
-	sess, err := e.srv.up.GetSession(ctx, e.sid)
-	if err != nil {
-		return false, ""
-	}
-	e.mu.Lock()
-	started := e.seenStarted
-	e.mu.Unlock()
-
-	outcome = sess.Outcome
-	if !started {
-		// 还没观测到执行开始时，仅凭 idle 判断容易误判（上一轮遗留的 idle）。
-		// 此时要求 idle 晚于 prompt 至少一个 grace。
-		return sess.Time.Idle >= promptAt && time.Now().UnixMilli()-promptAt > 3000, outcome
-	}
-	return sess.Time.Idle >= promptAt, outcome
-}
-
 // handleEvent 处理单条事件，返回 true 表示已到终态。
-func (e *executor) handleEvent(ctx context.Context, ev upstream.OCEvent, promptAt int64) bool {
-	var sess upstream.EvtSession
-	if json.Unmarshal(ev.Data, &sess) != nil || sess.SessionID != e.sid {
-		return false
-	}
-	// 本会话有事件 = 上游还活着（delta / step / tool / usage 都算真实数据）。
+func (e *executor) handleEvent(ctx context.Context, ev agent.Event, promptAt int64) bool {
+	// 本会话有事件 = 上游还活着（正文/思考/工具/usage 都算真实数据）。
 	e.touchData()
 
 	switch ev.Type {
-	case "session.execution.started":
+	case agent.EventStart:
 		e.mu.Lock()
 		e.seenStarted = true
 		e.mu.Unlock()
 
-	case "session.step.started":
+	case agent.EventText:
+		_ = e.addText(ev.Text)
+
+	case agent.EventReasoning:
+		_ = e.addReasoning(ev.Text)
+
+	case agent.EventToolCall:
+		if ev.ToolCall == nil || ev.ToolCall.Name == "" {
+			return false
+		}
+		e.srv.log.Debugf("tool event: name=%q args=%s", ev.ToolCall.Name, truncate(string(ev.ToolCall.Arguments), 400))
 		e.mu.Lock()
-		e.seenStarted = true
+		e.toolCalls++
+		if ev.ToolCall.ID != "" {
+			e.toolNames[ev.ToolCall.ID] = ev.ToolCall.Name
+		}
 		e.mu.Unlock()
-
-	case "session.text.delta":
-		var d upstream.EvtTextDelta
-		if json.Unmarshal(ev.Data, &d) == nil && d.Delta != "" {
-			_ = e.addText(d.Delta)
+		// 入参注释（与原先 session.tool.input.ended 的注入口一致）；
+		// MCP 占位工具的真实调用已由 tool bridge 下发，注解属噪声。
+		if e.toolAnn && len(ev.ToolCall.Arguments) > 0 && !prompt.IsMCPPlaceholderTool(ev.ToolCall.Name) {
+			_ = e.addToolText(prompt.ToolAnnotation(ev.ToolCall.Name, string(ev.ToolCall.Arguments)))
 		}
 
-	case "session.reasoning.delta":
-		var d upstream.EvtTextDelta
-		if json.Unmarshal(ev.Data, &d) == nil && d.Delta != "" {
-			_ = e.addReasoning(d.Delta)
-		}
-
-	case "session.tool.input.started":
-		var d upstream.EvtToolInput
-		if json.Unmarshal(ev.Data, &d) == nil && d.Name != "" {
-			e.srv.log.Debugf("tool event started: name=%q text=%q data=%s", d.Name, d.Text, truncate(string(ev.Data), 400))
-			e.mu.Lock()
-			e.toolCalls++
-			if d.ID != "" {
-				e.toolNames[d.ID] = d.Name
-			}
-			e.mu.Unlock()
-			// 这里不注空名（那正是满屏 "glob:" / "subagent:" 噪声的来源）；
-			// 入参由 input.ended 注、结果由 success/failed 注。
-		}
-
-	case "session.tool.success", "session.tool.failed":
+	case agent.EventToolResult:
 		// 工具结果：把产出（文件内容 / 命令输出 / 子代理结论）注释进正文，
 		// 否则工具型任务（如整项目审计）期间正文几乎为空，客户端看不到任何进展。
-		if !e.toolAnn {
+		if !e.toolAnn || ev.ToolCall == nil {
 			return false
 		}
-		var d upstream.EvtToolResult
-		if json.Unmarshal(ev.Data, &d) == nil {
-			e.mu.Lock()
-			name := e.toolNames[d.ID]
-			delete(e.toolNames, d.ID)
-			e.mu.Unlock()
-			// MCP 工具（"execute"）的真实调用已由 tool bridge 下发，注解属噪声。
-			if name != "" && !prompt.IsMCPPlaceholderTool(name) {
-				if out := prompt.ToolResultText(d); out != "" {
-					_ = e.addToolText(prompt.ToolResultAnnotation(name, out))
-				}
-			}
+		e.mu.Lock()
+		name := e.toolNames[ev.ToolCall.ID]
+		delete(e.toolNames, ev.ToolCall.ID)
+		e.mu.Unlock()
+		if name != "" && !prompt.IsMCPPlaceholderTool(name) && strings.TrimSpace(ev.Text) != "" {
+			_ = e.addToolText(prompt.ToolResultAnnotation(name, ev.Text))
 		}
 
-	case "session.tool.input.ended":
-		// 带完整入参：补一条更详细的注释
-		if !e.toolAnn {
-			return false
+	case agent.EventUsage:
+		if ev.Finish != "" {
+			e.setFinish(ev.Finish)
 		}
-		var d upstream.EvtToolInput
-		if json.Unmarshal(ev.Data, &d) == nil && d.Name != "" && d.Text != "" {
-			e.srv.log.Debugf("tool event ended: name=%q text=%q", d.Name, truncate(d.Text, 200))
-			if !prompt.IsMCPPlaceholderTool(d.Name) {
-				_ = e.addToolText(prompt.ToolAnnotation(d.Name, d.Text))
-			}
+		if ev.Usage != nil {
+			e.addUsage(*ev.Usage)
 		}
 
-	case "session.step.ended":
-		var d upstream.EvtStepEnded
-		if json.Unmarshal(ev.Data, &d) == nil {
-			e.setFinish(d.Finish)
-			e.addTokens(d.Tokens)
-		}
-
-	case "session.usage.updated":
-		// usage 是累计值，step.ended 已经逐段累加，这里忽略避免重复计数
-
-	case "session.execution.succeeded":
-		e.reconcileTerminal(ctx, promptAt)
-		e.signal("succeeded")
-		return true
-
-	case "session.execution.failed":
+	case agent.EventError:
 		e.reconcileTerminal(ctx, promptAt)
 		e.signal("failed")
 		return true
 
-	case "session.execution.interrupted":
-		e.signal("interrupted")
+	case agent.EventDone:
+		if strings.EqualFold(strings.TrimSpace(ev.Finish), "interrupted") {
+			e.signal("interrupted")
+			return true
+		}
+		e.reconcileTerminal(ctx, promptAt)
+		e.signal("succeeded")
 		return true
 	}
 	return false
+}
+
+// addUsage 把 runtime 的用量事件并入累计值（语义与上游 OCTokens 一致）：
+// prompt = 未命中缓存的新增输入 + 命中缓存；completion = 可见正文 + 思考。
+func (e *executor) addUsage(u agent.Usage) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.usage.PromptTokens += int(u.InputTokens + u.CacheReadTokens)
+	e.usage.CompletionTokens += int(u.OutputTokens + u.ReasoningTokens)
+	if e.usage.PromptTokensDetails == nil {
+		e.usage.PromptTokensDetails = &TokenDetails{}
+	}
+	if e.usage.CompletionTokensDetails == nil {
+		e.usage.CompletionTokensDetails = &CompletionDetails{}
+	}
+	e.usage.PromptTokensDetails.CachedTokens += int(u.CacheReadTokens)
+	e.usage.PromptTokensDetails.CacheCreationTokens += int(u.CacheWriteTokens)
+	e.usage.CompletionTokensDetails.ReasoningTokens += int(u.ReasoningTokens)
 }
 
 // ---------- 组装 OpenAI 响应 ----------
@@ -869,12 +810,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			conv.setLast(cloneMessages(req.Messages))
 			s.persistConv(conv)
 			sid := conv.snapshotSessionID()
-			sub := s.bus.Subscribe(sid, 512)
-			defer sub.Cancel()
+			ts := s.turnDriver().Subscribe(ctx, sid)
+			defer ts.Cancel()
 
 			// 先订阅再回填，避免漏掉 agent 继续执行时的开头增量
 			s.resumeToolCalls(ctx, w, r, req, ref, conv, pending,
-				toolResultsFromMessages(req.Messages), dir, sub, time.Now().UnixMilli())
+				toolResultsFromMessages(req.Messages), dir, ts, time.Now().UnixMilli())
 			return
 		}
 	}
@@ -988,17 +929,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	sid := conv.snapshotSessionID()
 	setSessionHeaders(w, conv)
-	sub := s.bus.Subscribe(sid, 512)
-	defer sub.Cancel()
+	drv := s.turnDriver()
+	ts := drv.Subscribe(ctx, sid)
+	defer ts.Cancel()
 
 	promptAt := time.Now().UnixMilli()
-	resp, err := s.up.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText, Files: files})
+	created, err := drv.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText, Files: files})
 	if err != nil && len(files) > 0 {
 		// 上游对附件格式挑剔，附件导致失败时降级重发一次纯文本，保住对话本身
 		s.log.Warnf("prompt with %d attachment(s) failed, retrying as plain text: %v", len(files), err)
 		planText = prompt.FlattenDelta(delta) + s.firstTurnNote(conv, newSession) + attach.FailureNote(failed)
 		files = nil
-		resp, err = s.up.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText})
+		created, err = drv.Prompt(ctx, sid, upstream.OCPromptReq{Text: planText})
 	}
 	if err != nil {
 		// 本次刚建的空会话直接丢弃，否则它会以「有 sessionID 但无历史」的
@@ -1015,8 +957,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, st, typ, msg, "")
 		return
 	}
-	if resp != nil && resp.Data.Time.Created > 0 {
-		promptAt = resp.Data.Time.Created
+	if created > 0 {
+		promptAt = created
 	}
 	s.log.Debugf("prompt sent sid=%s key=%s delta=%d bytes model=%s",
 		sid, conv.key(), len(planText), ref.String())
@@ -1027,10 +969,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 流式 / 非流式 ----
 	if req.Stream {
-		s.streamCompletion(w, r, req, ref, conv, sub, promptAt, planText)
+		s.streamCompletion(w, r, req, ref, conv, ts, promptAt, planText)
 		return
 	}
-	s.blockingCompletion(ctx, w, req, ref, conv, sub, promptAt)
+	s.blockingCompletion(ctx, w, req, ref, conv, ts, promptAt)
 }
 
 func (c *Conversation) key() string { return c.Key }

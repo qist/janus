@@ -543,7 +543,7 @@ func assignToolResults(pending []*pendingCall, results map[string]ToolResult,
 func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	req ChatRequest, ref upstream.OCModelRef, conv *Conversation,
 	pending []*pendingCall, results map[string]ToolResult,
-	dir string, sub *upstream.Subscription, promptAt int64) {
+	dir string, turn turnSession, promptAt int64) {
 
 	// 先订阅，再唤醒 agent。
 	// 客户端回填的结果按 tool_call_id 索引；但有些客户端（实测）会用它自己生成的 id，
@@ -571,10 +571,10 @@ func (s *Server) resumeToolCalls(ctx context.Context, w http.ResponseWriter, r *
 
 	// 让 agent 跑起来，复用流式/非流式收尾
 	if req.Stream {
-		s.streamCompletion(w, r, req, ref, conv, sub, promptAt, "")
+		s.streamCompletion(w, r, req, ref, conv, turn, promptAt, "")
 		return
 	}
-	s.blockingCompletion(ctx, w, req, ref, conv, sub, promptAt)
+	s.blockingCompletion(ctx, w, req, ref, conv, turn, promptAt)
 }
 
 // pendingToolCalls 取出本会话等待回填的调用。

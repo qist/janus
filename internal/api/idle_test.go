@@ -6,7 +6,7 @@ import (
 )
 
 func TestExecutorIdleFor(t *testing.T) {
-	e := newExecutor(nil, "sid", "m", false)
+	e := newExecutor(nil, nil, "sid", "m", false)
 	if e.idleFor() > time.Second {
 		t.Fatalf("刚创建应接近 0，实际 %v", e.idleFor())
 	}

@@ -644,8 +644,9 @@ func (s *Server) finishAnthropic(ctx context.Context, w http.ResponseWriter, r *
 	req AnthropicRequest, ref upstream.OCModelRef, conv *Conversation, sub *upstream.Subscription, promptAt int64) {
 
 	model := s.echoModel(ref, req.Model)
+	turn := s.adoptTurnSession(ctx, conv.snapshotSessionID(), sub)
 	if req.Stream {
-		s.streamAnthropic(ctx, w, r, req, ref, conv, sub, promptAt, model)
+		s.streamAnthropic(ctx, w, r, req, ref, conv, turn, promptAt, model)
 		return
 	}
 
@@ -653,7 +654,7 @@ func (s *Server) finishAnthropic(ctx context.Context, w http.ResponseWriter, r *
 	if maxTokens <= 0 {
 		maxTokens = anthropicDefaultMaxTokens
 	}
-	t, err := s.runBlocking(ctx, conv, model, sub, promptAt, maxTokens, true)
+	t, err := s.runBlocking(ctx, conv, model, turn, promptAt, maxTokens, true)
 	if t != nil {
 		s.metrics.AddTokens(t.res.usage.PromptTokens, t.res.usage.CompletionTokens)
 	}

@@ -15,7 +15,7 @@ import (
 
 func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	req ChatRequest, ref upstream.OCModelRef, conv *Conversation,
-	sub *upstream.Subscription, promptAt int64, planText string) {
+	turn turnSession, promptAt int64, planText string) {
 
 	// 注：不再在本轮结束注销 MCP server。OpenCode 的 agent 会话不会在重新注册后
 	// 刷新工具目录，导致下一轮「Code Mode 目录为空」。server 改为在会话存活期内
@@ -57,7 +57,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	clientGone := r.Context().Done()
 
 	sid := conv.snapshotSessionID()
-	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
+	ex := newExecutor(s, turn, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
 	ex.setRewrite(conv.rewriteFrom, conv.rewriteTo)
 	ex.parallel = parallelDefault(req.ParallelToolCalls)
@@ -70,7 +70,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go ex.runEvents(runCtx, sub, promptAt, s.cfg.ReconcileInterval)
+	go ex.runEvents(runCtx, promptAt, s.cfg.ReconcileInterval)
 
 	var outcome string
 	select {
@@ -85,7 +85,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 		return
 	}
@@ -99,7 +99,7 @@ func (s *Server) streamCompletion(w http.ResponseWriter, r *http.Request,
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 		_ = sw.finish("length", &res.usage,
 			req.StreamOptions != nil && req.StreamOptions.IncludeUsage)
@@ -185,11 +185,11 @@ type turnOutcome struct {
 // runBlocking 跑完一轮（非流式），只做汇总不做 HTTP 收尾。
 // 超时/断连时返回 err；工具调用、空回复等都在返回值里体现。
 func (s *Server) runBlocking(ctx context.Context, conv *Conversation, model string,
-	sub *upstream.Subscription, promptAt int64, maxTokens int, parallel bool) (*turnOutcome, error) {
+	turn turnSession, promptAt int64, maxTokens int, parallel bool) (*turnOutcome, error) {
 
 	sid := conv.snapshotSessionID()
 	started := time.Now()
-	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
+	ex := newExecutor(s, turn, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
 	ex.setRewrite(conv.rewriteFrom, conv.rewriteTo)
 	ex.parallel = parallel
@@ -197,7 +197,7 @@ func (s *Server) runBlocking(ctx context.Context, conv *Conversation, model stri
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go ex.runEvents(runCtx, sub, promptAt, s.cfg.ReconcileInterval)
+	go ex.runEvents(runCtx, promptAt, s.cfg.ReconcileInterval)
 
 	var outcome string
 	select {
@@ -206,7 +206,7 @@ func (s *Server) runBlocking(ctx context.Context, conv *Conversation, model stri
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 		return nil, ctx.Err()
 	}
@@ -244,12 +244,12 @@ func (t *turnOutcome) emptyCompletionError() (status int, typ, code, msg string)
 
 func (s *Server) blockingCompletion(ctx context.Context, w http.ResponseWriter,
 	req ChatRequest, ref upstream.OCModelRef, conv *Conversation,
-	sub *upstream.Subscription, promptAt int64) {
+	turn turnSession, promptAt int64) {
 
 	// 同 streamCompletion：不再本轮结束注销 MCP server（见上）。
 
 	model := s.echoModel(ref, req.Model)
-	t, err := s.runBlocking(ctx, conv, model, sub, promptAt,
+	t, err := s.runBlocking(ctx, conv, model, turn, promptAt,
 		tokenbudget.EffectiveMaxTokens(req.MaxTokens, req.MaxCompletionTokens), parallelDefault(req.ParallelToolCalls))
 	if t != nil {
 		s.metrics.AddTokens(t.res.usage.PromptTokens, t.res.usage.CompletionTokens)
@@ -271,7 +271,7 @@ func (s *Server) blockingCompletion(ctx context.Context, w http.ResponseWriter,
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, t.sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 		resp := buildResponse("chatcmpl-"+newID(), time.Now().Unix(), model, t.res)
 		resp.Choices[0].FinishReason = "length"

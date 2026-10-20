@@ -10,7 +10,7 @@ import (
 
 // 端到端：max_tokens 截断后 finish_reason 必须变成 length。
 func TestExecutorBudgetSetsLength(t *testing.T) {
-	ex := newExecutor(&Server{log: logx.NewLogger("error")}, "s", "m", false)
+	ex := newExecutor(&Server{log: logx.NewLogger("error")}, nil, "s", "m", false)
 	ex.budget = tokenbudget.NewBudget(5) // 约 20 个 ASCII 字符
 
 	_ = ex.addText(strings.Repeat("a", 10))
@@ -32,7 +32,7 @@ func TestExecutorBudgetSetsLength(t *testing.T) {
 }
 
 func TestExecutorNoBudgetNoTruncation(t *testing.T) {
-	ex := newExecutor(&Server{log: logx.NewLogger("error")}, "s", "m", false)
+	ex := newExecutor(&Server{log: logx.NewLogger("error")}, nil, "s", "m", false)
 	_ = ex.addText(strings.Repeat("x", 10000))
 	res := ex.snapshot()
 	if res.truncated || res.finish == "length" {

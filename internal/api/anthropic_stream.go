@@ -181,7 +181,7 @@ func (s *anthropicSSE) errorEvent(typ, msg string) {
 
 // streamAnthropic 以 Anthropic SSE 格式驱动一轮执行。
 func (s *Server) streamAnthropic(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	req AnthropicRequest, ref upstream.OCModelRef, conv *Conversation, sub *upstream.Subscription,
+	req AnthropicRequest, ref upstream.OCModelRef, conv *Conversation, turn turnSession,
 	promptAt int64, model string) {
 
 	ss, err := newAnthropicSSE(w, model)
@@ -213,7 +213,7 @@ func (s *Server) streamAnthropic(ctx context.Context, w http.ResponseWriter, r *
 	ss.messageStart()
 
 	sid := conv.snapshotSessionID()
-	ex := newExecutor(s, sid, model, s.cfg.ToolAnnotations)
+	ex := newExecutor(s, turn, sid, model, s.cfg.ToolAnnotations)
 	ex.toolSess = conv.toolSess
 	ex.setRewrite(conv.rewriteFrom, conv.rewriteTo)
 	ex.parallel = true
@@ -223,7 +223,7 @@ func (s *Server) streamAnthropic(ctx context.Context, w http.ResponseWriter, r *
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go ex.runEvents(runCtx, sub, promptAt, s.cfg.ReconcileInterval)
+	go ex.runEvents(runCtx, promptAt, s.cfg.ReconcileInterval)
 
 	clientGone := r.Context().Done()
 	var outcome string
@@ -239,7 +239,7 @@ func (s *Server) streamAnthropic(ctx context.Context, w http.ResponseWriter, r *
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 		return
 	}
@@ -257,7 +257,7 @@ func (s *Server) streamAnthropic(ctx context.Context, w http.ResponseWriter, r *
 		go func() {
 			iCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 			defer c()
-			_ = s.up.Interrupt(iCtx, sid)
+			_ = turn.Interrupt(iCtx)
 		}()
 	}
 

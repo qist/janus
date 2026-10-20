@@ -149,11 +149,21 @@ func lastUserText(msgs []agent.Message) string {
 
 // ocEventToAgent 把一个上游事件映射成 Agent 事件；terminal 表示事件流可以收尾。
 func ocEventToAgent(ev upstream.OCEvent, sid string) (*agent.Event, bool) {
+	e, terminal := ocEventToAgentData(ev, sid)
+	if e != nil {
+		e.At = ev.Created
+	}
+	return e, terminal
+}
+
+func ocEventToAgentData(ev upstream.OCEvent, sid string) (*agent.Event, bool) {
 	var sess upstream.EvtSession
 	if json.Unmarshal(ev.Data, &sess) != nil || sess.SessionID != sid {
 		return nil, false
 	}
 	switch ev.Type {
+	case "session.execution.started", "session.step.started":
+		return &agent.Event{Type: agent.EventStart}, false
 	case "session.text.delta":
 		var d upstream.EvtTextDelta
 		if json.Unmarshal(ev.Data, &d) == nil && d.Delta != "" {
@@ -177,14 +187,15 @@ func ocEventToAgent(ev upstream.OCEvent, sid string) (*agent.Event, bool) {
 	case "session.tool.success", "session.tool.failed":
 		var d upstream.EvtToolResult
 		if json.Unmarshal(ev.Data, &d) == nil {
-			text := ev.Type
+			var parts []string
 			for _, c := range d.Content {
 				if c.Text != "" {
-					text = c.Text
+					parts = append(parts, c.Text)
 				}
 			}
-			if d.Error != "" {
-				text = d.Error
+			text := strings.TrimSpace(strings.Join(parts, "\n"))
+			if text == "" {
+				text = strings.TrimSpace(d.Error)
 			}
 			return &agent.Event{Type: agent.EventToolResult, Text: text,
 				ToolCall: &agent.ToolCall{ID: d.ID}}, false
@@ -196,6 +207,9 @@ func ocEventToAgent(ev upstream.OCEvent, sid string) (*agent.Event, bool) {
 			if d.Tokens != nil {
 				u.InputTokens = int64(d.Tokens.Input)
 				u.OutputTokens = int64(d.Tokens.Output)
+				u.ReasoningTokens = int64(d.Tokens.Reason)
+				u.CacheReadTokens = int64(d.Tokens.Cache.Read)
+				u.CacheWriteTokens = int64(d.Tokens.Cache.Write)
 			}
 			return &agent.Event{Type: agent.EventUsage, Usage: u, Finish: d.Finish}, false
 		}

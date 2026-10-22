@@ -379,6 +379,13 @@ func (r *workbuddyRuntime) handleChat(w http.ResponseWriter, req *http.Request) 
 		if msg == "" {
 			msg = shrink(head, 300)
 		}
+		if kind == wbKindChannelCheck {
+			// 渠道校验 ≠ 账号封禁：凭据是好的，是请求形态被判成「非官方客户端」。
+			// 明确说清，免得用户去删号重扫（凭证从来没问题，重扫也白折腾）。
+			code := wbBodyCode(string(head))
+			msg = "上游渠道校验拒绝" + wbCodeSuffix(code) +
+				"（请求未通过官方客户端渠道校验；账号本身未失效，/v2 与 /console 两条路径均被拒）"
+		}
 		status = wbStatusFor(kind)
 		r.writeOpenAIError(w, status, string(kind), "workbuddy 上游: "+msg)
 		return

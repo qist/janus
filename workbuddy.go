@@ -23,8 +23,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,6 +52,10 @@ const (
 
 	// wbErrorBodyLimit 是错误响应体截断长度（只用于分类与回显）。
 	wbErrorBodyLimit = 4096
+	// wbErrorBodyReadLimit 是客户端内部读错误体的上限（判定渠道校验用）。
+	// 比回显用的 wbErrorBodyLimit 大一档：渠道校验的文案（displayTips）在封套尾部，
+	// 读太短会漏判 → 该换的路径没换。
+	wbErrorBodyReadLimit = 64 << 10
 )
 
 // wbCredential 是 WorkBuddy 明文凭据。字段名与插件自留副本一致，便于直接互导。
@@ -161,22 +163,36 @@ func wbNum(v any) int {
 
 // ---------- 请求头 ----------
 
-// wbRandomID 生成一个 UUIDv4 字符串（X-Conversation-* 三件套需要）。
-func wbRandomID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		// 极端情况下退化为时间戳，保证非空即可（这三件套只用来标记渠道，不承载状态）。
-		return fmt.Sprintf("00000000-0000-4000-8000-%012x", time.Now().UnixNano()&0xffffffffffff)
+// wbIdentityHeaders 是所有上游请求共享的「身份/风控闸门」头（对齐上游
+// workbuddy2api 的 CommonHeaders）：
+//
+//   - X-CodeBuddy-Request: 1 —— 官方客户端风控闸门头，**所有** API 请求必带
+//     （上游缺它会判请求不像官方客户端）。
+//   - Accept-Language —— 按域切（国际版 en-US / 国内版 zh-CN）；上游风控会按语言
+//     缺失误判，所以按官方客户端的域形态带齐。
+//   - X-Machine-ID / X-Session-ID —— 按 uid 稳定派生的设备/会话标识（跨重启固定、
+//     账号间互异），对齐官方桌面端「每账号一台固定虚拟设备」语义；上游按设备指纹
+//     做风控，这两头恒定的头必须带上。uid 为空则不注入（匿名请求无设备标识）。
+func wbIdentityHeaders(cred *wbCredential) http.Header {
+	h := http.Header{}
+	h.Set("X-CodeBuddy-Request", "1")
+	if cred.region() == "global" {
+		h.Set("Accept-Language", "en-US")
+	} else {
+		h.Set("Accept-Language", "zh-CN")
 	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return hex.EncodeToString(b[0:4]) + "-" + hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" + hex.EncodeToString(b[8:10]) + "-" + hex.EncodeToString(b[10:16])
+	if machine := wbAccountStableID(cred.UID, "machine"); machine != "" {
+		h.Set("X-Machine-ID", machine)
+	}
+	if session := wbAccountStableID(cred.UID, "session"); session != "" {
+		h.Set("X-Session-ID", session)
+	}
+	return h
 }
 
 // wbCommonHeaders 是 refresh / 目录请求共享的头（chat 会覆盖 UA）。
 func wbCommonHeaders(cred *wbCredential) http.Header {
-	h := http.Header{}
+	h := wbIdentityHeaders(cred)
 	h.Set("Accept", "application/json, text/plain, */*")
 	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("Origin", cred.origin())
@@ -187,7 +203,12 @@ func wbCommonHeaders(cred *wbCredential) http.Header {
 
 // wbChatHeaders 组装 chat 请求头。international 时 UA 形如
 // `WorkBuddy/<v> WorkBuddy AI/<v>`，国内版为 `WorkBuddy/<v> WorkBuddy/<v>`。
-func wbChatHeaders(cred *wbCredential, appVer string) http.Header {
+//
+// ids 是本次出站的会话头族（见 wbConversationIDs）：会话级 / 对话轮级 / 消息级三件套
+// 恒为 32 位 hex（同会话多轮稳定、一次 user send 内稳定），另带 X-Request-ID /
+// X-Root-Request-ID / X-Trace-ID / X-B3-* 链路族 —— 与官方 CLI 出站形态一致，
+// 缺头会被上游判成「不是官方客户端」。
+func wbChatHeaders(cred *wbCredential, appVer string, ids wbConvIDs) http.Header {
 	h := wbCommonHeaders(cred)
 	product := "WorkBuddy"
 	if cred.region() == "global" {
@@ -200,24 +221,44 @@ func wbChatHeaders(cred *wbCredential, appVer string) http.Header {
 	} else {
 		h.Set("X-User-Id", cred.UID)
 	}
-	if cred.EnterpriseID == "" {
+	if cred.region() == "global" {
+		// 国际版（官方 intl 客户端形态，对齐上游 injectGlobalChatHeaders）：
+		//   - X-No-Enterprise-Id: 1 —— 国际版是个人账号，显式声明「无企业」
+		//     （上游按缺省/可疑判定身份）。
+		//   - X-Domain: www.workbuddy.ai —— 显式声明国际版域，**与 Origin/Referer
+		//     同域**。上游刻意不回落到登录会话原值（凭据里的 domain 常是裸域
+		//     workbuddy.ai），域形态对不齐会被判成非官方客户端。
 		h.Set("X-No-Enterprise-Id", "1")
+		h.Set("X-Domain", "www.workbuddy.ai")
 	} else {
-		h.Set("X-Enterprise-Id", cred.EnterpriseID)
-	}
-	if cred.Domain == "" {
-		h.Set("X-No-Department-Info", "1")
-	} else {
-		h.Set("X-Domain", cred.Domain)
+		if cred.EnterpriseID == "" {
+			h.Set("X-No-Enterprise-Id", "1")
+		} else {
+			h.Set("X-Enterprise-Id", cred.EnterpriseID)
+		}
+		if cred.Domain == "" {
+			h.Set("X-No-Department-Info", "1")
+		} else {
+			h.Set("X-Domain", cred.Domain)
+		}
 	}
 	h.Set("X-IDE-Type", "WorkBuddy")
 	h.Set("X-IDE-Name", "WorkBuddy")
 	h.Set("X-IDE-Version", appVer)
 	h.Set("X-Product", "SaaS")
-	// 2026-10-16 起国际版缺这三个头直接 400，国内版一并带上（实测两者都接受）。
-	h.Set("X-Conversation-ID", wbRandomID())
-	h.Set("X-Conversation-Request-ID", wbRandomID())
-	h.Set("X-Conversation-Message-ID", wbRandomID())
+	// 会话头族（官方 CLI 形态，2026-10-16 起国际版缺这三个头直接 400）。
+	// 值为 32 位 hex：会话级同一会话多轮恒同，轮级一次 user send 内恒同，
+	// 消息级每条独立。
+	h.Set("X-Conversation-ID", ids.ConversationID)
+	h.Set("X-Conversation-Request-ID", ids.ConversationRequestID)
+	h.Set("X-Conversation-Message-ID", ids.MessageID)
+	// 链路族：消息级 ID 同时充当 X-Request-ID；轮级 ID 充当聚合主键与 trace。
+	h.Set("X-Request-ID", ids.MessageID)
+	h.Set("X-Root-Request-ID", ids.ConversationRequestID)
+	h.Set("X-Trace-ID", ids.ConversationRequestID)
+	h.Set("X-B3-TraceId", ids.ConversationRequestID)
+	h.Set("X-B3-SpanId", ids.MessageID[:16])
+	h.Set("X-B3-Sampled", "1")
 	return h
 }
 
@@ -334,6 +375,17 @@ const (
 	wbKindNotFound    wbErrKind = "not_found"
 	wbKindServer      wbErrKind = "server"
 	wbKindClient      wbErrKind = "client"
+	// wbKindChannelCheck 是上游「渠道校验」拒绝（11128 / 11-128 家族）。
+	//
+	// 与「账号被封」是两回事：渠道校验判的是**请求形态**（不像官方客户端发的），
+	// 凭据本身是好的。上游 workbuddy2api 正是因此把它单独归类、只软冷却
+	// 绝不硬禁用账号（workbuddy-manager#229：旧代码把渠道校验误判成账号封禁，
+	// 用户删号重扫也没用）。
+	//
+	// 落到 janus：两条 chat 路径都试过仍被渠道校验拒绝时，回 **502**（上游/网关
+	// 侧问题）而不是 400（客户端请求有问题）—— 让客户端知道「不是你参数写错」，
+	// 也别让用户以为要重新登录。
+	wbKindChannelCheck wbErrKind = "channel_check"
 )
 
 var (
@@ -352,6 +404,12 @@ func wbClassify(status int, body string) wbErrKind {
 	}
 	if status == 401 {
 		return wbKindSessionDead
+	}
+	// 渠道校验要在余额/会话死之前判：它的封套里带着 `request illegal` 这类历史
+	// msg，按 msg 判会误归成「账号被封」（用户重扫也没用）；按内容审核判会误归成
+	// 客户端错误。判据本身够严（码 + 校验措辞两者同时成立），故可安全前置。
+	if wbIsChannelCheck(body) {
+		return wbKindChannelCheck
 	}
 	lower := strings.ToLower(body)
 	for _, m := range wbHardCreditMarkers {
@@ -385,7 +443,7 @@ func wbStatusFor(kind wbErrKind) int {
 		return http.StatusTooManyRequests
 	case wbKindSessionDead:
 		return http.StatusUnauthorized
-	case wbKindNotFound, wbKindServer:
+	case wbKindNotFound, wbKindServer, wbKindChannelCheck:
 		return http.StatusBadGateway
 	default:
 		return http.StatusBadRequest
@@ -991,31 +1049,93 @@ func (c *workbuddyClient) chatBase() string {
 }
 
 // chat 发起一次 chat 请求。成功时返回原始 SSE 响应体（未读取）。
-// 遇 401 会自动续期并重试一次。
+//
+// 两条重试语义：
+//   - 401：可能是 access token 过期 → 续期后**同路径**重试一次。
+//   - 渠道校验拒绝（11128 / 11-128 + 「没通过渠道校验」文案）：上游 2026-10-17 起
+//     对 /v2/chat/completions 加了渠道强校验，官方客户端走的是 /console 端点（放行）。
+//     这是**路径级**拒绝、不是账号被封 —— 凭据是好的，让用户删号重扫是白折腾，
+//     故换路径重试（见 wbChatPaths / wbIsChannelCheck）。
 func (c *workbuddyClient) chat(ctx context.Context, body []byte) (*http.Response, error) {
-	resp, err := c.chatOnce(ctx, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
+	paths := wbChatPaths()
+	// 记下主路径的渠道校验拒绝：兜底路径若因别的原因失败（如该域没有这个端点，
+	// 回 404），要以主路径的拒绝为准 —— 那才是可行动的原因（换域名/改形态），
+	// 兜底路径的 404 会把真正的原因盖掉。
+	var primaryStatus int
+	var primaryRaw []byte
+	for i, path := range paths {
+		resp, err := c.chatOnce(ctx, body, path)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			// 401：可能是 access token 过期。吞掉旧响应体后尝试续期。
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, wbErrorBodyLimit))
+			_ = resp.Body.Close()
+			if rerr := c.refresh(ctx); rerr != nil {
+				return nil, fmt.Errorf("上游 401 且续期失败: %w", rerr)
+			}
+			if resp, err = c.chatOnce(ctx, body, path); err != nil {
+				return nil, err
+			}
+		}
+		if resp.StatusCode < 400 {
+			return resp, nil
+		}
+		// 错误响应：读出一份 body 用于判定是否渠道校验（路径级拒绝 → 换路径重试）。
+		raw, rerr := io.ReadAll(io.LimitReader(resp.Body, wbErrorBodyReadLimit))
+		_ = resp.Body.Close()
+		if rerr != nil {
+			return nil, fmt.Errorf("读取上游错误响应失败: %w", rerr)
+		}
+		if !wbIsChannelCheck(string(raw)) {
+			if primaryRaw != nil {
+				// 兜底路径因别的原因失败（如该域没有这个端点，回 404）→ 以主路径的
+				// 渠道校验拒绝为准：那才是可行动的原因（换形态 / 等上游放开），兜底
+				// 路径的 404 会把真正的原因盖掉。
+				return &http.Response{
+					StatusCode: primaryStatus,
+					Body:       io.NopCloser(bytes.NewReader(primaryRaw)),
+					Header:     make(http.Header),
+				}, nil
+			}
+			// 不是渠道校验：把 body 放回响应，交给调用方分类/回显。
+			resp.Body = io.NopCloser(bytes.NewReader(raw))
+			return resp, nil
+		}
+		if i == 0 {
+			primaryStatus, primaryRaw = resp.StatusCode, raw
+		}
+		if i < len(paths)-1 {
+			// 渠道校验：/v2 被上游强校验拦下，官方客户端走 /console 端点 —— 换路径重试。
+			continue
+		}
+		// 兜底路径也被渠道校验拒绝：回最后一次的拒绝（内容与主路径一致）。
+		resp.Body = io.NopCloser(bytes.NewReader(raw))
 		return resp, nil
 	}
-	// 401：可能是 access token 过期。吞掉旧响应体后尝试续期。
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, wbErrorBodyLimit))
-	_ = resp.Body.Close()
-	if rerr := c.refresh(ctx); rerr != nil {
-		return nil, fmt.Errorf("上游 401 且续期失败: %w", rerr)
-	}
-	return c.chatOnce(ctx, body)
+	return nil, errors.New("上游 chat 全部路径均被拒")
 }
 
-func (c *workbuddyClient) chatOnce(ctx context.Context, body []byte) (*http.Response, error) {
+// chatOnce 打一次 chat 请求。path 为空时用主路径 /v2/chat/completions。
+//
+// 兜底 /console 路径、及国际版（global）的所有请求，都会补一条兜底 system 消息：
+// console 域上游对「首条非 system」的请求回 code 11-128（对齐上游 ensureConsoleSystem）。
+func (c *workbuddyClient) chatOnce(ctx context.Context, body []byte, path string) (*http.Response, error) {
 	cred := c.credential()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatBase()+"/v2/chat/completions", bytes.NewReader(body))
+	if path == "" {
+		path = wbChatPathV2
+	}
+	// 会话头族按**原始** body 派生（补 system 不影响 user 消息锚点）。
+	ids := wbConversationIDs(body)
+	if path == wbChatPathConsole || cred.region() == "global" {
+		body = wbEnsureConsoleSystem(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatBase()+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header = wbChatHeaders(cred, c.appVer)
+	req.Header = wbChatHeaders(cred, c.appVer, ids)
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
 	return c.http.Do(req)
 }

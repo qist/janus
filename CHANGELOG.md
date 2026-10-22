@@ -4,6 +4,44 @@
 
 ---
 
+## [v0.3.57] - 2026-10-22
+
+### 修复
+**WorkBuddy 国际版账号调用被上游「渠道校验」拒绝**（对应
+[ithtelab/workbuddy-manager#229](https://github.com/ithtelab/workbuddy-manager/issues/229)）。
+上游 2026-10-17 起对 `/v2/chat/completions` 加了渠道强校验：请求不是官方客户端
+发出的形态时回 `11128 / 11-128`「没通过渠道校验，可能不是官方客户端发出的」。
+janus 侧此前直接把这层拒绝透给客户端，国际版账号表现为整段对话不可用。
+
+按上游 workbuddy2api 的现行处理口径修复（**路径级**拒绝 ≠ 账号封禁 ——
+凭据是好的，删号重扫是白折腾）：
+
+- **换路径兜底**：命中渠道校验时自动改走 `/console/chat/completions`（官方客户端
+  走的端点，放行）重试一次；404/405 之类不回落（那是路径写错，换过去只是把
+  错误搬个家）。走 console 路径时补一条兜底 system 消息（console 域上游对
+  「首条非 system」的请求回 `11-128`）。
+- **渠道校验独立成类**（`channel_check`）：不再落通用 4xx。两条路径都被拒时回
+  **502**（上游侧问题，不是客户端请求错），错误文案明说「账号本身未失效」——
+  避免误导用户去重新登录/重扫凭据。内容审核拦截（同一个 11-128 码的另一类
+  载荷）保持原行为，不被误吞。
+- **会话头族按官方 CLI 形态出站**：`X-Conversation-ID` 会话级稳定（同会话多轮
+  恒同，客户端给了会话 ID 则透传）、`X-Conversation-Request-ID` 轮级稳定、
+  `X-Conversation-Message-ID` 消息级独立，值恒为 32 位 hex；另补齐
+  `X-Request-ID` / `X-Root-Request-ID` / `X-Trace-ID` / `X-B3-*` 链路族。
+  此前是每次请求随机 UUID，且缺链路族头。
+- **补齐官方客户端身份头**：所有请求带 `X-CodeBuddy-Request: 1`（官方风控闸门
+  头）、按域切 `Accept-Language`（国际版 en-US / 国内版 zh-CN）、按 uid 稳定派生
+  `X-Machine-ID` / `X-Session-ID`；国际版显式声明 `X-No-Enterprise-Id: 1` +
+  `X-Domain: www.workbuddy.ai`（与 Origin/Referer 同域，不回落到登录会话里的裸域）。
+
+### 验证
+- 新增 `workbuddy_channel_test.go`：渠道校验识别（含码的各种写法、中英文文案）、
+  内容审核不被误吞、路径兜底（/v2 拒 → /console 通）、非渠道校验不换路径、
+  会话头族稳定性与 32 hex 形态、官方身份头齐备性。
+- `go vet` + `go test ./...` 全绿。
+
+---
+
 ## [v0.3.55] - 2026-10-16
 
 ### 新增

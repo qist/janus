@@ -463,3 +463,29 @@ func TestWBParseCredentialDeviceToken(t *testing.T) {
 		t.Fatalf("嵌套形态: cred=%+v err=%v", cred, err)
 	}
 }
+
+// 桌面导出的 uid 在 account / accounts[0] 里（不在 auth/identity）：解析必须
+// 兜到，否则 X-User-Id 与设备指纹头全部缺失，出站退化成匿名形态。
+func TestWBParseCredentialUIDFromAccount(t *testing.T) {
+	in := `{"accessToken":"at","refreshToken":"rt","domain":"www.workbuddy.ai",
+		"auth":{"accessToken":"at","refreshToken":"rt","domain":"www.workbuddy.ai"},
+		"account":{"uid":"u-account","nickname":"n"},
+		"accounts":[{"uid":"u-acc0","nickname":"n0"}]}`
+	cred, err := parseWBCredential(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.UID != "u-account" {
+		t.Fatalf("应优先取 account.uid，got %q", cred.UID)
+	}
+	// 没有 account.uid 时回落 accounts[0].uid。
+	in2 := `{"accessToken":"at","refreshToken":"rt","domain":"www.workbuddy.ai",
+		"accounts":[{"uid":"u-acc0"}]}`
+	cred2, err := parseWBCredential(in2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred2.UID != "u-acc0" {
+		t.Fatalf("应回落 accounts[0].uid，got %q", cred2.UID)
+	}
+}

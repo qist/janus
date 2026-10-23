@@ -144,6 +144,22 @@ func parseWBCredential(text string) (*wbCredential, error) {
 			cred.EnterpriseID = wbStr(ident["enterpriseId"])
 		}
 	}
+	// 桌面导出还有一种形态：uid 不在 auth/identity 里，而在 account / accounts[0]
+	// （accounts 是登录会话自带的账号信息数组）。uid 是 X-User-Id 与设备指纹头
+	// （X-Machine-ID/X-Session-ID）的派生源，缺失会让请求退化成 X-No-User-Id 的
+	// 匿名形态 —— 上游按「每账号一台固定虚拟设备」做风控，能拿到就一定带上。
+	if cred.UID == "" {
+		if m, ok := doc["account"].(map[string]any); ok {
+			cred.UID = wbStr(m["uid"])
+		}
+	}
+	if cred.UID == "" {
+		if accs, ok := doc["accounts"].([]any); ok && len(accs) > 0 {
+			if m, ok := accs[0].(map[string]any); ok {
+				cred.UID = wbStr(m["uid"])
+			}
+		}
+	}
 	if cred.AccessToken == "" {
 		return nil, errors.New("凭据里没有可用的 accessToken；若这是 WorkBuddy 5.6 加密文件，" +
 			"需先在有桌面版的机器上导出明文（见 docs/WORKBUDDY.md）")

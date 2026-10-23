@@ -4,6 +4,25 @@
 
 ---
 
+## [v0.3.59] - 2026-10-23
+
+### 修复
+**凭据 uid 解析补全**：桌面导出的凭据里 uid 不在 `auth`/`identity` 段，而在
+`account.uid` / `accounts[0].uid`（登录会话自带的账号信息数组）。此前解析兜不到，
+实际运行时 UID 为空 → 出站发 `X-No-User-Id: 1`、且没有 `X-Machine-ID` /
+`X-Session-ID` 设备指纹头，退化成匿名形态。现在按 `uid` → `identity.uid` →
+`account.uid` → `accounts[0].uid` 顺序兜底，能拿到就带齐身份头（上游按
+「每账号一台固定虚拟设备」做风控）。
+
+另：180 实测确认 `11140 request illegal`（+「账号存在异常行为，已被限制使用」）
+是**账号级**风控标记 —— 补齐官方头形态后同样被拒（对齐上游 workbuddy-manager
+issue #155 的结论：该类账号在官方网页上对话也报同样错误，非请求形态问题）。
+
+### 验证
+- 新增 `TestWBParseCredentialUIDFromAccount`。
+
+---
+
 ## [v0.3.58] - 2026-10-23
 
 ### 对齐

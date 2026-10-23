@@ -206,9 +206,13 @@ func TestWorkBuddyProviderRoutes(t *testing.T) {
 	// 上游 401 → 自动续期后重试
 	up2Hits := 0
 	refreshHits := 0
+	var refreshUA, refreshSource, refreshUID string
 	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/token/refresh") {
 			refreshHits++
+			refreshUA = r.Header.Get("User-Agent")
+			refreshSource = r.Header.Get("X-Auth-Refresh-Source")
+			refreshUID = r.Header.Get("X-User-Id")
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"at-2"}}`))
 			return
 		}
@@ -223,7 +227,7 @@ func TestWorkBuddyProviderRoutes(t *testing.T) {
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer up2.Close()
-	c2 := newWorkBuddyClient(&wbCredential{AccessToken: "stale", RefreshToken: "rt", Domain: "workbuddy.ai"}, "5.5.6")
+	c2 := newWorkBuddyClient(&wbCredential{AccessToken: "stale", RefreshToken: "rt", Domain: "workbuddy.ai", UID: "u9"}, "5.5.6")
 	c2.baseOverride = up2.URL
 	rt.client = c2
 
@@ -237,6 +241,16 @@ func TestWorkBuddyProviderRoutes(t *testing.T) {
 	}
 	if c2.credential().AccessToken != "at-2" {
 		t.Fatalf("新 token 未生效: %q", c2.credential().AccessToken)
+	}
+	// 续期请求的官方形态：三段式 UA、plugin 渠道标识、账号 uid 身份头。
+	if !strings.Contains(refreshUA, "CLI/") {
+		t.Errorf("refresh UA 应为三段式 CLI 形态，got %q", refreshUA)
+	}
+	if refreshSource != "plugin" {
+		t.Errorf("X-Auth-Refresh-Source 应为 plugin（官方渠道标识），got %q", refreshSource)
+	}
+	if refreshUID != "u9" {
+		t.Errorf("refresh 应带 X-User-Id，got %q", refreshUID)
 	}
 	_ = context.Background()
 }

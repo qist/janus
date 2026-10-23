@@ -4,6 +4,41 @@
 
 ---
 
+## [v0.3.58] - 2026-10-23
+
+### 对齐
+**WorkBuddy 出站形态对齐上游现行口径**（workbuddy-manager v2.8.3 镜像的
+workbuddy2api 默认行为；渠道校验之后，把「网关特征」的另一半也清掉 ——
+用量归因与 UA 形态）：
+
+- **用量归属头换成官方桌面端指纹**：`X-Product: SaaS` → `X-Product: WorkBuddy`，
+  并补 `X-Agent-Purpose: conversation`（上游 2026-09-14 起的 `injectAttribution`
+  默认翻转）。此前 SaaS 且无 AgentPurpose 的组合在官网用量归因里是显眼的
+  「网关特征」。
+- **UA 补齐三段式**：`WorkBuddy/<v> <平台>/<v>` → `WorkBuddy/<v> <平台>/<v>
+  CLI/<cli>`（上游 `defaultWorkBuddyUAFor` 形态；/v3/config 的 UA 门禁只认
+  三段式，web 形态会被 400 拒）。refresh / 目录 / chat 统一使用；目录去掉
+  国际版单独的 `WorkBuddyAI/<v>` 短 UA 与 `X-Product`。默认版本对齐上游现行
+  默认（桌面 5.5.4 / CLI 2.137.1，原 5.5.6 / 2.63.2）。
+- **refresh 形态修正**：`X-Auth-Refresh-Source: workbuddy`（自造值）→
+  `plugin`（官方客户端刷新渠道标识，上游 D3 实测）；补 `X-User-Id`。
+- **Accept 收紧**（上游 D6）：非流式请求从 `application/json, text/plain, */*`
+  收紧为 `application/json`；chat 覆盖为流式形态
+  `application/json, text/event-stream`。
+- **billing 域请求头补齐**：单段 UA `WorkBuddy/<ver>`（官方客户端在签到/积分
+  白名单接口的覆写形态）+ `X-CodeBuddy-Request` / `Accept-Language` /
+  `X-Machine-ID` / `X-Session-ID`（此前只有 Authorization 与身份三件套）。
+- **可选设备风控 token**：凭据新增 `deviceToken` 字段（扁平与嵌套 auth 段都收），
+  非空时在 chat / refresh / billing 三域注入 `X-Device-Token`；取不到不发
+  （对齐上游 `resolveDeviceToken` 的账号级来源，config/文件级由部署方自管）。
+
+### 验证
+- 新增形态断言：`TestWBCatalogHeadersShape` / `TestWBBillingHeadersShape` /
+  `TestWBUserAgentShape` / `TestWBParseCredentialDeviceToken`，并扩展
+  chat 官方形态与端到端续期用例（UA 三段式、plugin 来源、X-User-Id）。
+
+---
+
 ## [v0.3.57] - 2026-10-22
 
 ### 修复

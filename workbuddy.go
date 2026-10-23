@@ -41,11 +41,13 @@ const (
 	// wbCnBillBase 是国内版目录/计费的 Origin/Referer 与计费基址。
 	wbCnBillBase = "https://www.codebuddy.cn"
 
-	// wbFallbackAppVer 是拿不到真实桌面版本时的兜底版本号（与上游插件一致）。
-	wbFallbackAppVer = "5.5.6"
+	// wbFallbackAppVer 是拿不到真实桌面版本时的兜底版本号（对齐上游
+	// workbuddy2api 现行默认 client_version，原 5.5.6 为旧插件值）。
+	wbFallbackAppVer = "5.5.4"
 
-	// wbClientUA 是 CLI 形态的 UA，用于 refresh 与国内版目录。
-	wbClientUA = "CLI/2.63.2 CodeBuddy/2.63.2"
+	// wbFallbackCliVer 是三段式 UA 尾段（CLI/…）的兜底 CLI 版本号（对齐上游
+	// 现行默认 cli_version；/v3/config 有 UA 门禁，只认三段式形态）。
+	wbFallbackCliVer = "2.137.1"
 
 	// wbJSONTimeout 是 refresh / 目录这类短请求的超时。
 	wbJSONTimeout = 30 * time.Second
@@ -66,6 +68,9 @@ type wbCredential struct {
 	UID          string `json:"uid"`
 	EnterpriseID string `json:"enterpriseId,omitempty"`
 	ExpiresAtMs  int64  `json:"expiresAtMs,omitempty"`
+	// DeviceToken 是可选的设备风控 token（X-Device-Token，chat/refresh/billing
+	// 三域注入；对齐上游 resolveDeviceToken 的账号级来源）。取不到就不发。
+	DeviceToken string `json:"deviceToken,omitempty"`
 }
 
 // wbRegion 由登录 domain 推导：workbuddy.ai 系 = 国际版，其余（含空）= 国内版。
@@ -115,6 +120,7 @@ func parseWBCredential(text string) (*wbCredential, error) {
 		Domain:       wbStr(doc["domain"]),
 		UID:          wbStr(doc["uid"]),
 		EnterpriseID: wbStr(doc["enterpriseId"]),
+		DeviceToken:  wbStr(doc["deviceToken"]),
 	}
 	if auth, ok := doc["auth"].(map[string]any); ok {
 		if cred.AccessToken == "" {
@@ -125,6 +131,9 @@ func parseWBCredential(text string) (*wbCredential, error) {
 		}
 		if cred.Domain == "" {
 			cred.Domain = wbStr(auth["domain"])
+		}
+		if cred.DeviceToken == "" {
+			cred.DeviceToken = wbStr(auth["deviceToken"])
 		}
 	}
 	if ident, ok := doc["identity"].(map[string]any); ok {
@@ -190,19 +199,38 @@ func wbIdentityHeaders(cred *wbCredential) http.Header {
 	return h
 }
 
-// wbCommonHeaders 是 refresh / 目录请求共享的头（chat 会覆盖 UA）。
+// wbUserAgent 组装出站 UA（对齐上游 defaultWorkBuddyUAFor）：
+//
+//	WorkBuddy/<ver> <platform>/<ver> CLI/<cli>
+//
+// 国际版平台段是 `WorkBuddy AI`，国内版是 `WorkBuddy`。上游 /v3/config 有 UA
+// 门禁：只有这种三段式形态能过，web 形态会被 400 拒 —— refresh / 目录 / chat
+// 统一用它（billing 域另行覆写为单段，见 wbBillingHeaders）。
+func wbUserAgent(cred *wbCredential, appVer string) string {
+	product := "WorkBuddy"
+	if cred.region() == "global" {
+		product = "WorkBuddy AI"
+	}
+	return fmt.Sprintf("WorkBuddy/%s %s/%s CLI/%s", appVer, product, appVer, wbFallbackCliVer)
+}
+
+// wbCommonHeaders 是 refresh / 目录请求共享的头（billing 域覆写 UA）。
 func wbCommonHeaders(cred *wbCredential) http.Header {
 	h := wbIdentityHeaders(cred)
-	h.Set("Accept", "application/json, text/plain, */*")
+	// Accept 收紧为 application/json（上游 D6：非流式请求原宽形态
+	// `application/json, text/plain, */*` 是显眼的网关特征）；chat 路径由
+	// wbChatHeaders 覆盖为流式形态。
+	h.Set("Accept", "application/json")
 	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("Origin", cred.origin())
 	h.Set("Referer", cred.origin()+"/")
-	h.Set("User-Agent", wbClientUA)
+	h.Set("User-Agent", wbUserAgent(cred, wbFallbackAppVer))
 	return h
 }
 
 // wbChatHeaders 组装 chat 请求头。international 时 UA 形如
-// `WorkBuddy/<v> WorkBuddy AI/<v>`，国内版为 `WorkBuddy/<v> WorkBuddy/<v>`。
+// `WorkBuddy/<v> WorkBuddy AI/<v> CLI/<cli>`，国内版为
+// `WorkBuddy/<v> WorkBuddy/<v> CLI/<cli>`。
 //
 // ids 是本次出站的会话头族（见 wbConversationIDs）：会话级 / 对话轮级 / 消息级三件套
 // 恒为 32 位 hex（同会话多轮稳定、一次 user send 内稳定），另带 X-Request-ID /
@@ -210,11 +238,10 @@ func wbCommonHeaders(cred *wbCredential) http.Header {
 // 缺头会被上游判成「不是官方客户端」。
 func wbChatHeaders(cred *wbCredential, appVer string, ids wbConvIDs) http.Header {
 	h := wbCommonHeaders(cred)
-	product := "WorkBuddy"
-	if cred.region() == "global" {
-		product = "WorkBuddy AI"
-	}
-	h.Set("User-Agent", fmt.Sprintf("WorkBuddy/%s %s/%s", appVer, product, appVer))
+	h.Set("User-Agent", wbUserAgent(cred, appVer))
+	// 流式 chat 的 Accept（上游 D6：非流式收紧为 application/json，chat 覆盖为
+	// 流式形态）。
+	h.Set("Accept", "application/json, text/event-stream")
 	h.Set("Content-Type", "application/json")
 	if cred.UID == "" {
 		h.Set("X-No-User-Id", "1")
@@ -245,7 +272,17 @@ func wbChatHeaders(cred *wbCredential, appVer string, ids wbConvIDs) http.Header
 	h.Set("X-IDE-Type", "WorkBuddy")
 	h.Set("X-IDE-Name", "WorkBuddy")
 	h.Set("X-IDE-Version", appVer)
-	h.Set("X-Product", "SaaS")
+	// 用量归属头（对齐上游 injectAttribution 2026-09-14 起的默认）：伪造官方
+	// 桌面端指纹 —— X-Product=WorkBuddy + X-Agent-Purpose=conversation。此前
+	// X-Product=SaaS（且无 X-Agent-Purpose）在官网用量归因里是显眼的「网关特征」，
+	// 也是渠道校验按「非官方客户端」判定的形态之一。
+	h.Set("X-Product", "WorkBuddy")
+	h.Set("X-Agent-Purpose", "conversation")
+	// 设备风控 token（凭据级可选；对齐上游 injectDeviceToken 的账号级来源，
+	// 取不到就不发 —— 上游三级回退里的 config/文件级由部署方管，这里只认凭据）。
+	if cred.DeviceToken != "" {
+		h.Set("X-Device-Token", cred.DeviceToken)
+	}
 	// 会话头族（官方 CLI 形态，2026-10-16 起国际版缺这三个头直接 400）。
 	// 值为 32 位 hex：会话级同一会话多轮恒同，轮级一次 user send 内恒同，
 	// 消息级每条独立。
@@ -262,20 +299,13 @@ func wbChatHeaders(cred *wbCredential, appVer string, ids wbConvIDs) http.Header
 	return h
 }
 
-// wbCatalogHeaders 组装模型目录请求头（app-shaped）。
+// wbCatalogHeaders 组装模型目录请求头（对齐上游 fetch_models：通用头 + Bearer，
+// 两域同形态 —— /v3/config 的 UA 门禁只认三段式 CLI UA，web/app 形态会被拒）。
+// 国内版保留企业身份对（issue #123：企业账号缺这对头会被静默回答个人版目录）。
 func wbCatalogHeaders(cred *wbCredential, appVer string) http.Header {
-	h := http.Header{}
+	h := wbCommonHeaders(cred)
+	h.Set("User-Agent", wbUserAgent(cred, appVer))
 	h.Set("Authorization", "Bearer "+cred.AccessToken)
-	h.Set("Accept", "application/json")
-	h.Set("Origin", cred.origin())
-	h.Set("Referer", cred.origin()+"/")
-	if cred.region() == "global" {
-		h.Set("X-Requested-With", "XMLHttpRequest")
-		h.Set("X-Product", "SaaS")
-		h.Set("User-Agent", "WorkBuddyAI/"+appVer)
-		return h
-	}
-	h.Set("User-Agent", wbClientUA)
 	// 企业账号不给这对身份头会被静默回答个人版目录（issue #123），且必须成对出现。
 	if cred.UID != "" && cred.EnterpriseID != "" {
 		h.Set("X-User-Id", cred.UID)
@@ -722,13 +752,19 @@ func (c *wbCredential) wbBillingBase() string {
 	return wbCnBillBase
 }
 
-// wbBillingHeaders 计费请求头（与插件 billingHeaders 一致：Bearer token +
-// 账号身份；企业号带 X-Enterprise-Id/X-Tenant-Id）。
+// wbBillingHeaders 组装 billing 域请求头（对齐上游 BillingHeaders 2026-09-14
+// 起的默认形态）：通用头齐全 + **单段** UA `WorkBuddy/<ver>`（官方客户端在
+// 签到/积分这类白名单接口显式覆写 UA，RestOperations 层的 CLI 扩展段被覆盖）
+// + 账号身份 + 设备指纹 + 设备风控 token（可选）。
 func wbBillingHeaders(cred *wbCredential) http.Header {
-	h := http.Header{}
-	h.Set("Authorization", "Bearer "+cred.AccessToken)
+	h := wbIdentityHeaders(cred)
 	h.Set("Accept", "application/json")
 	h.Set("Content-Type", "application/json")
+	h.Set("X-Requested-With", "XMLHttpRequest")
+	h.Set("Origin", cred.origin())
+	h.Set("Referer", cred.origin()+"/")
+	h.Set("User-Agent", fmt.Sprintf("WorkBuddy/%s", wbFallbackAppVer))
+	h.Set("Authorization", "Bearer "+cred.AccessToken)
 	if cred.UID != "" {
 		h.Set("X-User-Id", cred.UID)
 	}
@@ -738,6 +774,9 @@ func wbBillingHeaders(cred *wbCredential) http.Header {
 	}
 	if cred.Domain != "" {
 		h.Set("X-Domain", cred.Domain)
+	}
+	if cred.DeviceToken != "" {
+		h.Set("X-Device-Token", cred.DeviceToken)
 	}
 	return h
 }
@@ -1162,9 +1201,17 @@ func (c *workbuddyClient) refresh(ctx context.Context) error {
 	}
 	req.Header = wbCommonHeaders(cred)
 	req.Header.Set("X-Refresh-Token", cred.RefreshToken)
-	req.Header.Set("X-Auth-Refresh-Source", "workbuddy")
+	// X-Auth-Refresh-Source: plugin 是官方客户端的刷新渠道标识（上游 D3 实测：
+	// 缺了或给了非官方值可能被风控当异常来源）。此前写 "workbuddy" 是自造值。
+	req.Header.Set("X-Auth-Refresh-Source", "plugin")
+	if cred.UID != "" {
+		req.Header.Set("X-User-Id", cred.UID)
+	}
 	if cred.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", cred.EnterpriseID)
+	}
+	if cred.DeviceToken != "" {
+		req.Header.Set("X-Device-Token", cred.DeviceToken)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

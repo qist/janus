@@ -348,9 +348,118 @@ func TestWBChatHeadersCarryOfficialShape(t *testing.T) {
 	if h.Get("X-B3-SpanId") != ids.MessageID[:16] {
 		t.Errorf("X-B3-SpanId 应取消息级 ID 前 16 位，got %q", h.Get("X-B3-SpanId"))
 	}
+	// 用量归属（上游 injectAttribution 默认 = 官方桌面端指纹）。
+	if h.Get("X-Product") != "WorkBuddy" {
+		t.Errorf("X-Product 应为 WorkBuddy（桌面端指纹），got %q", h.Get("X-Product"))
+	}
+	if h.Get("X-Agent-Purpose") != "conversation" {
+		t.Errorf("缺 X-Agent-Purpose: conversation，got %q", h.Get("X-Agent-Purpose"))
+	}
+	// chat 的 Accept 是流式形态（上游 D6）。
+	if h.Get("Accept") != "application/json, text/event-stream" {
+		t.Errorf("chat Accept 应为流式形态，got %q", h.Get("Accept"))
+	}
+	// 三段式 UA：WorkBuddy/<v> <platform>/<v> CLI/<cli>（/v3/config UA 门禁同款形态）。
+	if !strings.Contains(h.Get("User-Agent"), "WorkBuddy/5.6.2 WorkBuddy AI/5.6.2 CLI/") {
+		t.Errorf("UA 应为三段式 CLI 形态，got %q", h.Get("User-Agent"))
+	}
+	// 国内版不缀 X-Device-Token（凭据无 deviceToken 时）。
+	if h.Get("X-Device-Token") != "" {
+		t.Error("凭据无 deviceToken 时不应发 X-Device-Token")
+	}
+	// 带设备风控 token 的凭据：三域（chat 在此断言，billing/refresh 另测）都注入。
+	dt := wbChatHeaders(&wbCredential{
+		AccessToken: "at", Domain: "workbuddy.ai", UID: "u9", DeviceToken: "dt-1",
+	}, "5.6.2", ids)
+	if dt.Get("X-Device-Token") != "dt-1" {
+		t.Errorf("凭据带 deviceToken 时 chat 应注入 X-Device-Token，got %q", dt.Get("X-Device-Token"))
+	}
 	// 国内版的 Accept-Language 走 zh-CN。
 	cn := wbChatHeaders(&wbCredential{AccessToken: "at", Domain: "copilot.tencent.com"}, "5.6.2", ids)
 	if cn.Get("Accept-Language") != "zh-CN" {
 		t.Errorf("国内版 Accept-Language 应为 zh-CN，got %q", cn.Get("Accept-Language"))
+	}
+}
+
+// 目录请求头：通用头 + Bearer（两域同形态，去 X-Product；国内版企业对保留）。
+func TestWBCatalogHeadersShape(t *testing.T) {
+	cn := wbCatalogHeaders(&wbCredential{
+		AccessToken: "at", Domain: "copilot.tencent.com", UID: "u1", EnterpriseID: "e1",
+	}, "5.6.2")
+	if cn.Get("Authorization") != "Bearer at" {
+		t.Errorf("Authorization = %q", cn.Get("Authorization"))
+	}
+	if !strings.Contains(cn.Get("User-Agent"), "WorkBuddy/5.6.2 WorkBuddy/5.6.2 CLI/") {
+		t.Errorf("目录 UA 应为三段式 CLI 形态（/v3/config UA 门禁），got %q", cn.Get("User-Agent"))
+	}
+	if cn.Get("X-CodeBuddy-Request") != "1" {
+		t.Error("目录请求缺 X-CodeBuddy-Request")
+	}
+	if cn.Get("X-Product") != "" {
+		t.Errorf("目录不应带 X-Product（上游 fetch_models 形态），got %q", cn.Get("X-Product"))
+	}
+	if cn.Get("X-Enterprise-Id") != "e1" || cn.Get("X-Tenant-Id") != "e1" {
+		t.Error("国内版企业对（X-Enterprise-Id/X-Tenant-Id）应保留（issue #123）")
+	}
+	g := wbCatalogHeaders(&wbCredential{AccessToken: "at", Domain: "workbuddy.ai"}, "5.6.2")
+	if g.Get("X-User-Id") != "" {
+		t.Error("国际版个人账号目录不应带企业身份对")
+	}
+	if g.Get("Accept-Language") != "en-US" {
+		t.Errorf("国际版目录 Accept-Language 应为 en-US，got %q", g.Get("Accept-Language"))
+	}
+}
+
+// billing 请求头：单段 UA + 通用头 + 身份 + 设备指纹 + 可选设备风控 token。
+func TestWBBillingHeadersShape(t *testing.T) {
+	cred := &wbCredential{
+		AccessToken: "at", Domain: "copilot.tencent.com",
+		UID: "u1", EnterpriseID: "e1", DeviceToken: "dt-1",
+	}
+	h := wbBillingHeaders(cred)
+	if h.Get("User-Agent") != "WorkBuddy/"+wbFallbackAppVer {
+		t.Errorf("billing UA 应为单段 WorkBuddy/<ver>，got %q", h.Get("User-Agent"))
+	}
+	if h.Get("X-CodeBuddy-Request") != "1" {
+		t.Error("billing 缺 X-CodeBuddy-Request")
+	}
+	if h.Get("Accept-Language") != "zh-CN" {
+		t.Errorf("billing Accept-Language = %q", h.Get("Accept-Language"))
+	}
+	if h.Get("X-Machine-ID") != wbAccountStableID("u1", "machine") ||
+		h.Get("X-Session-ID") != wbAccountStableID("u1", "session") {
+		t.Error("billing 缺按 uid 派生的设备指纹头")
+	}
+	if h.Get("X-User-Id") != "u1" || h.Get("X-Enterprise-Id") != "e1" || h.Get("X-Tenant-Id") != "e1" {
+		t.Error("billing 身份头不符")
+	}
+	if h.Get("X-Device-Token") != "dt-1" {
+		t.Errorf("billing 应注入 X-Device-Token，got %q", h.Get("X-Device-Token"))
+	}
+}
+
+// UA 形态：三段式 + 按域切平台段。
+func TestWBUserAgentShape(t *testing.T) {
+	g := wbUserAgent(&wbCredential{Domain: "workbuddy.ai"}, "5.6.2")
+	if g != "WorkBuddy/5.6.2 WorkBuddy AI/5.6.2 CLI/"+wbFallbackCliVer {
+		t.Errorf("国际版 UA = %q", g)
+	}
+	cn := wbUserAgent(&wbCredential{Domain: "copilot.tencent.com"}, "5.6.2")
+	if cn != "WorkBuddy/5.6.2 WorkBuddy/5.6.2 CLI/"+wbFallbackCliVer {
+		t.Errorf("国内版 UA = %q", cn)
+	}
+}
+
+// 凭据里的 deviceToken：扁平与嵌套（auth 段）两种形态都收。
+func TestWBParseCredentialDeviceToken(t *testing.T) {
+	flat := `{"accessToken":"at","refreshToken":"rt","domain":"workbuddy.ai","deviceToken":"dt-flat"}`
+	cred, err := parseWBCredential(flat)
+	if err != nil || cred.DeviceToken != "dt-flat" {
+		t.Fatalf("扁平形态: cred=%+v err=%v", cred, err)
+	}
+	nested := `{"auth":{"accessToken":"at","refreshToken":"rt","domain":"workbuddy.ai","deviceToken":"dt-nested"}}`
+	cred, err = parseWBCredential(nested)
+	if err != nil || cred.DeviceToken != "dt-nested" {
+		t.Fatalf("嵌套形态: cred=%+v err=%v", cred, err)
 	}
 }

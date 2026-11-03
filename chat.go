@@ -912,6 +912,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 一旦缓存下来，之后每个完全相同的请求都会拿到这个空结果，看起来像"桥坏了"。
 		// 这种情况当作"没有可用缓存"，退回重跑最后一条 user 消息。
 		if cached := conv.snapshotResponse(); responseHasContent(cached) {
+			// 幂等回放必须留痕：客户端重发完全相同的历史时（断线重试是设计场景；
+			// 实测 CodeBuddy 问答卡片"点选项"也只重发历史、不把选择作为新消息，
+			// 用户侧表现为"秒回旧文案、0 积分、不执行"），这里完全静默会让排查
+			// 以为模型没按选择工作，实际是模型根本没收到新内容。
+			var ct int
+			if cached.Usage != nil {
+				ct = cached.Usage.CompletionTokens
+			}
+			s.log.Infof("identical turn replayed from cache (key=%s, cached_id=%s, completion_tokens=%d); "+
+				"client resent history without new user content — not re-running",
+				conv.Key, cached.ID, ct)
 			s.replyCached(w, r, req, ref, conv, cached)
 			return
 		}

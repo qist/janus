@@ -4,6 +4,27 @@
 
 ---
 
+## [v0.3.63] - 2026-11-03
+
+### 可观测性
+**DiffNone 幂等回放路径增加 INFO 日志**：客户端重发完全相同的历史时，janus 直接
+回放缓存的上一轮回复（设计行为：Trae 断线重试的幂等保护），但此前这条路径完全
+静默，日志里查不到任何痕迹。
+
+排查 CodeBuddy「问答卡片点选项后不执行」时定位到该路径：CodeBuddy 点选项只重发
+历史、不把选择作为新消息追加，janus 判定 DiffNone → 回放缓存，用户看到
+「秒回旧文案、0 积分、不执行」，误以为模型没按选择工作。现在回放时会记：
+
+```
+identical turn replayed from cache (key=…, cached_id=…, completion_tokens=…);
+client resent history without new user content — not re-running
+```
+
+行为不变，仅补可观测性；回放保护本身不放开（选择内容不在请求里，重跑也无济于事，
+根因在客户端问答交互未把选择追加为新消息）。
+
+---
+
 ## [v0.3.62] - 2026-11-03
 
 ### 修正

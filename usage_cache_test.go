@@ -29,6 +29,33 @@ insert into credential values ('opencode', 1, '{"type":"oauth","access":"tok","e
 	return db
 }
 
+// aggregateMonths 把按天数据按自然月聚合（月份升序）：本月/上月分开算的依据。
+func TestAggregateMonths(t *testing.T) {
+	days := []DayUsage{
+		{Date: "2026-11-02", Requests: 10, Tokens: 2000, CostUSD: 1.5},
+		{Date: "2026-11-01", Requests: 5, Tokens: 1000, CostUSD: 0.5},
+		{Date: "2026-10-31", Requests: 7, Tokens: 700, CostUSD: 0.7},
+		{Date: "2026-10-03", Requests: 3, Tokens: 300, CostUSD: 0.3},
+		{Date: "bad", Requests: 99, Tokens: 99, CostUSD: 9}, // 非法日期应跳过
+	}
+	got := aggregateMonths(days)
+	want := []MonthUsage{
+		{Month: "2026-10", Requests: 10, Tokens: 1000, CostUSD: 1.0},
+		{Month: "2026-11", Requests: 15, Tokens: 3000, CostUSD: 2.0},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("months = %+v, want %d entries", got, len(want))
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("months[%d] = %+v, want %+v", i, got[i], w)
+		}
+	}
+	if len(aggregateMonths(nil)) != 0 {
+		t.Error("空输入应返回空切片")
+	}
+}
+
 // 失败负缓存：console 抖动时窗口内不重试、有旧数据就给旧的（宁旧不卡）；
 // 窗口过后恢复重试，成功即清错误状态。
 func TestUsageReportNegativeCache(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +73,7 @@ type UsageReport struct {
 	Totals    UsageTotals   `json:"totals"`
 	Models    []ModelUsage  `json:"models"`
 	ByDay     []DayUsage    `json:"by_day"`
+	Months    []MonthUsage  `json:"months,omitempty"`
 	Go        *GoUsage      `json:"go,omitempty"`
 	FetchedAt time.Time     `json:"fetched_at"`
 	Source    string        `json:"source"`
@@ -131,6 +133,15 @@ type ModelUsage struct {
 
 type DayUsage struct {
 	Date     string  `json:"date"`
+	Requests int64   `json:"requests"`
+	Tokens   int64   `json:"tokens"`
+	CostUSD  float64 `json:"cost_usd"`
+}
+
+// MonthUsage 是单个自然月的用量汇总。console 的「累计」是全历史合计、不随
+// 月度限额重置，这里从 cost-by-day 按月聚合，让本月/上月能分开看。
+type MonthUsage struct {
+	Month    string  `json:"month"` // YYYY-MM（沿用 console 日期串的月份前缀）
 	Requests int64   `json:"requests"`
 	Tokens   int64   `json:"tokens"`
 	CostUSD  float64 `json:"cost_usd"`
@@ -397,6 +408,7 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 			CostUSD:  d.TotalCostMicroCents.USD(),
 		})
 	}
+	rep.Months = aggregateMonths(rep.ByDay)
 	if errG != nil {
 		c.log.Debugf("go plan usage unavailable: %v", errG)
 	} else {
@@ -407,6 +419,32 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 
 func (c *UsageClient) get(ctx context.Context, cred *consoleCredential, path string, out any) error {
 	return c.getURL(ctx, cred, c.base+path, out)
+}
+
+// aggregateMonths 把按天的用量按自然月聚合，按月份升序返回。
+// 日期串形如 2026-11-02，直接取前 7 位做月份桶（与 console 的按天分桶一致）。
+func aggregateMonths(days []DayUsage) []MonthUsage {
+	idx := map[string]*MonthUsage{}
+	for _, d := range days {
+		if len(d.Date) < 7 {
+			continue
+		}
+		key := d.Date[:7]
+		m, ok := idx[key]
+		if !ok {
+			m = &MonthUsage{Month: key}
+			idx[key] = m
+		}
+		m.Requests += d.Requests
+		m.Tokens += d.Tokens
+		m.CostUSD += d.CostUSD
+	}
+	out := make([]MonthUsage, 0, len(idx))
+	for _, m := range idx {
+		out = append(out, *m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Month < out[j].Month })
+	return out
 }
 
 // getURL 与 get 相同，但接受完整 URL（Go 套餐用量在另一个域）。

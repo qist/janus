@@ -227,6 +227,20 @@ tr.prov-sub td{background:#101728;font-weight:600;color:var(--muted);border-top:
   </section>
 
   <section>
+    <h2>月度用量 <span class="tag" id="monthTag"></span></h2>
+    <div class="grid cards" id="monthCards"></div>
+    <div class="panel tbl-wrap" style="margin-top:12px">
+      <table>
+        <thead>
+          <tr><th>月份</th><th class="num">请求</th><th class="num">Tokens</th><th class="num">花费</th></tr>
+        </thead>
+        <tbody id="monthBody"></tbody>
+      </table>
+      <div class="chart-empty" id="monthEmpty">暂无数据</div>
+    </div>
+  </section>
+
+  <section>
     <h2>累计用量 <span class="tag" id="fetchedAt"></span></h2>
     <div class="grid cards" id="totalCards"></div>
     <div class="panel" style="margin-top:12px">
@@ -667,6 +681,48 @@ function renderTotals(t){
 function cardHTML(c){
   return '<div class="card '+(c.cls||'')+'"><div class="k">'+esc(c.k)+'</div>'+
     '<div class="v">'+esc(c.v)+'</div><div class="s">'+esc(c.s||'')+'</div></div>';
+}
+
+/* ---------- 渲染：月度用量（本月 / 上月分开，不随累计混算） ---------- */
+function monthKeyOf(d){
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+}
+function renderMonths(){
+  var ms=(state.report&&state.report.months)||[], byM={};
+  for(var i=0;i<ms.length;i++){ var r=ms[i]||{}; if(r.month) byM[r.month]=r; }
+  var now=new Date();
+  var curKey=monthKeyOf(now);
+  var prevDate=new Date(now.getFullYear(),now.getMonth()-1,1);
+  var prevKey=monthKeyOf(prevDate);
+  var cur=byM[curKey]||{month:curKey,requests:0,tokens:0,cost_usd:0};
+  var prev=byM[prevKey]||{month:prevKey,requests:0,tokens:0,cost_usd:0};
+
+  // 本月相对上月的趋势（上月有数据才有意义）
+  var diff='';
+  if(prev.cost_usd>0&&cur.cost_usd>0){
+    var pct=(cur.cost_usd-prev.cost_usd)/prev.cost_usd*100;
+    diff=(pct>=0?'+':'')+pct.toFixed(0)+'% vs 上月';
+  }else if(cur.cost_usd>0){ diff='上月无消耗'; }
+
+  var cards=[
+    {k:'本月 '+curKey,v:fmtUSD(cur.cost_usd),s:fmtInt(cur.requests)+' 次请求 · '+fmtCompact(cur.tokens)+' tokens'+(diff?' · '+diff:''),cls:'accent'},
+    {k:'上月 '+prevKey,v:fmtUSD(prev.cost_usd),s:fmtInt(prev.requests)+' 次请求 · '+fmtCompact(prev.tokens)+' tokens',cls:''}
+  ];
+  el('monthCards').innerHTML=cards.map(cardHTML).join('');
+  el('monthTag').textContent=ms.length?(ms.length+' 个月'):'';
+
+  // 按月明细（新的在上），当前月高亮
+  var rows=ms.slice().sort(function(a,b){return a.month<b.month?1:(a.month>b.month?-1:0);});
+  el('monthEmpty').style.display=rows.length?'none':'block';
+  el('monthBody').innerHTML=rows.map(function(m){
+    var isCur=m.month===curKey;
+    return '<tr'+(isCur?' style="color:var(--accent)"':'')+'>'+
+      '<td>'+esc(m.month)+(isCur?' <span class="tag">本月</span>':'')+'</td>'+
+      '<td class="num">'+fmtInt(m.requests)+'</td>'+
+      '<td class="num">'+fmtInt(m.tokens)+'</td>'+
+      '<td class="num">'+fmtUSD(m.cost_usd,true)+'</td>'+
+      '</tr>';
+  }).join('');
 }
 
 /* ---------- 渲染：每日图表 ---------- */
@@ -1252,7 +1308,7 @@ function load(){
 
   return api('/v1/usage').then(function(rep){
     state.report=rep; hideBanner(); renderKeyBadge(false);
-    renderChanSeg(); applyPrefsOnce(); renderBilling(rep.billing); renderGo(rep.go); renderTotals(rep.totals); renderChart(); renderProviders(); renderModels(); renderWbUsage();
+    renderChanSeg(); applyPrefsOnce(); renderBilling(rep.billing); renderGo(rep.go); renderMonths(); renderTotals(rep.totals); renderChart(); renderProviders(); renderModels(); renderWbUsage();
     el('footTime').textContent='页面刷新于 '+new Date().toLocaleTimeString();
     return fetchText('/metrics').then(function(t){
       renderLive(parseMetrics(t));

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -53,6 +54,78 @@ func TestAggregateMonths(t *testing.T) {
 	}
 	if len(aggregateMonths(nil)) != 0 {
 		t.Error("空输入应返回空切片")
+	}
+}
+
+// 计费周期锚定：Go 套餐 monthly 重置时间不是自然月 1 号时，本期/上期按
+// 重置日对齐（从重置额度开始算），周期模型用量按 from/to 区间拉取。
+func TestUsageReportPeriodAnchor(t *testing.T) {
+	db := usageMockDB(t)
+	var mu sync.Mutex
+	var modelQueries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/billing/status":
+			w.Write([]byte(`{"mode":"pay-as-you-go","balanceMicroCents":"100000000"}`))
+		case "/usage/summary":
+			w.Write([]byte(`{"totalRequests":"1","totalCostMicroCents":"1"}`))
+		case "/usage/models":
+			mu.Lock()
+			modelQueries = append(modelQueries, r.URL.RawQuery)
+			mu.Unlock()
+			w.Write([]byte(`{"items":[{"model":"m","provider":"opencode-go","totalRequests":"7","totalCostMicroCents":"100"}]}`))
+		case "/usage/cost-by-day":
+			w.Write([]byte(`[]`))
+		case "/go/usage":
+			next := time.Now().Add(10 * 24 * time.Hour).UTC().Format("2006-01-02T15:04:05Z")
+			w.Write([]byte(`{"usage":{"rolling":{"status":"ok","percent":1,"resetsAt":"` + next + `"},` +
+				`"monthly":{"status":"ok","percent":2,"resetsAt":"` + next + `"}}}`))
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewUsageClient(Config{
+		ConsoleURL: srv.URL,
+		GoUsageURL: srv.URL + "/go/usage",
+		UsageTTL:   time.Hour,
+		OpencodeDB: db,
+	}, NewLogger("error"))
+	rep, err := c.Report(context.Background())
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if rep.Period == nil || !rep.Period.Anchored {
+		t.Fatalf("period = %+v, want anchored", rep.Period)
+	}
+	if rep.Period.End != rep.Period.ResetsAt[:10] {
+		t.Errorf("period.End = %s, want %s", rep.Period.End, rep.Period.ResetsAt[:10])
+	}
+	if rep.Period.PrevEnd == "" || rep.Period.PrevEnd >= rep.Period.Start {
+		t.Errorf("prev_end = %q, want 早于 start %q（边界日不重复计数）", rep.Period.PrevEnd, rep.Period.Start)
+	}
+	if rep.PeriodModels == nil || len(rep.PeriodModels.Current) != 1 || rep.PeriodModels.Current[0].Requests != 7 {
+		t.Fatalf("period_models.current = %+v", rep.PeriodModels)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// /usage/models 共 3 次：全历史 1 次（无 query）+ 周期区间 2 次（并发，顺序不保证）
+	var periodQs []string
+	for _, q := range modelQueries {
+		if q != "" {
+			periodQs = append(periodQs, q)
+		}
+	}
+	if len(periodQs) != 2 {
+		t.Fatalf("period model fetches = %d (%v), want 2", len(periodQs), modelQueries)
+	}
+	wantCur := "from=" + rep.Period.Start + "&to=" + rep.Period.End
+	wantPrev := "from=" + rep.Period.PrevStart + "&to=" + rep.Period.PrevEnd
+	if (periodQs[0] != wantCur || periodQs[1] != wantPrev) &&
+		(periodQs[0] != wantPrev || periodQs[1] != wantCur) {
+		t.Errorf("queries = %v, want {%s, %s}", periodQs, wantCur, wantPrev)
 	}
 }
 

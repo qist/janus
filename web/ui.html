@@ -227,9 +227,10 @@ tr.prov-sub td{background:#101728;font-weight:600;color:var(--muted);border-top:
   </section>
 
   <section>
-    <h2>月度用量 <span class="tag" id="monthTag"></span></h2>
+    <h2>计费周期用量 <span class="tag" id="monthTag"></span></h2>
     <div class="grid cards" id="monthCards"></div>
     <div class="panel tbl-wrap" style="margin-top:12px">
+      <div class="k muted" style="font-size:12px;margin-bottom:8px">按自然月明细（历史参考）</div>
       <table>
         <thead>
           <tr><th>月份</th><th class="num">请求</th><th class="num">Tokens</th><th class="num">花费</th></tr>
@@ -274,6 +275,13 @@ tr.prov-sub td{background:#101728;font-weight:600;color:var(--muted);border-top:
   <section>
     <h2>渠道用量 <span class="tag" id="provTag"></span></h2>
     <div class="panel tbl-wrap">
+      <div class="chart-head" style="justify-content:flex-end;margin-bottom:10px">
+        <div class="seg" id="monthSeg">
+          <button data-mm="cur" class="on">本期</button>
+          <button data-mm="prev">上期</button>
+          <button data-mm="all">累计</button>
+        </div>
+      </div>
       <table>
         <thead>
           <tr>
@@ -296,6 +304,13 @@ tr.prov-sub td{background:#101728;font-weight:600;color:var(--muted);border-top:
   <section>
     <h2>模型用量 <span class="tag" id="modelTag"></span></h2>
     <div class="panel tbl-wrap">
+      <div class="chart-head" style="justify-content:flex-end;margin-bottom:10px">
+        <div class="seg" id="monthSeg2">
+          <button data-mm="cur" class="on">本期</button>
+          <button data-mm="prev">上期</button>
+          <button data-mm="all">累计</button>
+        </div>
+      </div>
       <table>
         <thead>
           <tr>
@@ -488,7 +503,7 @@ tr.prov-sub td{background:#101728;font-weight:600;color:var(--muted);border-top:
 'use strict';
 var KEY='bridge.usage.key', AUTOKEY='bridge.usage.auto';
 var state={report:null,metrics:null,requests:null,key:localStorage.getItem(KEY)||'',timer:null,
-  metric:'cost_usd',days:30,sortKey:'cost_usd',sortDir:-1,
+  metric:'cost_usd',days:30,sortKey:'cost_usd',sortDir:-1,mMonth:'cur',
   provSortKey:'cost_usd',provSortDir:-1,chan:'opencode',wbEnabled:false,
   reqQuery:'',reqSortKey:'time',reqSortDir:-1,reqGroup:'list',
   catalog:null,catProvider:'',catQuery:'',catFree:'',catSortKey:'id',catSortDir:1,catCollapsed:{},defModel:'',defVar:'',
@@ -683,38 +698,65 @@ function cardHTML(c){
     '<div class="v">'+esc(c.v)+'</div><div class="s">'+esc(c.s||'')+'</div></div>';
 }
 
-/* ---------- 渲染：月度用量（本月 / 上月分开，不随累计混算） ---------- */
+/* ---------- 渲染：计费周期用量（从套餐重置日算起，不按自然月混算） ---------- */
 function monthKeyOf(d){
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
 }
-function renderMonths(){
-  var ms=(state.report&&state.report.months)||[], byM={};
-  for(var i=0;i<ms.length;i++){ var r=ms[i]||{}; if(r.month) byM[r.month]=r; }
+// periodInfo 返回本期/上期的日期区间与标签。优先用后端 period（按 Go 套餐
+// monthly 重置时间锚定），拿不到按自然月回退。
+function periodInfo(){
+  var p=(state.report&&state.report.period)||null;
   var now=new Date();
-  var curKey=monthKeyOf(now);
-  var prevDate=new Date(now.getFullYear(),now.getMonth()-1,1);
-  var prevKey=monthKeyOf(prevDate);
-  var cur=byM[curKey]||{month:curKey,requests:0,tokens:0,cost_usd:0};
-  var prev=byM[prevKey]||{month:prevKey,requests:0,tokens:0,cost_usd:0};
+  if(p&&p.start&&p.end){
+    return {cur:[p.start,p.end],prev:[p.prev_start||'',p.prev_end||''],
+      labelCur:'本期',labelPrev:'上期',anchored:!!p.anchored,resetsAt:p.resets_at||''};
+  }
+  var cm=monthKeyOf(now);
+  var prevD=new Date(now.getFullYear(),now.getMonth()-1,1);
+  var pm=monthKeyOf(prevD);
+  var last=function(y,m){ return new Date(y,m+1,0).getDate(); };
+  return {cur:[cm+'-01',cm+'-'+String(last(now.getFullYear(),now.getMonth())).padStart(2,'0')],
+    prev:[pm+'-01',pm+'-'+String(last(prevD.getFullYear(),prevD.getMonth())).padStart(2,'0')],
+    labelCur:'本月',labelPrev:'上月',anchored:false,resetsAt:''};
+}
+function bucketDays(rows,range){
+  var o={requests:0,tokens:0,cost_usd:0};
+  (rows||[]).forEach(function(d){
+    if(d.date>=range[0]&&d.date<=range[1]){
+      o.requests+=Number(d.requests)||0; o.tokens+=Number(d.tokens)||0; o.cost_usd+=Number(d.cost_usd)||0;
+    }
+  });
+  return o;
+}
+function renderMonths(){
+  var pi=periodInfo();
+  var rows=(state.report&&state.report.by_day)||[];
+  var cur=bucketDays(rows,pi.cur), prev=bucketDays(rows,pi.prev);
 
-  // 本月相对上月的趋势（上月有数据才有意义）
   var diff='';
   if(prev.cost_usd>0&&cur.cost_usd>0){
     var pct=(cur.cost_usd-prev.cost_usd)/prev.cost_usd*100;
-    diff=(pct>=0?'+':'')+pct.toFixed(0)+'% vs 上月';
-  }else if(cur.cost_usd>0){ diff='上月无消耗'; }
-
+    diff=(pct>=0?'+':'')+pct.toFixed(0)+'% vs 上期';
+  }else if(cur.cost_usd>0){ diff='上期无消耗'; }
+  var resetTxt='';
+  if(pi.anchored&&pi.resetsAt){
+    var t=new Date(pi.resetsAt);
+    if(!isNaN(t)&&t>new Date()) resetTxt=' · '+fmtDur(Math.round((t-new Date())/1000))+'后重置';
+  }
   var cards=[
-    {k:'本月 '+curKey,v:fmtUSD(cur.cost_usd),s:fmtInt(cur.requests)+' 次请求 · '+fmtCompact(cur.tokens)+' tokens'+(diff?' · '+diff:''),cls:'accent'},
-    {k:'上月 '+prevKey,v:fmtUSD(prev.cost_usd),s:fmtInt(prev.requests)+' 次请求 · '+fmtCompact(prev.tokens)+' tokens',cls:''}
+    {k:pi.labelCur+' '+pi.cur[0]+' ~ '+pi.cur[1],v:fmtUSD(cur.cost_usd),
+     s:fmtInt(cur.requests)+' 次请求 · '+fmtCompact(cur.tokens)+' tokens'+(diff?' · '+diff:'')+(resetTxt||''),cls:'accent'},
+    {k:pi.labelPrev+' '+(pi.prev[0]||'')+' ~ '+(pi.prev[1]||''),v:fmtUSD(prev.cost_usd),
+     s:fmtInt(prev.requests)+' 次请求 · '+fmtCompact(prev.tokens)+' tokens',cls:''}
   ];
   el('monthCards').innerHTML=cards.map(cardHTML).join('');
-  el('monthTag').textContent=ms.length?(ms.length+' 个月'):'';
+  el('monthTag').textContent=pi.anchored?'按套餐重置周期':'按自然月';
 
-  // 按月明细（新的在上），当前月高亮
-  var rows=ms.slice().sort(function(a,b){return a.month<b.month?1:(a.month>b.month?-1:0);});
-  el('monthEmpty').style.display=rows.length?'none':'block';
-  el('monthBody').innerHTML=rows.map(function(m){
+  // 按自然月明细（历史参考），当前自然月高亮
+  var ms=(state.report&&state.report.months)||[], curKey=monthKeyOf(new Date());
+  var rs=ms.slice().sort(function(a,b){return a.month<b.month?1:(a.month>b.month?-1:0);});
+  el('monthEmpty').style.display=rs.length?'none':'block';
+  el('monthBody').innerHTML=rs.map(function(m){
     var isCur=m.month===curKey;
     return '<tr'+(isCur?' style="color:var(--accent)"':'')+'>'+
       '<td>'+esc(m.month)+(isCur?' <span class="tag">本月</span>':'')+'</td>'+
@@ -768,9 +810,25 @@ function renderChart(){
   box.innerHTML=svg;
 }
 
+/* ---------- 周期口径：模型/渠道表的数据源与标签 ---------- */
+function periodModelRows(){
+  var rep=state.report||{};
+  if(state.mMonth!=='all'&&rep.period_models){
+    var pm=state.mMonth==='prev'?rep.period_models.previous:rep.period_models.current;
+    return pm||[];
+  }
+  return rep.models||[];
+}
+function periodTag(){
+  var pi=periodInfo();
+  if(state.mMonth==='all') return '累计 · ';
+  if(state.mMonth==='prev') return '上期 '+(pi.prev[0]||'')+' ~ '+(pi.prev[1]||'')+' · ';
+  return '本期 '+(pi.cur[0]||'')+' 起 · ';
+}
+
 /* ---------- 渲染：渠道用量（按 provider 汇总） ---------- */
 function provAgg(){
-  var ms=(state.report&&state.report.models)||[], m={};
+  var ms=periodModelRows(), m={};
   for(var i=0;i<ms.length;i++){
     var r=ms[i]||{}, g=r.provider||'–';
     if(!inChan(g)) continue;
@@ -785,7 +843,7 @@ function renderProviders(){
   var rows=provAgg(), k=state.provSortKey||'cost_usd', d=state.provSortDir||-1;
   rows.sort(function(a,b){ return ((Number(a[k])||0)-(Number(b[k])||0))*d; });
   el('provEmpty').style.display=rows.length?'none':'block';
-  el('provTag').textContent=rows.length?(rows.length+' 个渠道 · 点行查看该渠道模型'):'';
+  el('provTag').textContent=periodTag()+(rows.length?(rows.length+' 个渠道 · 点行查看该渠道模型'):'');
   var maxCost=rows.reduce(function(a,r){return Math.max(a,Number(r.cost_usd)||0);},0)||1;
   el('provBody').innerHTML=rows.map(function(p){
     var cost=Number(p.cost_usd)||0;
@@ -800,14 +858,19 @@ function renderProviders(){
   }).join('');
   var foot=el('provFoot'), fr=el('provFootRow');
   if(rows.length){
-    var t=(state.report&&state.report.totals)||{};
+    // 合计按当前展示口径求和（周期/累计随切换联动）
+    var s=rows.reduce(function(a,p){
+      a.requests+=Number(p.requests)||0; a.input_tokens+=Number(p.input_tokens)||0;
+      a.output_tokens+=Number(p.output_tokens)||0; a.cache_read_tokens+=Number(p.cache_read_tokens)||0;
+      a.cost_usd+=Number(p.cost_usd)||0; return a;
+    },{requests:0,input_tokens:0,output_tokens:0,cache_read_tokens:0,cost_usd:0});
     foot.style.display='';
     fr.innerHTML='<th style="cursor:default">合计</th>'+
-      '<td class="num">'+fmtInt(t.requests)+'</td>'+
-      '<td class="num">'+fmtInt(t.input_tokens)+'</td>'+
-      '<td class="num">'+fmtInt(t.output_tokens)+'</td>'+
-      '<td class="num">'+fmtInt(t.cache_read_tokens)+'</td>'+
-      '<td class="num">'+fmtUSD(t.cost_usd,true)+'</td>';
+      '<td class="num">'+fmtInt(s.requests)+'</td>'+
+      '<td class="num">'+fmtInt(s.input_tokens)+'</td>'+
+      '<td class="num">'+fmtInt(s.output_tokens)+'</td>'+
+      '<td class="num">'+fmtInt(s.cache_read_tokens)+'</td>'+
+      '<td class="num">'+fmtUSD(s.cost_usd,true)+'</td>';
   }else{ foot.style.display='none'; }
   // 排序箭头
   var pths=document.querySelectorAll('th[data-pk]');
@@ -823,7 +886,7 @@ function renderProviders(){
 
 /* ---------- 渲染：模型表格（按渠道分组 + 渠道小计） ---------- */
 function modelRows(){
-  var rows=(state.report&&state.report.models)||[];
+  var rows=periodModelRows();
   rows=rows.filter(function(m){ return inChan(m.provider||''); });
   rows=rows.map(function(m){
     var inp=Number(m.input_tokens)||0, cr=Number(m.cache_read_tokens)||0;
@@ -882,7 +945,7 @@ function renderModels(){
       '<td class="num">'+fmtUSD(s.cost,true)+'</td></tr>';
     return head+s.rows.map(function(m){ return modelRowHTML(m,maxCost); }).join('');
   }).join('');
-  el('modelTag').textContent=rows.length?(rows.length+' 个模型 / '+order.length+' 个渠道'):'';
+  el('modelTag').textContent=periodTag()+(rows.length?(rows.length+' 个模型 / '+order.length+' 个渠道'):'');
 
   // 表头排序箭头
   var ths=document.querySelectorAll('th[data-k]');
@@ -1502,6 +1565,20 @@ function bind(){
     var all=el('daysSeg').querySelectorAll('button');
     for(var i=0;i<all.length;i++) all[i].className=all[i]===b?'on':'';
     renderChart();
+  });
+  // 周期切换（渠道用量 / 模型用量共用一个口径，两个 seg 同步高亮）
+  ['monthSeg','monthSeg2'].forEach(function(id){
+    var seg=el(id); if(!seg) return;
+    seg.addEventListener('click',function(e){
+      var b=e.target.closest('button[data-mm]'); if(!b) return;
+      state.mMonth=b.getAttribute('data-mm')||'cur';
+      ['monthSeg','monthSeg2'].forEach(function(id2){
+        var s=el(id2); if(!s) return;
+        var bs=s.querySelectorAll('button');
+        for(var i=0;i<bs.length;i++) bs[i].className=(bs[i].getAttribute('data-mm')===state.mMonth)?'on':'';
+      });
+      renderProviders(); renderModels();
+    });
   });
   var ths=document.querySelectorAll('th[data-k]');
   for(var i=0;i<ths.length;i++){

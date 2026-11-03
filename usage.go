@@ -78,9 +78,31 @@ type UsageReport struct {
 	FetchedAt time.Time     `json:"fetched_at"`
 	Source    string        `json:"source"`
 
+	// Period 是当前计费周期（优先按 Go 套餐 monthly 重置时间锚定——重置日
+	// 跟随订阅日而非自然月 1 号；拿不到才回退自然月）。PeriodModels 是
+	// 本期/上期的模型用量，用 console /usage/models 的 from/to 区间拉取。
+	Period       *UsagePeriod  `json:"period,omitempty"`
+	PeriodModels *PeriodModels `json:"period_models,omitempty"`
+
 	// WorkBuddy 是 WorkBuddy provider 的积分余额（provider 未启用或查询失败
 	// 时缺省；失败不拖垮主报告，有旧数据则回落旧数据）。
 	WorkBuddy *wbCredits `json:"workbuddy,omitempty"`
+}
+
+// UsagePeriod 描述当前计费周期（日期均为 YYYY-MM-DD，与 console 按天分桶一致）。
+type UsagePeriod struct {
+	Start     string `json:"start"`               // 本期起点（上次重置日）
+	End       string `json:"end"`                 // 本期终点（下次重置日，含）
+	PrevStart string `json:"prev_start"`          // 上期起点
+	PrevEnd   string `json:"prev_end"`            // 上期终点（本期起点前一天，避免边界日重复计数）
+	ResetsAt  string `json:"resets_at,omitempty"` // 下次重置时刻（RFC3339）
+	Anchored  bool   `json:"anchored"`            // true=按套餐重置锚定；false=自然月回退
+}
+
+// PeriodModels 是本期/上期的按模型用量（来自 from/to 区间查询，可选数据）。
+type PeriodModels struct {
+	Current  []ModelUsage `json:"current"`
+	Previous []ModelUsage `json:"previous"`
 }
 
 // GoUsage 是 OpenCode Go / Go Plus 套餐的三窗口限额用量：
@@ -310,8 +332,8 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 		return nil, err
 	}
 
-	// console 的四个端点并发拉，任一失败整体失败（余额最关键）。
-	// Go 套餐用量走另一个域，属可选数据：失败只降级为不展示。
+	// console 的主端点并发拉，任一失败整体失败（余额最关键）。
+	// Go 套餐用量走另一个域，属可选数据：失败只降级（周期锚点回退自然月）。
 	var (
 		wg         sync.WaitGroup
 		billing    billingRaw
@@ -390,15 +412,7 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 	}
 
 	for _, m := range models.Items {
-		rep.Models = append(rep.Models, ModelUsage{
-			Provider:        m.Provider,
-			Model:           m.Model,
-			Requests:        int64(m.TotalRequests),
-			InputTokens:     int64(m.TotalInputTokens),
-			OutputTokens:    int64(m.TotalOutputTokens),
-			CacheReadTokens: int64(m.TotalCacheReadTokens),
-			CostUSD:         m.TotalCostMicroCents.USD(),
-		})
+		rep.Models = append(rep.Models, toModelUsage(m))
 	}
 	for _, d := range byDay {
 		rep.ByDay = append(rep.ByDay, DayUsage{
@@ -409,12 +423,105 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 		})
 	}
 	rep.Months = aggregateMonths(rep.ByDay)
+
+	// 计费周期：优先用 Go 套餐 monthly 窗口的重置时间锚定（重置日跟随
+	// 订阅日，例如每月 2 号 10:53Z，而不是自然月 1 号）。周期长度按
+	// 一个日历月回推。拿不到 Go 用量（非 Go 账号 / 端点失败）才回退自然月。
+	now := time.Now()
+	curFrom, curTo := now.AddDate(0, 0, -now.Day()+1), now // 自然月回退：1 号 ~ 今天
+	prevFrom, prevTo := curFrom.AddDate(0, -1, 0), curFrom.AddDate(0, 0, -1)
+	period := &UsagePeriod{Anchored: false}
+	if errG == nil && goRaw.Usage.Monthly.ResetsAt != "" {
+		if nextReset, perr := time.Parse(time.RFC3339, goRaw.Usage.Monthly.ResetsAt); perr == nil && nextReset.After(now) {
+			start := nextReset.UTC().AddDate(0, -1, 0) // 上次重置（本期起点）
+			period = &UsagePeriod{
+				Start:     start.Format("2006-01-02"),
+				End:       nextReset.UTC().Format("2006-01-02"),
+				PrevStart: start.AddDate(0, -1, 0).Format("2006-01-02"),
+				PrevEnd:   start.AddDate(0, 0, -1).Format("2006-01-02"),
+				ResetsAt:  goRaw.Usage.Monthly.ResetsAt,
+				Anchored:  true,
+			}
+			curFrom, curTo = start, nextReset
+			prevFrom = start.AddDate(0, -1, 0)
+			prevTo = start.AddDate(0, 0, -1)
+		}
+	}
+	rep.Period = period
+
+	// 第二波：按周期区间拉模型用量（console 端点实测支持 from/to 日期串，
+	// 两端均含当天）。失败只降级为不展示，不拖垮主报告。
+	var (
+		wg2        sync.WaitGroup
+		curRaw     modelsRaw
+		prevRaw    modelsRaw
+		errC, errP error
+	)
+	wg2.Add(2)
+	go func() {
+		defer wg2.Done()
+		errC = c.get(ctx, cred, monthModelsPath(curFrom, curTo), &curRaw)
+	}()
+	go func() {
+		defer wg2.Done()
+		errP = c.get(ctx, cred, monthModelsPath(prevFrom, prevTo), &prevRaw)
+	}()
+	wg2.Wait()
+	pm := &PeriodModels{}
+	if errC != nil {
+		c.log.Debugf("period model usage unavailable (current): %v", errC)
+	} else {
+		pm.Current = make([]ModelUsage, 0, len(curRaw.Items))
+		for _, m := range curRaw.Items {
+			pm.Current = append(pm.Current, toModelUsage(m))
+		}
+	}
+	if errP != nil {
+		c.log.Debugf("period model usage unavailable (previous): %v", errP)
+	} else {
+		pm.Previous = make([]ModelUsage, 0, len(prevRaw.Items))
+		for _, m := range prevRaw.Items {
+			pm.Previous = append(pm.Previous, toModelUsage(m))
+		}
+	}
+	if pm.Current != nil || pm.Previous != nil {
+		rep.PeriodModels = pm
+	}
 	if errG != nil {
 		c.log.Debugf("go plan usage unavailable: %v", errG)
 	} else {
 		rep.Go = goRaw.toUsage()
 	}
 	return rep, nil
+}
+
+// toModelUsage 把 console 的按模型原始行换算成展示结构。
+func toModelUsage(m struct {
+	Model                string     `json:"model"`
+	Provider             string     `json:"provider"`
+	TotalRequests        flexInt    `json:"totalRequests"`
+	TotalInputTokens     flexInt    `json:"totalInputTokens"`
+	TotalOutputTokens    flexInt    `json:"totalOutputTokens"`
+	TotalCacheReadTokens flexInt    `json:"totalCacheReadTokens"`
+	TotalCostMicroCents  microCents `json:"totalCostMicroCents"`
+}) ModelUsage {
+	return ModelUsage{
+		Provider:        m.Provider,
+		Model:           m.Model,
+		Requests:        int64(m.TotalRequests),
+		InputTokens:     int64(m.TotalInputTokens),
+		OutputTokens:    int64(m.TotalOutputTokens),
+		CacheReadTokens: int64(m.TotalCacheReadTokens),
+		CostUSD:         m.TotalCostMicroCents.USD(),
+	}
+}
+
+// monthModelsPath 构造按月区间的 /usage/models 查询。
+// 实测（2026-11，console）支持 from/to 日期串 YYYY-MM-DD，两端均含当天；
+// 毫秒时间戳形式的 since/until 不被识别。
+func monthModelsPath(from, to time.Time) string {
+	return fmt.Sprintf("/usage/models?from=%s&to=%s",
+		from.Format("2006-01-02"), to.Format("2006-01-02"))
 }
 
 func (c *UsageClient) get(ctx context.Context, cred *consoleCredential, path string, out any) error {

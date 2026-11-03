@@ -80,9 +80,11 @@ type UsageReport struct {
 
 	// Period 是当前计费周期（优先按 Go 套餐 monthly 重置时间锚定——重置日
 	// 跟随订阅日而非自然月 1 号；拿不到才回退自然月）。PeriodModels 是
-	// 本期/上期的模型用量，用 console /usage/models 的 from/to 区间拉取。
+	// 本期/上期的模型用量，PeriodTotals 是本期/上期的汇总，均用 console
+	// /usage/models、/usage/summary 的 from/to 区间拉取（实测支持）。
 	Period       *UsagePeriod  `json:"period,omitempty"`
 	PeriodModels *PeriodModels `json:"period_models,omitempty"`
+	PeriodTotals *PeriodTotals `json:"period_totals,omitempty"`
 
 	// WorkBuddy 是 WorkBuddy provider 的积分余额（provider 未启用或查询失败
 	// 时缺省；失败不拖垮主报告，有旧数据则回落旧数据）。
@@ -103,6 +105,13 @@ type UsagePeriod struct {
 type PeriodModels struct {
 	Current  []ModelUsage `json:"current"`
 	Previous []ModelUsage `json:"previous"`
+}
+
+// PeriodTotals 是本期/上期的用量汇总。单侧拉取失败时该侧为 nil，
+// 前端对该侧显示空值而不是误用另一口径的数据。
+type PeriodTotals struct {
+	Current  *UsageTotals `json:"current,omitempty"`
+	Previous *UsageTotals `json:"previous,omitempty"`
 }
 
 // GoUsage 是 OpenCode Go / Go Plus 套餐的三窗口限额用量：
@@ -396,15 +405,7 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 			CanPurchase:     billing.CanPurchaseCredits,
 			CanAutoRecharge: billing.CanEnableAutoRecharge,
 		},
-		Totals: UsageTotals{
-			Requests:           int64(summary.TotalRequests),
-			InputTokens:        int64(summary.TotalInputTokens),
-			OutputTokens:       int64(summary.TotalOutputTokens),
-			CacheReadTokens:    int64(summary.TotalCacheReadTokens),
-			CacheWrite5mTokens: int64(summary.TotalCacheWrite5mTokens),
-			CacheWrite1hTokens: int64(summary.TotalCacheWrite1hTokens),
-			CostUSD:            summary.TotalCostMicroCents.USD(),
-		},
+		Totals: toUsageTotals(summary),
 	}
 	if billing.CreditLimitMicroCents != nil {
 		v := billing.CreditLimitMicroCents.USD()
@@ -449,22 +450,33 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 	}
 	rep.Period = period
 
-	// 第二波：按周期区间拉模型用量（console 端点实测支持 from/to 日期串，
-	// 两端均含当天）。失败只降级为不展示，不拖垮主报告。
+	// 第二波：按周期区间拉模型用量与汇总（console 的 /usage/models、
+	// /usage/summary 实测支持 from/to 日期串，两端均含当天）。
+	// 失败只降级为不展示，不拖垮主报告。
 	var (
-		wg2        sync.WaitGroup
-		curRaw     modelsRaw
-		prevRaw    modelsRaw
-		errC, errP error
+		wg2             sync.WaitGroup
+		curRaw          modelsRaw
+		prevRaw         modelsRaw
+		curSum, prevSum summaryRaw
+		errC, errP      error
+		errCS, errPS    error
 	)
-	wg2.Add(2)
+	wg2.Add(4)
 	go func() {
 		defer wg2.Done()
-		errC = c.get(ctx, cred, monthModelsPath(curFrom, curTo), &curRaw)
+		errC = c.get(ctx, cred, periodRangePath("/usage/models", curFrom, curTo), &curRaw)
 	}()
 	go func() {
 		defer wg2.Done()
-		errP = c.get(ctx, cred, monthModelsPath(prevFrom, prevTo), &prevRaw)
+		errP = c.get(ctx, cred, periodRangePath("/usage/models", prevFrom, prevTo), &prevRaw)
+	}()
+	go func() {
+		defer wg2.Done()
+		errCS = c.get(ctx, cred, periodRangePath("/usage/summary", curFrom, curTo), &curSum)
+	}()
+	go func() {
+		defer wg2.Done()
+		errPS = c.get(ctx, cred, periodRangePath("/usage/summary", prevFrom, prevTo), &prevSum)
 	}()
 	wg2.Wait()
 	pm := &PeriodModels{}
@@ -487,12 +499,41 @@ func (c *UsageClient) fetch(ctx context.Context) (*UsageReport, error) {
 	if pm.Current != nil || pm.Previous != nil {
 		rep.PeriodModels = pm
 	}
+	pt := &PeriodTotals{}
+	if errCS != nil {
+		c.log.Debugf("period totals unavailable (current): %v", errCS)
+	} else {
+		t := toUsageTotals(curSum)
+		pt.Current = &t
+	}
+	if errPS != nil {
+		c.log.Debugf("period totals unavailable (previous): %v", errPS)
+	} else {
+		t := toUsageTotals(prevSum)
+		pt.Previous = &t
+	}
+	if pt.Current != nil || pt.Previous != nil {
+		rep.PeriodTotals = pt
+	}
 	if errG != nil {
 		c.log.Debugf("go plan usage unavailable: %v", errG)
 	} else {
 		rep.Go = goRaw.toUsage()
 	}
 	return rep, nil
+}
+
+// toUsageTotals 把 console 的汇总原始行换算成展示结构。
+func toUsageTotals(s summaryRaw) UsageTotals {
+	return UsageTotals{
+		Requests:           int64(s.TotalRequests),
+		InputTokens:        int64(s.TotalInputTokens),
+		OutputTokens:       int64(s.TotalOutputTokens),
+		CacheReadTokens:    int64(s.TotalCacheReadTokens),
+		CacheWrite5mTokens: int64(s.TotalCacheWrite5mTokens),
+		CacheWrite1hTokens: int64(s.TotalCacheWrite1hTokens),
+		CostUSD:            s.TotalCostMicroCents.USD(),
+	}
 }
 
 // toModelUsage 把 console 的按模型原始行换算成展示结构。
@@ -516,12 +557,12 @@ func toModelUsage(m struct {
 	}
 }
 
-// monthModelsPath 构造按月区间的 /usage/models 查询。
-// 实测（2026-11，console）支持 from/to 日期串 YYYY-MM-DD，两端均含当天；
-// 毫秒时间戳形式的 since/until 不被识别。
-func monthModelsPath(from, to time.Time) string {
-	return fmt.Sprintf("/usage/models?from=%s&to=%s",
-		from.Format("2006-01-02"), to.Format("2006-01-02"))
+// periodRangePath 构造带 from/to 区间的 console 查询（/usage/models、
+// /usage/summary）。实测（2026-11，console）支持 from/to 日期串 YYYY-MM-DD，
+// 两端均含当天；毫秒时间戳形式的 since/until 不被识别。
+func periodRangePath(endpoint string, from, to time.Time) string {
+	return fmt.Sprintf("%s?from=%s&to=%s",
+		endpoint, from.Format("2006-01-02"), to.Format("2006-01-02"))
 }
 
 func (c *UsageClient) get(ctx context.Context, cred *consoleCredential, path string, out any) error {

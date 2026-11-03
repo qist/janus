@@ -109,6 +109,12 @@ func TestUsageReportPeriodAnchor(t *testing.T) {
 	if rep.PeriodModels == nil || len(rep.PeriodModels.Current) != 1 || rep.PeriodModels.Current[0].Requests != 7 {
 		t.Fatalf("period_models.current = %+v", rep.PeriodModels)
 	}
+	if rep.PeriodTotals == nil || rep.PeriodTotals.Current == nil || rep.PeriodTotals.Previous == nil {
+		t.Fatalf("period_totals = %+v, want 两侧都有", rep.PeriodTotals)
+	}
+	if rep.PeriodTotals.Current.Requests != 1 {
+		t.Errorf("period_totals.current.requests = %d, want 1", rep.PeriodTotals.Current.Requests)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	// /usage/models 共 3 次：全历史 1 次（无 query）+ 周期区间 2 次（并发，顺序不保证）

@@ -242,7 +242,14 @@ tr.prov-sub td{background:#101728;font-weight:600;color:var(--muted);border-top:
   </section>
 
   <section>
-    <h2>累计用量 <span class="tag" id="fetchedAt"></span></h2>
+    <h2>用量汇总 <span class="tag" id="fetchedAt"></span></h2>
+    <div class="chart-head" style="justify-content:flex-end;margin-bottom:10px">
+      <div class="seg" id="monthSeg3">
+        <button data-mm="cur" class="on">本期</button>
+        <button data-mm="prev">上期</button>
+        <button data-mm="all">累计</button>
+      </div>
+    </div>
     <div class="grid cards" id="totalCards"></div>
     <div class="panel" style="margin-top:12px">
       <div class="k muted" style="font-size:12px">Token 结构（输入 / 输出 / 缓存读取）</div>
@@ -659,8 +666,14 @@ function renderGo(g){
   el('goTag').textContent='· Go';
 }
 
-/* ---------- 渲染：合计 ---------- */
-function renderTotals(t){
+/* ---------- 渲染：合计（随「本期/上期/累计」口径联动） ---------- */
+function renderTotals(){
+  var rep=state.report||{}, t;
+  if(state.mMonth!=='all'&&rep.period_totals){
+    t=state.mMonth==='prev'?rep.period_totals.previous:rep.period_totals.current;
+  }else{
+    t=rep.totals;
+  }
   t=t||{};
   var cacheRead=Number(t.cache_read_tokens)||0;
   var input=Number(t.input_tokens)||0;
@@ -811,24 +824,29 @@ function renderChart(){
 }
 
 /* ---------- 周期口径：模型/渠道表的数据源与标签 ---------- */
+// periodModelRows 按当前口径返回模型行。本期/上期数据缺失（拉取失败）时
+// 返回 null —— 调用方显示「不可用」，绝不静默回退成全历史数据冒充本期。
 function periodModelRows(){
   var rep=state.report||{};
-  if(state.mMonth!=='all'&&rep.period_models){
-    var pm=state.mMonth==='prev'?rep.period_models.previous:rep.period_models.current;
-    return pm||[];
-  }
-  return rep.models||[];
+  if(state.mMonth==='all') return rep.models||[];
+  if(!rep.period_models) return null;
+  var pm=state.mMonth==='prev'?rep.period_models.previous:rep.period_models.current;
+  return pm||[];
+}
+function periodDataAvailable(){
+  return state.mMonth==='all'||!!(state.report&&state.report.period_models);
 }
 function periodTag(){
   var pi=periodInfo();
   if(state.mMonth==='all') return '累计 · ';
+  if(!periodDataAvailable()) return (state.mMonth==='prev'?'上期':'本期')+'数据不可用 · ';
   if(state.mMonth==='prev') return '上期 '+(pi.prev[0]||'')+' ~ '+(pi.prev[1]||'')+' · ';
   return '本期 '+(pi.cur[0]||'')+' 起 · ';
 }
 
 /* ---------- 渲染：渠道用量（按 provider 汇总） ---------- */
 function provAgg(){
-  var ms=periodModelRows(), m={};
+  var ms=periodModelRows()||[], m={};
   for(var i=0;i<ms.length;i++){
     var r=ms[i]||{}, g=r.provider||'–';
     if(!inChan(g)) continue;
@@ -886,7 +904,7 @@ function renderProviders(){
 
 /* ---------- 渲染：模型表格（按渠道分组 + 渠道小计） ---------- */
 function modelRows(){
-  var rows=periodModelRows();
+  var rows=periodModelRows()||[];
   rows=rows.filter(function(m){ return inChan(m.provider||''); });
   rows=rows.map(function(m){
     var inp=Number(m.input_tokens)||0, cr=Number(m.cache_read_tokens)||0;
@@ -1371,7 +1389,7 @@ function load(){
 
   return api('/v1/usage').then(function(rep){
     state.report=rep; hideBanner(); renderKeyBadge(false);
-    renderChanSeg(); applyPrefsOnce(); renderBilling(rep.billing); renderGo(rep.go); renderMonths(); renderTotals(rep.totals); renderChart(); renderProviders(); renderModels(); renderWbUsage();
+    renderChanSeg(); applyPrefsOnce(); renderBilling(rep.billing); renderGo(rep.go); renderMonths(); renderTotals(); renderChart(); renderProviders(); renderModels(); renderWbUsage();
     el('footTime').textContent='页面刷新于 '+new Date().toLocaleTimeString();
     return fetchText('/metrics').then(function(t){
       renderLive(parseMetrics(t));
@@ -1566,18 +1584,18 @@ function bind(){
     for(var i=0;i<all.length;i++) all[i].className=all[i]===b?'on':'';
     renderChart();
   });
-  // 周期切换（渠道用量 / 模型用量共用一个口径，两个 seg 同步高亮）
-  ['monthSeg','monthSeg2'].forEach(function(id){
+  // 周期切换（汇总 / 渠道用量 / 模型用量共用一个口径，三个 seg 同步高亮）
+  ['monthSeg','monthSeg2','monthSeg3'].forEach(function(id){
     var seg=el(id); if(!seg) return;
     seg.addEventListener('click',function(e){
       var b=e.target.closest('button[data-mm]'); if(!b) return;
       state.mMonth=b.getAttribute('data-mm')||'cur';
-      ['monthSeg','monthSeg2'].forEach(function(id2){
+      ['monthSeg','monthSeg2','monthSeg3'].forEach(function(id2){
         var s=el(id2); if(!s) return;
         var bs=s.querySelectorAll('button');
         for(var i=0;i<bs.length;i++) bs[i].className=(bs[i].getAttribute('data-mm')===state.mMonth)?'on':'';
       });
-      renderProviders(); renderModels();
+      renderTotals(); renderProviders(); renderModels();
     });
   });
   var ths=document.querySelectorAll('th[data-k]');

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 
+	"janus/internal/policy"
 	"janus/internal/work"
 	"janus/internal/worksvc"
 )
@@ -70,6 +71,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/work-items/{id}/verify", s.protect(ScopeVerify, s.handleVerify))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/verdict", s.protect(ScopeVerify, s.handleVerdict))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/complete", s.protect(ScopeIntegrate, s.handleComplete))
+	mux.HandleFunc("POST /api/v1/work-items/{id}/authorize", s.protect(ScopeAuthorize, s.handleAuthorize))
 }
 
 // protect authenticates the caller and checks the required scope before the
@@ -330,6 +332,32 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request, id Ident
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type authorizeRequest struct {
+	Epoch       int64         `json:"epoch"`
+	Action      policy.Action `json:"action"`
+	Reason      string        `json:"reason"`
+	Evidence    []string      `json:"evidence"`
+	WorkerModel string        `json:"worker_model"`
+}
+
+func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request, id Identity) {
+	var req authorizeRequest
+	if !decode(w, r, s.maxBody(), &req) {
+		return
+	}
+	if strings.TrimSpace(req.Action.Kind) == "" && strings.TrimSpace(req.Action.Command) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_action", "action.kind or action.command required")
+		return
+	}
+
+	out, err := s.Svc.Authorize(r.Context(), r.PathValue("id"), id.AgentID, req.Epoch, req.Action, req.Reason, req.Evidence, req.WorkerModel)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) maxBody() int64 {
 	if s.MaxBodyBytes > 0 {
 		return s.MaxBodyBytes
@@ -399,6 +427,8 @@ func classify(err error) (int, string) {
 		return http.StatusForbidden, "self_review"
 	case errors.Is(err, work.ErrNotHolder):
 		return http.StatusForbidden, "not_lease_holder"
+	case errors.Is(err, worksvc.ErrAuthzUnavailable):
+		return http.StatusNotImplemented, "authz_unavailable"
 	case errors.Is(err, work.ErrVerifyRequired):
 		return http.StatusUnprocessableEntity, "verify_required"
 	default:

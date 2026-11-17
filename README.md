@@ -52,6 +52,7 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | POST | `/api/v1/work-items/{id}/verify` | verify | `{"epoch"}` → verifier 复跑 checks |
 | POST | `/api/v1/work-items/{id}/verdict` | verify | `{"epoch","verdict","reasons","checks"}` |
 | POST | `/api/v1/work-items/{id}/complete` | integrate | `{"epoch","idempotency_key"}` |
+| POST | `/api/v1/work-items/{id}/authorize` | authorize | 敏感操作授权，allow 时返回单次能力令牌 |
 
 约定：
 
@@ -84,7 +85,7 @@ JSON-RPC 2.0，支持 `initialize`、`ping`、`tools/list`、`tools/call`；
 ```
 work_list  work_get  work_handoff  work_create
 work_claim work_heartbeat work_release
-work_submit work_verify work_verdict work_complete
+work_submit work_verify work_verdict work_complete work_authorize
 ```
 
 `tools/call` 的失败是**结果**不是协议错误：返回
@@ -99,6 +100,39 @@ curl -s -X POST "http://127.0.0.1:8080/mcp/$JANUS_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"work_list","arguments":{}}}'
 ```
+
+## 敏感操作授权
+
+`work_authorize` / `POST .../authorize` 是「模型不得口头批准」的落点：
+
+```
+action → policy（确定性分类 + 路径/命令规则）
+       → audit（0/1/2/3 个独立审计器，critical 为 2-of-3）
+       → allow: 60s 单次能力令牌
+       → deny / needs_human: 不签令牌
+```
+
+- 分类按 `REFACTOR §13.3`：`fs.write`、`exec`、`net.egress`、`secret.read`、`secret.write`、
+  `git.push`、`deploy`、`db.migrate`、`auth`。
+- 硬拒绝不经模型：`rm -rf /`、`--no-preserve-root`、`mkfs`、写裸设备、fork bomb、
+  以及任何逃出 workspace 的路径（绝对路径、`..`、`~`）。
+- 契约路径外的写入自动升级为 `fs.write`；碰 `.env`/私钥升为 `secret.*`；
+  改 `internal/auth` 升为 `auth`。
+- 审计失败、超时、非法输出、置信度低于 0.6、审计器数量不足 → **一律 deny**，不降级放行。
+- 审计器与 worker 同模型时直接拒绝（`auditor.not_independent`），不给「自己批自己」留缝。
+- 令牌绑定 `work_item_id + lease_epoch + action_hash + paths`，60 秒有效、用一次即失效；
+  执行器用 `auth.Authority.Verify` 校验，重放返回 `ErrReplay`。
+- 决策按 `action_hash + policy_version + contract_version + evidence` 缓存；缓存命中仍会现签新令牌。
+
+当前进程没有接审计模型（gateway 未完成），所以**敏感操作默认全部 deny**——这是刻意的 fail-closed，
+不是 bug。普通读写与单测不经过审计，直接 allow，也不签令牌。
+
+令牌签名密钥：
+
+| 变量 | 说明 |
+|---|---|
+| `JANUS_CAPABILITY_KEY` | ≥32 字节；生产必须设置，多实例要一致 |
+| 未设置时 | 由 `JANUS_API_KEY` 派生的进程内密钥，重启后旧令牌失效 |
 
 ## 目录
 

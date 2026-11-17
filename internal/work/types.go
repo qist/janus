@@ -48,14 +48,15 @@ func (r Role) Valid() bool {
 type Risk string
 
 const (
-	RiskLow    Risk = "low"
-	RiskMedium Risk = "medium"
-	RiskHigh   Risk = "high"
+	RiskLow      Risk = "low"
+	RiskMedium   Risk = "medium"
+	RiskHigh     Risk = "high"
+	RiskCritical Risk = "critical"
 )
 
 func (r Risk) Valid() bool {
 	switch r {
-	case RiskLow, RiskMedium, RiskHigh:
+	case RiskLow, RiskMedium, RiskHigh, RiskCritical:
 		return true
 	default:
 		return false

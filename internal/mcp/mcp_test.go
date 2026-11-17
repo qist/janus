@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"janus/internal/auditor"
 	"janus/internal/auth"
+	"janus/internal/authz"
 	"janus/internal/work"
 	"janus/internal/worksvc"
 )
@@ -197,7 +199,7 @@ func TestToolsList(t *testing.T) {
 	want := []string{
 		"work_list", "work_get", "work_handoff", "work_create", "work_claim",
 		"work_heartbeat", "work_release", "work_submit", "work_verify",
-		"work_verdict", "work_complete",
+		"work_verdict", "work_complete", "work_authorize",
 	}
 	got := make(map[string]toolInfo, len(list.Tools))
 	for _, tool := range list.Tools {
@@ -468,4 +470,88 @@ func TestListReturnsEmptyArray(t *testing.T) {
 	if !strings.Contains(res.text(), `"items":[]`) {
 		t.Fatalf("empty list = %s", res.text())
 	}
+}
+
+type allowAll struct{}
+
+func (allowAll) Name() string { return "test/allow" }
+
+func (allowAll) Review(context.Context, auditor.Input) (auditor.Decision, error) {
+	return auditor.Decision{Verdict: auditor.VerdictAllow, Confidence: 0.95}, nil
+}
+
+func newAuthzEnv(t *testing.T) *env {
+	t.Helper()
+
+	now := int64(1_700_000_000)
+	board := work.NewBoard(work.NewMemoryRepo(), func() int64 { return now })
+	svc := &worksvc.Service{Board: board, Now: func() int64 { return now }}
+
+	authority, err := auth.NewAuthority([]byte("0123456789abcdef0123456789abcdef"), func() int64 { return now })
+	if err != nil {
+		t.Fatalf("NewAuthority: %v", err)
+	}
+	svc.Authz = authz.New(auditor.NewGate(allowAll{}), authority)
+
+	keys := auth.NewStaticKeys()
+	keys.Add(adminKey, auth.Identity{AgentID: "agent-admin", Scopes: []auth.Scope{auth.ScopeAdmin}})
+	keys.Add(readerKey, auth.Identity{AgentID: "agent-reader", Scopes: []auth.Scope{auth.ScopeRead}})
+
+	server := New(svc, keys)
+	ts := httptest.NewServer(server.Handler())
+	t.Cleanup(ts.Close)
+	return &env{srv: ts, board: board}
+}
+
+func TestAuthorizeTool(t *testing.T) {
+	e := newAuthzEnv(t)
+
+	e.call(t, adminKey, "work_create", map[string]any{"item": map[string]any{
+		"id":       "w1",
+		"title":    "w1",
+		"contract": map[string]any{"goal": "ship", "paths": []string{"internal/work"}},
+	}})
+	e.call(t, adminKey, "work_claim", map[string]any{"id": "w1", "role": "worker", "plan": "implement"})
+
+	res := e.call(t, adminKey, "work_authorize", map[string]any{
+		"id":     "w1",
+		"epoch":  1,
+		"action": map[string]any{"kind": "fs.write", "targets": []string{"internal/work/x.go"}},
+		"reason": "add helper",
+	})
+	if res.IsError {
+		t.Fatalf("work_authorize: %s", res.text())
+	}
+
+	var out authz.Outcome
+	if err := json.Unmarshal([]byte(res.text()), &out); err != nil {
+		t.Fatalf("decode outcome: %v", err)
+	}
+	if out.Verdict != auditor.VerdictAllow || out.Token == "" {
+		t.Fatalf("outcome = %+v", out)
+	}
+
+	denied := e.call(t, adminKey, "work_authorize", map[string]any{
+		"id":     "w1",
+		"epoch":  1,
+		"action": map[string]any{"command": "rm -rf /"},
+	})
+	if denied.IsError {
+		t.Fatalf("deny should be a decision, not an error: %s", denied.text())
+	}
+	var denyOut authz.Outcome
+	if err := json.Unmarshal([]byte(denied.text()), &denyOut); err != nil {
+		t.Fatalf("decode deny: %v", err)
+	}
+	if denyOut.Verdict != auditor.VerdictDeny || denyOut.Token != "" {
+		t.Fatalf("deny outcome = %+v", denyOut)
+	}
+
+	e.call(t, readerKey, "work_authorize", map[string]any{
+		"id": "w1", "epoch": 1, "action": map[string]any{"kind": "fs.write"},
+	}).mustFail(t, "forbidden")
+
+	e.call(t, adminKey, "work_authorize", map[string]any{
+		"id": "w1", "epoch": 1, "action": map[string]any{},
+	}).mustFail(t, "invalid_action")
 }

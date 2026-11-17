@@ -10,3 +10,5 @@ JANUS_API_KEY=
 JANUS_AGENT_ID=admin
 # 可选：设置后 /verify 在该目录执行契约 checks
 JANUS_WORKSPACE=
+# 能力令牌签名密钥（>=32 字节）；不设置则从 JANUS_API_KEY 派生，重启后令牌失效
+JANUS_CAPABILITY_KEY=

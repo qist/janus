@@ -19,6 +19,7 @@ const (
 	ScopeSubmit    = auth.ScopeSubmit
 	ScopeVerify    = auth.ScopeVerify
 	ScopeIntegrate = auth.ScopeIntegrate
+	ScopeAuthorize = auth.ScopeAuthorize
 	ScopeAdmin     = auth.ScopeAdmin
 )
 

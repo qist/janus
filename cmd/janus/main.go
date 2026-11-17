@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +16,9 @@ import (
 	"time"
 
 	"janus/internal/api"
+	"janus/internal/auditor"
+	"janus/internal/auth"
+	"janus/internal/authz"
 	"janus/internal/mcp"
 	"janus/internal/store"
 	"janus/internal/verify"
@@ -61,6 +65,16 @@ func run() error {
 
 	board := work.NewBoard(st, nil)
 	svc := worksvc.New(board, st)
+
+	authority, err := capabilityAuthority(apiKey)
+	if err != nil {
+		return err
+	}
+	// No auditor models are wired yet, so every sensitive action is denied
+	// until the gateway exists. That is the intended fail-closed default.
+	gate := auditor.NewGate()
+	gate.Cache = auditor.NewMemoryCache(600, nil)
+	svc.Authz = authz.New(gate, authority)
 
 	keys := api.NewStaticKeys()
 	keys.Add(apiKey, api.Identity{AgentID: *agentID, Scopes: []api.Scope{api.ScopeAdmin}})
@@ -120,6 +134,22 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// capabilityAuthority signs the single-use tokens executors verify. Production
+// sets JANUS_CAPABILITY_KEY; otherwise a per-process key is derived from the
+// API key, which keeps dev working but invalidates tokens on restart.
+func capabilityAuthority(apiKey string) (*auth.Authority, error) {
+	if key := strings.TrimSpace(os.Getenv("JANUS_CAPABILITY_KEY")); key != "" {
+		authority, err := auth.NewAuthority([]byte(key), nil)
+		if err != nil {
+			return nil, fmt.Errorf("JANUS_CAPABILITY_KEY: %w", err)
+		}
+		return authority, nil
+	}
+	sum := sha256.Sum256([]byte("janus-capability:" + apiKey))
+	log.Print("JANUS_CAPABILITY_KEY unset; deriving a per-process capability key from JANUS_API_KEY")
+	return auth.NewAuthority(sum[:], nil)
 }
 
 func envOr(key, fallback string) string {

@@ -19,6 +19,7 @@ const (
 	ScopeSubmit    Scope = "submit"    // submit evidence
 	ScopeVerify    Scope = "verify"    // run checks, post verdicts
 	ScopeIntegrate Scope = "integrate" // complete an approved item
+	ScopeAuthorize Scope = "authorize" // request a capability token for a sensitive action
 	ScopeAdmin     Scope = "admin"     // everything
 )
 

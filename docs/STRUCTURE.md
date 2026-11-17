@@ -103,6 +103,9 @@ janus/
 | `internal/worksvc` | 组合层：租约 + 交接包、证据/失败回写胶囊、租约持有者校验 |
 | `internal/api` | HTTP 传输层：`/api/v1/work-items/*`、鉴权与错误映射 |
 | `internal/mcp` | MCP 传输层：`/mcp` JSON-RPC、`work_*` 工具，复用同一批 scope 与错误码 |
+| `internal/policy` | 确定性授权：敏感操作分类、路径/命令规则、审计/人审需求 |
+| `internal/auditor` | 独立审计：结构化输入输出、quorum、置信度下限、失败即拒、决策缓存 |
+| `internal/authz` | 授权编排：policy → auditor → 单次能力令牌，绑定租约与动作哈希 |
 
 依赖方向同样成立：`api → worksvc → work/contextpack/capsule`，`store` 实现接口但不被领域包 import。
 

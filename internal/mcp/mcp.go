@@ -15,6 +15,7 @@ import (
 
 	"janus/internal/api"
 	"janus/internal/auth"
+	"janus/internal/policy"
 	"janus/internal/work"
 	"janus/internal/worksvc"
 )
@@ -230,6 +231,8 @@ func (s *Server) runTool(ctx context.Context, id auth.Identity, name string, arg
 		return s.workVerdict(ctx, id, args)
 	case "work_complete":
 		return s.workComplete(ctx, id, args)
+	case "work_authorize":
+		return s.workAuthorize(ctx, id, args)
 	default:
 		return nil, fail("unknown_tool", "no tool named "+name)
 	}
@@ -471,6 +474,27 @@ func (s *Server) workComplete(ctx context.Context, id auth.Identity, raw json.Ra
 		return nil, err
 	}
 	return map[string]any{"ok": true}, nil
+}
+
+func (s *Server) workAuthorize(ctx context.Context, id auth.Identity, raw json.RawMessage) (any, error) {
+	if err := requireScope(id, auth.ScopeAuthorize); err != nil {
+		return nil, err
+	}
+	var args struct {
+		ID          string        `json:"id"`
+		Epoch       int64         `json:"epoch"`
+		Action      policy.Action `json:"action"`
+		Reason      string        `json:"reason"`
+		Evidence    []string      `json:"evidence"`
+		WorkerModel string        `json:"worker_model"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(args.Action.Kind) == "" && strings.TrimSpace(args.Action.Command) == "" {
+		return nil, fail("invalid_action", "action.kind or action.command required")
+	}
+	return s.Svc.Authorize(ctx, args.ID, id.AgentID, args.Epoch, args.Action, args.Reason, args.Evidence, args.WorkerModel)
 }
 
 func (s *Server) authenticate(r *http.Request) (auth.Identity, error) {

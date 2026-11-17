@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"janus/internal/authz"
 	"janus/internal/capsule"
 	"janus/internal/contextpack"
+	"janus/internal/policy"
 	"janus/internal/work"
 )
 
@@ -25,7 +27,12 @@ type Service struct {
 	Budget int
 	// Now overrides the clock used when creating capsules.
 	Now func() int64
+	// Authz authorizes sensitive actions; nil means the endpoint is disabled.
+	Authz *authz.Service
 }
+
+// ErrAuthzUnavailable means no authorization service is configured.
+var ErrAuthzUnavailable = errors.New("authorization service is not configured")
 
 // New returns a service with the default clock.
 func New(board *work.Board, capsules capsule.Repository) *Service {
@@ -136,6 +143,32 @@ func (s *Service) requireHolder(ctx context.Context, itemID, agentID string, epo
 		return work.ErrInvalidTransition
 	}
 	return nil
+}
+
+// Authorize asks policy + auditors whether the lease holder may perform
+// action, and returns a single-use capability token when it may. The contract
+// comes from the stored item, never from the caller.
+func (s *Service) Authorize(ctx context.Context, itemID, agentID string, epoch int64, action policy.Action, reason string, evidence []string, workerModel string) (authz.Outcome, error) {
+	if s.Authz == nil {
+		return authz.Outcome{}, ErrAuthzUnavailable
+	}
+	if err := s.requireHolder(ctx, itemID, agentID, epoch, ""); err != nil {
+		return authz.Outcome{}, err
+	}
+	item, ok := s.Board.Get(ctx, itemID)
+	if !ok {
+		return authz.Outcome{}, work.ErrNotFound
+	}
+	return s.Authz.Authorize(ctx, authz.Request{
+		WorkItemID:  itemID,
+		LeaseEpoch:  epoch,
+		AgentID:     agentID,
+		Action:      action,
+		Contract:    item.Contract,
+		Reason:      reason,
+		Evidence:    evidence,
+		WorkerModel: workerModel,
+	})
 }
 
 // Handoff rebuilds the pack without taking a lease.

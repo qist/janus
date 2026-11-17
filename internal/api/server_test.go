@@ -8,6 +8,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"janus/internal/auditor"
+	"janus/internal/auth"
+	"janus/internal/authz"
+	"janus/internal/policy"
 	"janus/internal/work"
 	"janus/internal/worksvc"
 )
@@ -566,5 +570,133 @@ func TestStaticKeysRejectEmptyAndCount(t *testing.T) {
 	}
 	if _, err := keys.Authenticate(context.Background(), "k2"); err == nil {
 		t.Fatal("unknown key accepted")
+	}
+}
+
+type allowAllAuditor struct{}
+
+func (allowAllAuditor) Name() string { return "test/allow" }
+
+func (allowAllAuditor) Review(context.Context, auditor.Input) (auditor.Decision, error) {
+	return auditor.Decision{Verdict: auditor.VerdictAllow, Confidence: 0.95}, nil
+}
+
+func newAuthzEnv(t *testing.T) (*testEnv, *auth.Authority) {
+	t.Helper()
+
+	now := int64(1_700_000_000)
+	board := work.NewBoard(work.NewMemoryRepo(), func() int64 { return now })
+	svc := &worksvc.Service{Board: board, Now: func() int64 { return now }}
+
+	authority, err := auth.NewAuthority([]byte("0123456789abcdef0123456789abcdef"), func() int64 { return now })
+	if err != nil {
+		t.Fatalf("NewAuthority: %v", err)
+	}
+	svc.Authz = authz.New(auditor.NewGate(allowAllAuditor{}), authority)
+
+	keys := NewStaticKeys()
+	keys.Add(adminKey, Identity{AgentID: adminAgent, Scopes: []Scope{ScopeAdmin}})
+	keys.Add("authz-other-key", Identity{AgentID: "agent-other", Scopes: []Scope{ScopeAuthorize, ScopeRead}})
+
+	ts := httptest.NewServer(New(svc, keys).Handler())
+	t.Cleanup(ts.Close)
+	return &testEnv{srv: ts, board: board}, authority
+}
+
+func TestAuthorizeIssuesToken(t *testing.T) {
+	e, authority := newAuthzEnv(t)
+	createItem(t, e, work.WorkItem{
+		ID:          "w1",
+		WorkspaceID: "ws",
+		Title:       "w1",
+		Contract:    work.Contract{Goal: "ship", Paths: []string{"internal/work"}},
+	})
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", adminKey,
+		claimRequest{Role: work.RoleWorker, Plan: "implement"}, http.StatusOK)
+	var claimed worksvc.ClaimResult
+	decodeBody(t, resp, &claimed)
+
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w1/authorize", adminKey, authorizeRequest{
+		Epoch:  claimed.Claim.LeaseEpoch,
+		Action: policy.Action{Kind: "fs.write", Targets: []string{"internal/work/x.go"}},
+		Reason: "add a helper",
+	}, http.StatusOK)
+
+	var out authz.Outcome
+	decodeBody(t, resp, &out)
+	if out.Verdict != auditor.VerdictAllow || out.Token == "" {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if out.ExpiresAt == 0 {
+		t.Fatal("expires_at not set")
+	}
+
+	claims, err := authority.Verify(out.Token, authz.CapabilityAction(policy.Action{
+		Kind: "fs.write", Targets: []string{"internal/work/x.go"},
+	}))
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.WorkItemID != "w1" || claims.LeaseEpoch != claimed.Claim.LeaseEpoch {
+		t.Fatalf("claims = %+v", claims)
+	}
+}
+
+func TestAuthorizeDeniesDangerousCommand(t *testing.T) {
+	e, _ := newAuthzEnv(t)
+	createItem(t, e, plainItem("w1"))
+
+	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", adminKey,
+		claimRequest{Role: work.RoleWorker, Plan: "implement"}, http.StatusOK)
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/authorize", adminKey, authorizeRequest{
+		Epoch:  1,
+		Action: policy.Action{Command: "rm -rf /"},
+	}, http.StatusOK)
+
+	var out authz.Outcome
+	decodeBody(t, resp, &out)
+	if out.Verdict != auditor.VerdictDeny || out.Token != "" {
+		t.Fatalf("outcome = %+v", out)
+	}
+}
+
+func TestAuthorizeRequiresScopeAndLease(t *testing.T) {
+	e, _ := newAuthzEnv(t)
+	createItem(t, e, plainItem("w1"))
+	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", adminKey,
+		claimRequest{Role: work.RoleWorker, Plan: "implement"}, http.StatusOK)
+
+	// Right scope, wrong holder.
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/authorize", "authz-other-key", authorizeRequest{
+		Epoch:  1,
+		Action: policy.Action{Kind: "fs.write", Targets: []string{"x.go"}},
+	}, http.StatusForbidden)
+	if code := errCode(t, resp); code != "not_lease_holder" {
+		t.Fatalf("code = %q", code)
+	}
+
+	// Empty action is rejected before policy runs.
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w1/authorize", adminKey, authorizeRequest{
+		Epoch: 1,
+	}, http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "invalid_action" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestAuthorizeWithoutServiceIsNotImplemented(t *testing.T) {
+	e := newTestEnv(t)
+	createItem(t, e, plainItem("w1"))
+	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", adminKey,
+		claimRequest{Role: work.RoleWorker, Plan: "implement"}, http.StatusOK)
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/authorize", adminKey, authorizeRequest{
+		Epoch:  1,
+		Action: policy.Action{Kind: "fs.write", Targets: []string{"x.go"}},
+	}, http.StatusNotImplemented)
+	if code := errCode(t, resp); code != "authz_unavailable" {
+		t.Fatalf("code = %q", code)
 	}
 }

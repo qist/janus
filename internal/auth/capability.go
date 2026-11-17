@@ -75,6 +75,10 @@ func NewAuthority(key []byte, now func() int64) (*Authority, error) {
 	}, nil
 }
 
+// Now reports the authority's clock. Callers that stamp claims before Issue
+// must use the same clock, or a token can be issued already expired.
+func (a *Authority) Now() int64 { return a.now() }
+
 // Issue signs claims. Empty IssuedAt/ExpiresAt/Nonce are filled in; a TTL over
 // MaxTTL is rejected rather than silently clamped.
 func (a *Authority) Issue(claims Claims) (string, error) {

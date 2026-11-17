@@ -158,6 +158,40 @@ type Claim struct {
 	CreatedAt      int64       `json:"created_at"`
 }
 
+// Artifact is an evidence or output file produced while working an item.
+type Artifact struct {
+	ID         string `json:"id"`
+	WorkItemID string `json:"work_item_id"`
+	Kind       string `json:"kind"` // diff|patch|log|test|report|note
+	URI        string `json:"uri"`
+	SHA256     string `json:"sha256"`
+	Bytes      int64  `json:"bytes"`
+	Summary    string `json:"summary"`
+	CreatedBy  string `json:"created_by"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
+// Review is one verifier decision with its evidence references.
+type Review struct {
+	ID         string   `json:"id"`
+	WorkItemID string   `json:"work_item_id"`
+	ReviewerID string   `json:"reviewer_id"`
+	Verdict    Verdict  `json:"verdict"`
+	Reasons    string   `json:"reasons"`
+	Evidence   []string `json:"evidence,omitempty"`
+	CreatedAt  int64    `json:"created_at"`
+}
+
+// Event is one append-only work-board event.
+type Event struct {
+	ID         uint64 `json:"id"`
+	WorkItemID string `json:"work_item_id"`
+	Type       string `json:"type"`
+	Actor      string `json:"actor"`
+	Payload    []byte `json:"payload,omitempty"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
 // Verdict is a verifier decision.
 type Verdict string
 

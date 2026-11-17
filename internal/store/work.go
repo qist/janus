@@ -87,7 +87,10 @@ func (s *Store) ListWorkItems(ctx context.Context, status work.Status, workspace
 
 // SaveClaim upserts a claim.
 func (s *Store) SaveClaim(ctx context.Context, claim work.Claim) error {
-	m := claimToModel(claim)
+	m, err := claimToModel(claim)
+	if err != nil {
+		return err
+	}
 	if err := s.DB.WithContext(ctx).Save(&m).Error; err != nil {
 		return fmt.Errorf("save claim %q: %w", claim.ID, err)
 	}
@@ -107,7 +110,11 @@ func (s *Store) GetActiveClaim(ctx context.Context, itemID string) (work.Claim, 
 	if err != nil {
 		return work.Claim{}, false, err
 	}
-	return claimFromModel(m), true, nil
+	claim, err := claimFromModel(m)
+	if err != nil {
+		return work.Claim{}, false, err
+	}
+	return claim, true, nil
 }
 
 // ListClaims returns the lease history for an item.
@@ -121,7 +128,11 @@ func (s *Store) ListClaims(ctx context.Context, itemID string) ([]work.Claim, er
 	}
 	out := make([]work.Claim, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, claimFromModel(m))
+		claim, err := claimFromModel(m)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, claim)
 	}
 	return out, nil
 }
@@ -256,6 +267,7 @@ func itemToModel(item work.WorkItem) (WorkItemModel, error) {
 		LeaseExpiries:      item.LeaseExpiries,
 		Replicas:           item.Replicas,
 		CreatedBy:          item.CreatedBy,
+		SubmittedBy:        item.SubmittedBy,
 		LastIdempotencyKey: item.LastIdempotencyKey,
 		Version:            item.Version,
 		CreatedAt:          item.CreatedAt,
@@ -277,6 +289,7 @@ func itemFromModel(m WorkItemModel) (work.WorkItem, error) {
 		LeaseExpiries:      m.LeaseExpiries,
 		Replicas:           m.Replicas,
 		CreatedBy:          m.CreatedBy,
+		SubmittedBy:        m.SubmittedBy,
 		LastIdempotencyKey: m.LastIdempotencyKey,
 		Version:            m.Version,
 		CreatedAt:          m.CreatedAt,
@@ -298,7 +311,15 @@ func itemFromModel(m WorkItemModel) (work.WorkItem, error) {
 	return item, nil
 }
 
-func claimToModel(c work.Claim) WorkClaimModel {
+func claimToModel(c work.Claim) (WorkClaimModel, error) {
+	var evidence []byte
+	if c.Evidence != nil {
+		encoded, err := json.Marshal(c.Evidence)
+		if err != nil {
+			return WorkClaimModel{}, fmt.Errorf("encode claim evidence: %w", err)
+		}
+		evidence = encoded
+	}
 	return WorkClaimModel{
 		ID:             c.ID,
 		WorkItemID:     c.WorkItemID,
@@ -312,12 +333,13 @@ func claimToModel(c work.Claim) WorkClaimModel {
 		Note:           c.Note,
 		Status:         string(c.Status),
 		IdempotencyKey: c.IdempotencyKey,
+		EvidenceJSON:   evidence,
 		CreatedAt:      c.CreatedAt,
-	}
+	}, nil
 }
 
-func claimFromModel(m WorkClaimModel) work.Claim {
-	return work.Claim{
+func claimFromModel(m WorkClaimModel) (work.Claim, error) {
+	c := work.Claim{
 		ID:             m.ID,
 		WorkItemID:     m.WorkItemID,
 		AgentID:        m.AgentID,
@@ -332,6 +354,14 @@ func claimFromModel(m WorkClaimModel) work.Claim {
 		IdempotencyKey: m.IdempotencyKey,
 		CreatedAt:      m.CreatedAt,
 	}
+	if len(m.EvidenceJSON) > 0 {
+		var evidence work.Evidence
+		if err := json.Unmarshal(m.EvidenceJSON, &evidence); err != nil {
+			return work.Claim{}, fmt.Errorf("decode claim evidence: %w", err)
+		}
+		c.Evidence = &evidence
+	}
+	return c, nil
 }
 
 func artifactToModel(a work.Artifact) WorkArtifactModel {

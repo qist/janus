@@ -101,7 +101,7 @@ func TestFailedSubmitKeepsRunning(t *testing.T) {
 	}
 
 	b.repo = &failingEventRepo{Repository: mem, err: errors.New("event store down")}
-	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1"); err == nil {
+	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1", submitEvidence()); err == nil {
 		t.Fatal("Submit succeeded while event append failed")
 	}
 
@@ -122,7 +122,7 @@ func TestFailedSubmitKeepsRunning(t *testing.T) {
 
 	// The same idempotency key must still be accepted once the store recovers.
 	b.repo = mem
-	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1"); err != nil {
+	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1", submitEvidence()); err != nil {
 		t.Fatalf("Submit after rollback: %v", err)
 	}
 }

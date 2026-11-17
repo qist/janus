@@ -26,7 +26,10 @@ func TestBoardWithSQLiteRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "submit-1"); err != nil {
+	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "submit-1", work.Evidence{
+		Artifacts: []string{"artifact:diff"},
+		DiffHash:  "sha256:diff",
+	}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 
@@ -47,6 +50,20 @@ func TestBoardWithSQLiteRepository(t *testing.T) {
 	}
 	if item.Status != work.StatusReview || item.LastIdempotencyKey != "submit-1" {
 		t.Fatalf("item after reopen = %+v", item)
+	}
+	if item.SubmittedBy != "worker-1" {
+		t.Fatalf("submitted by = %q, want worker-1", item.SubmittedBy)
+	}
+
+	claims, err := s2.ListClaims(ctx, "w1")
+	if err != nil {
+		t.Fatalf("ListClaims: %v", err)
+	}
+	if len(claims) != 1 || claims[0].Evidence == nil {
+		t.Fatalf("claims after reopen = %+v", claims)
+	}
+	if len(claims[0].Evidence.Artifacts) != 1 || claims[0].Evidence.DiffHash != "sha256:diff" {
+		t.Fatalf("evidence after reopen = %+v", claims[0].Evidence)
 	}
 
 	v, err := b2.Claim(ctx, "w1", "verifier-1", work.RoleVerifier, "review", 60)

@@ -8,6 +8,14 @@ import (
 	"testing"
 )
 
+func submitEvidence() Evidence {
+	return Evidence{
+		Artifacts: []string{"artifact:diff"},
+		DiffHash:  "sha256:diff",
+		Summary:   "implementation ready",
+	}
+}
+
 func testBoard() (*Board, *int64) {
 	now := int64(1_700_000_000)
 	return NewBoard(NewMemoryRepo(), func() int64 { return now }), &now
@@ -51,7 +59,7 @@ func finishItem(t *testing.T, b *Board, id string) {
 	t.Helper()
 	ctx := context.Background()
 	w := claimWorker(t, b, id)
-	if err := b.Submit(ctx, id, w.LeaseEpoch, "submit-"+id); err != nil {
+	if err := b.Submit(ctx, id, w.LeaseEpoch, "submit-"+id, submitEvidence()); err != nil {
 		t.Fatalf("submit %s: %v", id, err)
 	}
 	v := claimVerifier(t, b, id)
@@ -105,16 +113,16 @@ func TestClaimFencingAndSubmit(t *testing.T) {
 	if err := b.Heartbeat(ctx, "w1", c.LeaseEpoch, 60); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
-	if err := b.Submit(ctx, "w1", c.LeaseEpoch, ""); !errors.Is(err, ErrIdempotencyRequired) {
+	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "", submitEvidence()); !errors.Is(err, ErrIdempotencyRequired) {
 		t.Fatalf("empty idempotency = %v, want ErrIdempotencyRequired", err)
 	}
-	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1"); err != nil {
+	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1", submitEvidence()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1"); err != nil {
+	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1", submitEvidence()); err != nil {
 		t.Fatalf("idempotent submit: %v", err)
 	}
-	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k2"); !errors.Is(err, ErrAlreadySubmitted) {
+	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k2", submitEvidence()); !errors.Is(err, ErrAlreadySubmitted) {
 		t.Fatalf("different key = %v, want ErrAlreadySubmitted", err)
 	}
 
@@ -167,7 +175,7 @@ func TestSubmitRejectsExpiredLease(t *testing.T) {
 	c := claimWorker(t, b, "w1")
 	*now += 61
 
-	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1"); !errors.Is(err, ErrLeaseExpired) {
+	if err := b.Submit(ctx, "w1", c.LeaseEpoch, "k1", submitEvidence()); !errors.Is(err, ErrLeaseExpired) {
 		t.Fatalf("submit = %v, want ErrLeaseExpired", err)
 	}
 	item, _ := b.Get(ctx, "w1")
@@ -182,7 +190,7 @@ func TestRejectRequeues(t *testing.T) {
 	addItem(t, b, "w1")
 
 	w := claimWorker(t, b, "w1")
-	if err := b.Submit(ctx, "w1", w.LeaseEpoch, "k1"); err != nil {
+	if err := b.Submit(ctx, "w1", w.LeaseEpoch, "k1", submitEvidence()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	v := claimVerifier(t, b, "w1")
@@ -211,7 +219,7 @@ func TestThreeRejectsBlock(t *testing.T) {
 
 	for i := 0; i < MaxAttempts; i++ {
 		w := claimWorker(t, b, "w1")
-		if err := b.Submit(ctx, "w1", w.LeaseEpoch, fmt.Sprintf("k%d", i)); err != nil {
+		if err := b.Submit(ctx, "w1", w.LeaseEpoch, fmt.Sprintf("k%d", i), submitEvidence()); err != nil {
 			t.Fatalf("submit %d: %v", i, err)
 		}
 		v := claimVerifier(t, b, "w1")
@@ -238,7 +246,7 @@ func TestApproveAndComplete(t *testing.T) {
 	addItem(t, b, "w1")
 
 	w := claimWorker(t, b, "w1")
-	if err := b.Submit(ctx, "w1", w.LeaseEpoch, "k1"); err != nil {
+	if err := b.Submit(ctx, "w1", w.LeaseEpoch, "k1", submitEvidence()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	v := claimVerifier(t, b, "w1")

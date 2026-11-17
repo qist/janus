@@ -31,6 +31,10 @@ var (
 	ErrAlreadySubmitted    = errors.New("work item already submitted")
 	ErrDependencyNotDone   = errors.New("dependency not done")
 	ErrVersionConflict     = errors.New("work item version conflict")
+	ErrEvidenceMissing     = errors.New("submit evidence missing")
+	ErrCheckNotRun         = errors.New("contract check missing from evidence")
+	ErrCheckFailed         = errors.New("contract check failed")
+	ErrSelfReview          = errors.New("verifier must differ from the submitter")
 )
 
 // Board is the single work-board state machine. It reads and writes only
@@ -265,7 +269,11 @@ func (b *Board) Heartbeat(ctx context.Context, itemID string, epoch int64, exten
 
 // Submit moves a worker's running item to review. It is idempotent for the
 // same key while the item is in review or a later state.
-func (b *Board) Submit(ctx context.Context, itemID string, epoch int64, idempotencyKey string) error {
+//
+// Evidence is mandatory: at least one artifact or diff hash, plus the real
+// result of every check declared in the contract. Without it the item never
+// reaches a verifier.
+func (b *Board) Submit(ctx context.Context, itemID string, epoch int64, idempotencyKey string, evidence Evidence) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -310,13 +318,18 @@ func (b *Board) Submit(ctx context.Context, itemID string, epoch int64, idempote
 		if item.Status != StatusRunning {
 			return ErrInvalidTransition
 		}
+		if err := validateEvidence(item.Contract, evidence); err != nil {
+			return err
+		}
 
 		now := b.now()
 		item.Status = StatusReview
+		item.SubmittedBy = claim.AgentID
 		item.LastIdempotencyKey = idempotencyKey
 		item.UpdatedAt = now
 		claim.Status = ClaimSubmitted
 		claim.IdempotencyKey = idempotencyKey
+		claim.Evidence = &evidence
 
 		if err := repo.UpdateItem(ctx, item, item.Version); err != nil {
 			return err
@@ -358,6 +371,9 @@ func (b *Board) Verdict(ctx context.Context, itemID string, epoch int64, verdict
 		}
 		if claim.LeaseEpoch != epoch {
 			return ErrStaleEpoch
+		}
+		if item.SelfReview(claim.AgentID) {
+			return ErrSelfReview
 		}
 		if item.Status != StatusReview {
 			return ErrInvalidTransition

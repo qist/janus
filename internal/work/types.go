@@ -104,6 +104,30 @@ type Contract struct {
 	Version       int      `json:"version"`
 }
 
+// CheckResult is one executed acceptance command. Output is truncated and
+// stored by reference; the hash lets a verifier prove the output was not
+// edited after the fact.
+type CheckResult struct {
+	Name       string `json:"name"`
+	Command    string `json:"cmd"`
+	ExitCode   int    `json:"exit_code"`
+	DurationMS int64  `json:"duration_ms"`
+	OutputSHA  string `json:"output_sha256,omitempty"`
+	OutputTail string `json:"output_tail,omitempty"`
+}
+
+// Passed reports whether the check met the contract's expected exit code.
+func (r CheckResult) Passed(expectExit int) bool { return r.ExitCode == expectExit }
+
+// Evidence is what a worker must supply on submit. Without it the item cannot
+// enter review: a diff reference plus the real output of every contract check.
+type Evidence struct {
+	Artifacts []string      `json:"artifacts,omitempty"` // artifact ids / URIs
+	DiffHash  string        `json:"diff_hash,omitempty"`
+	Checks    []CheckResult `json:"checks,omitempty"`
+	Summary   string        `json:"summary,omitempty"`
+}
+
 // WorkItem is one claimable unit of delivery.
 type WorkItem struct {
 	ID                 string   `json:"id"`
@@ -122,6 +146,7 @@ type WorkItem struct {
 	LeaseExpiries      int      `json:"lease_expiries"`
 	Replicas           int      `json:"replicas"`
 	CreatedBy          string   `json:"created_by"`
+	SubmittedBy        string   `json:"submitted_by,omitempty"` // last worker that submitted
 	LastIdempotencyKey string   `json:"last_idempotency_key,omitempty"`
 	Version            int64    `json:"version"`
 	CreatedAt          int64    `json:"created_at"`
@@ -156,6 +181,7 @@ type Claim struct {
 	Note           string      `json:"note,omitempty"`
 	Status         ClaimStatus `json:"status"`
 	IdempotencyKey string      `json:"idempotency_key,omitempty"`
+	Evidence       *Evidence   `json:"evidence,omitempty"`
 	CreatedAt      int64       `json:"created_at"`
 }
 

@@ -20,6 +20,7 @@ type WorkItemModel struct {
 	LeaseExpiries      int
 	Replicas           int
 	CreatedBy          string `gorm:"size:64"`
+	SubmittedBy        string `gorm:"index;size:64"`
 	LastIdempotencyKey string `gorm:"index;size:64"`
 	Version            int64  `gorm:"index"`
 	CreatedAt          int64
@@ -42,6 +43,7 @@ type WorkClaimModel struct {
 	Note           string `gorm:"size:2048"`
 	Status         string `gorm:"index;size:16"`
 	IdempotencyKey string `gorm:"index;size:64"`
+	EvidenceJSON   []byte `gorm:"type:blob"`
 	CreatedAt      int64
 }
 

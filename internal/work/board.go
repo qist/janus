@@ -36,6 +36,7 @@ var (
 	ErrCheckFailed         = errors.New("contract check failed")
 	ErrSelfReview          = errors.New("verifier must differ from the submitter")
 	ErrVerifyRequired      = errors.New("verifier must re-run contract checks before approve")
+	ErrPathLocked          = errors.New("path scope locked by another active work item")
 )
 
 // Board is the single work-board state machine. It reads and writes only
@@ -181,6 +182,11 @@ func (b *Board) claim(ctx context.Context, repo Repository, itemID, agentID stri
 	}
 	if err := b.checkClaimable(ctx, repo, &item, role); err != nil {
 		return Claim{}, err
+	}
+	if role != RoleVerifier {
+		if err := b.checkPathLocks(ctx, repo, &item); err != nil {
+			return Claim{}, err
+		}
 	}
 
 	if leaseSeconds <= 0 {
@@ -685,6 +691,9 @@ func (b *Board) Claimable(ctx context.Context, role Role) ([]WorkItem, error) {
 			if b.checkClaimable(ctx, repo, &item, role) != nil {
 				continue
 			}
+			if role != RoleVerifier && b.checkPathLocks(ctx, repo, &item) != nil {
+				continue
+			}
 			out = append(out, item)
 		}
 		return nil
@@ -730,6 +739,30 @@ func (b *Board) checkClaimable(ctx context.Context, repo Repository, item *WorkI
 		}
 	default:
 		return fmt.Errorf("invalid role %q", role)
+	}
+	return nil
+}
+
+// checkPathLocks rejects a claim when another active item in the same
+// workspace declares an overlapping write scope. Two agents editing the same
+// files must be split into dependent items instead.
+func (b *Board) checkPathLocks(ctx context.Context, repo Repository, item *WorkItem) error {
+	if len(item.Contract.Paths) == 0 {
+		return nil
+	}
+	for _, status := range []Status{StatusRunning, StatusIntegrating} {
+		others, err := repo.ListItems(ctx, status, item.WorkspaceID)
+		if err != nil {
+			return err
+		}
+		for _, other := range others {
+			if other.ID == item.ID {
+				continue
+			}
+			if PathsOverlap(item.Contract.Paths, other.Contract.Paths) {
+				return fmt.Errorf("%w: %s", ErrPathLocked, other.ID)
+			}
+		}
 	}
 	return nil
 }

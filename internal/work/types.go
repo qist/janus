@@ -106,25 +106,26 @@ type Contract struct {
 
 // WorkItem is one claimable unit of delivery.
 type WorkItem struct {
-	ID            string   `json:"id"`
-	WorkspaceID   string   `json:"workspace_id"`
-	ParentID      string   `json:"parent_id,omitempty"`
-	Title         string   `json:"title"`
-	Brief         string   `json:"brief"`
-	Contract      Contract `json:"contract"`
-	Capabilities  []string `json:"capabilities,omitempty"`
-	ExecutionSite string   `json:"execution_site,omitempty"` // server|client
-	RequiredModes []string `json:"required_modes,omitempty"` // native|bridge|none
-	DependsOn     []string `json:"depends_on,omitempty"`
-	Priority      int      `json:"priority"`
-	Status        Status   `json:"status"`
-	Attempts      int      `json:"attempts"`
-	LeaseExpiries int      `json:"lease_expiries"`
-	Replicas      int      `json:"replicas"`
-	CreatedBy     string   `json:"created_by"`
-	Version       int64    `json:"version"`
-	CreatedAt     int64    `json:"created_at"`
-	UpdatedAt     int64    `json:"updated_at"`
+	ID                 string   `json:"id"`
+	WorkspaceID        string   `json:"workspace_id"`
+	ParentID           string   `json:"parent_id,omitempty"`
+	Title              string   `json:"title"`
+	Brief              string   `json:"brief"`
+	Contract           Contract `json:"contract"`
+	Capabilities       []string `json:"capabilities,omitempty"`
+	ExecutionSite      string   `json:"execution_site,omitempty"` // server|client
+	RequiredModes      []string `json:"required_modes,omitempty"` // native|bridge|none
+	DependsOn          []string `json:"depends_on,omitempty"`
+	Priority           int      `json:"priority"`
+	Status             Status   `json:"status"`
+	Attempts           int      `json:"attempts"`
+	LeaseExpiries      int      `json:"lease_expiries"`
+	Replicas           int      `json:"replicas"`
+	CreatedBy          string   `json:"created_by"`
+	LastIdempotencyKey string   `json:"last_idempotency_key,omitempty"`
+	Version            int64    `json:"version"`
+	CreatedAt          int64    `json:"created_at"`
+	UpdatedAt          int64    `json:"updated_at"`
 }
 
 // ClaimStatus is the lifecycle of one lease.

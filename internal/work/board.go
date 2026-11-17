@@ -1,6 +1,7 @@
 package work
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -29,44 +30,36 @@ var (
 	ErrIdempotencyRequired = errors.New("idempotency key required")
 	ErrAlreadySubmitted    = errors.New("work item already submitted")
 	ErrDependencyNotDone   = errors.New("dependency not done")
+	ErrVersionConflict     = errors.New("work item version conflict")
 )
 
-// Board is an in-memory work board. Persistence and HTTP are separate layers;
-// this type owns the state machine and lease/fencing semantics.
+// Board is the single work-board state machine. It reads and writes only
+// through a Repository; MemoryRepo is used by tests, store.Store in production.
 type Board struct {
-	mu         sync.Mutex
-	items      map[string]*WorkItem
-	active     map[string]*Claim
-	lastEpoch  map[string]int64
-	lastSubmit map[string]string
-	now        func() int64
+	mu   sync.Mutex
+	repo Repository
+	now  func() int64
 }
 
-// NewBoard creates an empty board. now may be nil; Unix seconds are used then.
-func NewBoard(now func() int64) *Board {
+// NewBoard creates a board. A nil repository falls back to a memory repo.
+func NewBoard(repo Repository, now func() int64) *Board {
+	if repo == nil {
+		repo = NewMemoryRepo()
+	}
 	if now == nil {
 		now = func() int64 { return time.Now().Unix() }
 	}
-	return &Board{
-		items:      make(map[string]*WorkItem),
-		active:     make(map[string]*Claim),
-		lastEpoch:  make(map[string]int64),
-		lastSubmit: make(map[string]string),
-		now:        now,
-	}
+	return &Board{repo: repo, now: now}
 }
 
-// Add inserts a work item. The board owns Status/Version timestamps.
-func (b *Board) Add(item WorkItem) error {
+// Add validates and inserts a work item.
+func (b *Board) Add(ctx context.Context, item WorkItem) error {
 	if strings.TrimSpace(item.ID) == "" {
 		return errors.New("work item id required")
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if _, ok := b.items[item.ID]; ok {
-		return ErrAlreadyExists
-	}
 	if item.Status == "" {
 		item.Status = StatusOpen
 	}
@@ -98,43 +91,40 @@ func (b *Board) Add(item WorkItem) error {
 	}
 	item.UpdatedAt = now
 	item.Version = 1
-	b.items[item.ID] = &item
-	return nil
+
+	if err := b.repo.CreateItem(ctx, item); err != nil {
+		return err
+	}
+	return b.appendEvent(ctx, item.ID, "created", item.CreatedBy)
 }
 
 // Get returns a copy of a work item.
-func (b *Board) Get(id string) (WorkItem, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	item, ok := b.items[id]
-	if !ok {
+func (b *Board) Get(ctx context.Context, id string) (WorkItem, bool) {
+	item, err := b.repo.GetItem(ctx, id)
+	if err != nil {
 		return WorkItem{}, false
 	}
-	return cloneItem(item), true
+	return item, true
 }
 
 // ClaimOf returns the current active lease for an item.
-func (b *Board) ClaimOf(itemID string) (Claim, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	claim, ok := b.active[itemID]
-	if !ok {
+func (b *Board) ClaimOf(ctx context.Context, itemID string) (Claim, bool) {
+	claim, ok, err := b.repo.GetActiveClaim(ctx, itemID)
+	if err != nil {
 		return Claim{}, false
 	}
-	return *claim, true
+	return claim, ok
 }
 
 // Claim takes a lease for role. Worker: open -> running. Verifier: review
 // stays review. Integrator: approved -> integrating.
-func (b *Board) Claim(itemID, agentID string, role Role, plan string, leaseSeconds int64) (Claim, error) {
+func (b *Board) Claim(ctx context.Context, itemID, agentID string, role Role, plan string, leaseSeconds int64) (Claim, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	item, ok := b.items[itemID]
-	if !ok {
-		return Claim{}, ErrNotFound
+	item, err := b.repo.GetItem(ctx, itemID)
+	if err != nil {
+		return Claim{}, err
 	}
 	if strings.TrimSpace(agentID) == "" {
 		return Claim{}, errors.New("agent id required")
@@ -149,12 +139,22 @@ func (b *Board) Claim(itemID, agentID string, role Role, plan string, leaseSecon
 		return Claim{}, ErrPlanTooLong
 	}
 
-	b.expireLocked(itemID)
-
-	if _, ok := b.active[itemID]; ok {
+	expired, err := b.expireLocked(ctx, itemID)
+	if err != nil {
+		return Claim{}, err
+	}
+	if expired {
+		item, err = b.repo.GetItem(ctx, itemID)
+		if err != nil {
+			return Claim{}, err
+		}
+	}
+	if _, ok, err := b.repo.GetActiveClaim(ctx, itemID); err != nil {
+		return Claim{}, err
+	} else if ok {
 		return Claim{}, ErrAlreadyClaimed
 	}
-	if err := b.checkClaimableLocked(item, role); err != nil {
+	if err := b.checkClaimableLocked(ctx, &item, role); err != nil {
 		return Claim{}, err
 	}
 
@@ -165,11 +165,13 @@ func (b *Board) Claim(itemID, agentID string, role Role, plan string, leaseSecon
 		leaseSeconds = MaxLeaseSeconds
 	}
 
-	now := b.now()
-	epoch := b.lastEpoch[itemID] + 1
-	b.lastEpoch[itemID] = epoch
+	epoch, err := b.repo.NextLeaseEpoch(ctx, itemID)
+	if err != nil {
+		return Claim{}, err
+	}
 
-	claim := &Claim{
+	now := b.now()
+	claim := Claim{
 		ID:             fmt.Sprintf("cl_%s_%d", itemID, epoch),
 		WorkItemID:     itemID,
 		AgentID:        agentID,
@@ -190,22 +192,37 @@ func (b *Board) Claim(itemID, agentID string, role Role, plan string, leaseSecon
 	case RoleIntegrator:
 		item.Status = StatusIntegrating
 	}
-
+	item.LastIdempotencyKey = ""
 	item.UpdatedAt = now
-	item.Version++
-	b.active[itemID] = claim
-	return *claim, nil
+
+	if err := b.repo.SaveClaim(ctx, claim); err != nil {
+		return Claim{}, err
+	}
+	if err := b.repo.UpdateItem(ctx, item, item.Version); err != nil {
+		claim.Status = ClaimReleased
+		_ = b.repo.SaveClaim(ctx, claim)
+		return Claim{}, err
+	}
+	if err := b.appendEvent(ctx, itemID, "claimed", agentID); err != nil {
+		return Claim{}, err
+	}
+	return claim, nil
 }
 
 // Heartbeat extends an active lease. A stale epoch or expired lease is rejected.
-func (b *Board) Heartbeat(itemID string, epoch int64, extendSeconds int64) error {
+func (b *Board) Heartbeat(ctx context.Context, itemID string, epoch int64, extendSeconds int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.expireLocked(itemID) {
+	if expired, err := b.expireLocked(ctx, itemID); err != nil {
+		return err
+	} else if expired {
 		return ErrLeaseExpired
 	}
-	claim, ok := b.active[itemID]
+	claim, ok, err := b.repo.GetActiveClaim(ctx, itemID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrLeaseExpired
 	}
@@ -222,27 +239,23 @@ func (b *Board) Heartbeat(itemID string, epoch int64, extendSeconds int64) error
 	now := b.now()
 	claim.HeartbeatAt = now
 	claim.LeaseExpiresAt = now + extendSeconds
-
-	item := b.items[itemID]
-	item.UpdatedAt = now
-	item.Version++
-	return nil
+	return b.repo.SaveClaim(ctx, claim)
 }
 
 // Submit moves a worker's running item to review. It is idempotent for the
 // same key while the item is in review or a later state.
-func (b *Board) Submit(itemID string, epoch int64, idempotencyKey string) error {
+func (b *Board) Submit(ctx context.Context, itemID string, epoch int64, idempotencyKey string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return ErrIdempotencyRequired
 	}
-	item, ok := b.items[itemID]
-	if !ok {
-		return ErrNotFound
+	item, err := b.repo.GetItem(ctx, itemID)
+	if err != nil {
+		return err
 	}
-	if b.lastSubmit[itemID] == idempotencyKey {
+	if item.LastIdempotencyKey == idempotencyKey {
 		switch item.Status {
 		case StatusReview, StatusApproved, StatusIntegrating, StatusDone:
 			return nil
@@ -252,10 +265,16 @@ func (b *Board) Submit(itemID string, epoch int64, idempotencyKey string) error 
 	case StatusReview, StatusApproved, StatusIntegrating, StatusDone:
 		return ErrAlreadySubmitted
 	}
-	if b.expireLocked(itemID) {
+	if expired, err := b.expireLocked(ctx, itemID); err != nil {
+		return err
+	} else if expired {
 		return ErrLeaseExpired
 	}
-	claim, ok := b.active[itemID]
+
+	claim, ok, err := b.repo.GetActiveClaim(ctx, itemID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrLeaseExpired
 	}
@@ -266,38 +285,45 @@ func (b *Board) Submit(itemID string, epoch int64, idempotencyKey string) error 
 		return ErrStaleEpoch
 	}
 	if item.Status != StatusRunning {
-		if item.Status == StatusReview || item.Status == StatusApproved || item.Status == StatusIntegrating || item.Status == StatusDone {
-			return ErrAlreadySubmitted
-		}
 		return ErrInvalidTransition
 	}
 
 	now := b.now()
 	item.Status = StatusReview
+	item.LastIdempotencyKey = idempotencyKey
 	item.UpdatedAt = now
-	item.Version++
-
 	claim.Status = ClaimSubmitted
 	claim.IdempotencyKey = idempotencyKey
-	delete(b.active, itemID)
-	b.lastSubmit[itemID] = idempotencyKey
-	return nil
+
+	if err := b.repo.UpdateItem(ctx, item, item.Version); err != nil {
+		return err
+	}
+	if err := b.repo.SaveClaim(ctx, claim); err != nil {
+		return err
+	}
+	return b.appendEvent(ctx, itemID, "submitted", claim.AgentID)
 }
 
 // Verdict closes a verifier lease. Approve -> approved. Reject -> open with
 // attempts+1, or blocked at the attempt limit. NeedsHuman -> blocked.
-func (b *Board) Verdict(itemID string, epoch int64, verdict Verdict, reasons string) error {
+func (b *Board) Verdict(ctx context.Context, itemID string, epoch int64, verdict Verdict, reasons string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	item, ok := b.items[itemID]
-	if !ok {
-		return ErrNotFound
+	item, err := b.repo.GetItem(ctx, itemID)
+	if err != nil {
+		return err
 	}
-	if b.expireLocked(itemID) {
+	if expired, err := b.expireLocked(ctx, itemID); err != nil {
+		return err
+	} else if expired {
 		return ErrLeaseExpired
 	}
-	claim, ok := b.active[itemID]
+
+	claim, ok, err := b.repo.GetActiveClaim(ctx, itemID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrLeaseExpired
 	}
@@ -315,6 +341,7 @@ func (b *Board) Verdict(itemID string, epoch int64, verdict Verdict, reasons str
 	switch verdict {
 	case VerdictApprove:
 		item.Status = StatusApproved
+		item.LastIdempotencyKey = ""
 		claim.Status = ClaimApproved
 	case VerdictReject:
 		item.Attempts++
@@ -323,41 +350,55 @@ func (b *Board) Verdict(itemID string, epoch int64, verdict Verdict, reasons str
 		} else {
 			item.Status = StatusOpen
 		}
+		item.LastIdempotencyKey = ""
 		claim.Status = ClaimRejected
-		delete(b.lastSubmit, itemID)
 	case VerdictNeedsHuman:
 		item.Status = StatusBlocked
+		item.LastIdempotencyKey = ""
 		claim.Status = ClaimNeedsHuman
 	default:
 		return fmt.Errorf("invalid verdict %q", verdict)
 	}
-
 	item.UpdatedAt = now
-	item.Version++
 	claim.Note = reasons
-	delete(b.active, itemID)
-	return nil
+
+	if err := b.repo.SaveClaim(ctx, claim); err != nil {
+		return err
+	}
+	if err := b.repo.UpdateItem(ctx, item, item.Version); err != nil {
+		return err
+	}
+	return b.appendEvent(ctx, itemID, "verdict:"+string(verdict), claim.AgentID)
 }
 
 // Complete closes an integrator lease. It is idempotent for the same key.
-func (b *Board) Complete(itemID string, epoch int64, idempotencyKey string) error {
+func (b *Board) Complete(ctx context.Context, itemID string, epoch int64, idempotencyKey string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return ErrIdempotencyRequired
 	}
-	item, ok := b.items[itemID]
-	if !ok {
-		return ErrNotFound
+	item, err := b.repo.GetItem(ctx, itemID)
+	if err != nil {
+		return err
 	}
-	if item.Status == StatusDone && b.lastSubmit[itemID] == idempotencyKey {
+	if item.Status == StatusDone && item.LastIdempotencyKey == idempotencyKey {
 		return nil
 	}
-	if b.expireLocked(itemID) {
+	if item.Status == StatusDone {
+		return ErrAlreadySubmitted
+	}
+	if expired, err := b.expireLocked(ctx, itemID); err != nil {
+		return err
+	} else if expired {
 		return ErrLeaseExpired
 	}
-	claim, ok := b.active[itemID]
+
+	claim, ok, err := b.repo.GetActiveClaim(ctx, itemID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrLeaseExpired
 	}
@@ -373,29 +414,39 @@ func (b *Board) Complete(itemID string, epoch int64, idempotencyKey string) erro
 
 	now := b.now()
 	item.Status = StatusDone
+	item.LastIdempotencyKey = idempotencyKey
 	item.UpdatedAt = now
-	item.Version++
-
 	claim.Status = ClaimDone
 	claim.IdempotencyKey = idempotencyKey
-	delete(b.active, itemID)
-	b.lastSubmit[itemID] = idempotencyKey
-	return nil
+
+	if err := b.repo.UpdateItem(ctx, item, item.Version); err != nil {
+		return err
+	}
+	if err := b.repo.SaveClaim(ctx, claim); err != nil {
+		return err
+	}
+	return b.appendEvent(ctx, itemID, "done", claim.AgentID)
 }
 
 // Release returns the item to the state matching the released role.
-func (b *Board) Release(itemID string, epoch int64) error {
+func (b *Board) Release(ctx context.Context, itemID string, epoch int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	item, ok := b.items[itemID]
-	if !ok {
-		return ErrNotFound
+	item, err := b.repo.GetItem(ctx, itemID)
+	if err != nil {
+		return err
 	}
-	if b.expireLocked(itemID) {
+	if expired, err := b.expireLocked(ctx, itemID); err != nil {
+		return err
+	} else if expired {
 		return ErrLeaseExpired
 	}
-	claim, ok := b.active[itemID]
+
+	claim, ok, err := b.repo.GetActiveClaim(ctx, itemID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrLeaseExpired
 	}
@@ -416,37 +467,65 @@ func (b *Board) Release(itemID string, epoch int64) error {
 			item.Status = StatusApproved
 		}
 	}
-
-	claim.Status = ClaimReleased
+	item.LastIdempotencyKey = ""
 	item.UpdatedAt = now
-	item.Version++
-	delete(b.active, itemID)
-	delete(b.lastSubmit, itemID)
-	return nil
+	claim.Status = ClaimReleased
+
+	if err := b.repo.UpdateItem(ctx, item, item.Version); err != nil {
+		return err
+	}
+	if err := b.repo.SaveClaim(ctx, claim); err != nil {
+		return err
+	}
+	return b.appendEvent(ctx, itemID, "released", claim.AgentID)
 }
 
 // Expire reclaims an expired lease and reports whether it did so.
-func (b *Board) Expire(itemID string) bool {
+func (b *Board) Expire(ctx context.Context, itemID string) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.expireLocked(itemID)
+	return b.expireLocked(ctx, itemID)
 }
 
 // Claimable returns items that role may claim, ordered by priority then age.
-func (b *Board) Claimable(role Role) []WorkItem {
+func (b *Board) Claimable(ctx context.Context, role Role) ([]WorkItem, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	var out []WorkItem
-	for id, item := range b.items {
-		b.expireLocked(id)
-		if _, ok := b.active[id]; ok {
+	status := statusForRole(role)
+	if status == "" {
+		return nil, fmt.Errorf("invalid role %q", role)
+	}
+
+	items, err := b.repo.ListItems(ctx, status, "")
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]WorkItem, 0, len(items))
+	for _, item := range items {
+		expired, err := b.expireLocked(ctx, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		if expired {
+			item, err = b.repo.GetItem(ctx, item.ID)
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+		if _, ok, err := b.repo.GetActiveClaim(ctx, item.ID); err != nil {
+			return nil, err
+		} else if ok {
 			continue
 		}
-		if b.checkClaimableLocked(item, role) != nil {
+		if b.checkClaimableLocked(ctx, &item, role) != nil {
 			continue
 		}
-		out = append(out, cloneItem(item))
+		out = append(out, item)
 	}
 
 	sort.Slice(out, func(i, j int) bool {
@@ -458,10 +537,10 @@ func (b *Board) Claimable(role Role) []WorkItem {
 		}
 		return out[i].ID < out[j].ID
 	})
-	return out
+	return out, nil
 }
 
-func (b *Board) checkClaimableLocked(item *WorkItem, role Role) error {
+func (b *Board) checkClaimableLocked(ctx context.Context, item *WorkItem, role Role) error {
 	switch role {
 	case RoleWorker:
 		if item.Attempts >= MaxAttempts {
@@ -471,8 +550,8 @@ func (b *Board) checkClaimableLocked(item *WorkItem, role Role) error {
 			return ErrInvalidTransition
 		}
 		for _, dep := range item.DependsOn {
-			d, ok := b.items[dep]
-			if !ok || d.Status != StatusDone {
+			d, err := b.repo.GetItem(ctx, dep)
+			if err != nil || d.Status != StatusDone {
 				return ErrDependencyNotDone
 			}
 		}
@@ -491,18 +570,23 @@ func (b *Board) checkClaimableLocked(item *WorkItem, role Role) error {
 }
 
 // expireLocked requeues an active lease that has passed its deadline.
-func (b *Board) expireLocked(itemID string) bool {
-	claim, ok := b.active[itemID]
+func (b *Board) expireLocked(ctx context.Context, itemID string) (bool, error) {
+	claim, ok, err := b.repo.GetActiveClaim(ctx, itemID)
+	if err != nil {
+		return false, err
+	}
 	if !ok {
-		return false
+		return false, nil
 	}
 	now := b.now()
 	if claim.LeaseExpiresAt > now {
-		return false
+		return false, nil
 	}
 
-	item := b.items[itemID]
-	claim.Status = ClaimExpired
+	item, err := b.repo.GetItem(ctx, itemID)
+	if err != nil {
+		return false, err
+	}
 	switch claim.Role {
 	case RoleWorker:
 		if item.Status == StatusRunning {
@@ -515,14 +599,43 @@ func (b *Board) expireLocked(itemID string) bool {
 			item.Status = StatusApproved
 		}
 	}
-
 	item.LeaseExpiries++
+	item.LastIdempotencyKey = ""
 	item.UpdatedAt = now
-	item.Version++
+	claim.Status = ClaimExpired
 
-	delete(b.active, itemID)
-	delete(b.lastSubmit, itemID)
-	return true
+	if err := b.repo.UpdateItem(ctx, item, item.Version); err != nil {
+		return false, err
+	}
+	if err := b.repo.SaveClaim(ctx, claim); err != nil {
+		return false, err
+	}
+	if err := b.appendEvent(ctx, itemID, "expired", claim.AgentID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (b *Board) appendEvent(ctx context.Context, itemID, typ, actor string) error {
+	return b.repo.AppendEvent(ctx, Event{
+		WorkItemID: itemID,
+		Type:       typ,
+		Actor:      actor,
+		CreatedAt:  b.now(),
+	})
+}
+
+func statusForRole(role Role) Status {
+	switch role {
+	case RoleWorker:
+		return StatusOpen
+	case RoleVerifier:
+		return StatusReview
+	case RoleIntegrator:
+		return StatusApproved
+	default:
+		return ""
+	}
 }
 
 func cloneItem(in *WorkItem) WorkItem {

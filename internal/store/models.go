@@ -4,25 +4,26 @@ package store
 // fields are JSON blobs so the contract can evolve without a migration for
 // every new acceptance field.
 type WorkItemModel struct {
-	ID                string `gorm:"primaryKey;size:64"`
-	WorkspaceID       string `gorm:"index;size:64"`
-	ParentID          string `gorm:"index;size:64"`
-	Title             string `gorm:"size:200"`
-	Brief             string `gorm:"type:text"`
-	ContractJSON      []byte `gorm:"type:blob"`
-	CapabilitiesJSON  []byte `gorm:"type:blob"`
-	ExecutionSite     string `gorm:"size:16"`
-	RequiredModesJSON []byte `gorm:"type:blob"`
-	DependsOnJSON     []byte `gorm:"type:blob"`
-	Priority          int    `gorm:"index"`
-	Status            string `gorm:"index;size:16"`
-	Attempts          int
-	LeaseExpiries     int
-	Replicas          int
-	CreatedBy         string `gorm:"size:64"`
-	Version           int64  `gorm:"index"`
-	CreatedAt         int64
-	UpdatedAt         int64
+	ID                 string `gorm:"primaryKey;size:64"`
+	WorkspaceID        string `gorm:"index;size:64"`
+	ParentID           string `gorm:"index;size:64"`
+	Title              string `gorm:"size:200"`
+	Brief              string `gorm:"type:text"`
+	ContractJSON       []byte `gorm:"type:blob"`
+	CapabilitiesJSON   []byte `gorm:"type:blob"`
+	ExecutionSite      string `gorm:"size:16"`
+	RequiredModesJSON  []byte `gorm:"type:blob"`
+	DependsOnJSON      []byte `gorm:"type:blob"`
+	Priority           int    `gorm:"index"`
+	Status             string `gorm:"index;size:16"`
+	Attempts           int
+	LeaseExpiries      int
+	Replicas           int
+	CreatedBy          string `gorm:"size:64"`
+	LastIdempotencyKey string `gorm:"index;size:64"`
+	Version            int64  `gorm:"index"`
+	CreatedAt          int64
+	UpdatedAt          int64
 }
 
 func (WorkItemModel) TableName() string { return "work_items" }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"janus/internal/api"
+	"janus/internal/mcp"
 	"janus/internal/store"
 	"janus/internal/verify"
 	"janus/internal/work"
@@ -64,18 +66,33 @@ func run() error {
 	keys.Add(apiKey, api.Identity{AgentID: *agentID, Scopes: []api.Scope{api.ScopeAdmin}})
 
 	server := api.New(svc, keys)
+	mcpServer := mcp.New(svc, keys)
+	mcpServer.Version = version
+
 	if strings.TrimSpace(*workspace) != "" {
 		// One workspace per process for now. Per-item execution sites (server
 		// vs client) need a runner factory that resolves the item's checkout.
 		runner := verify.NewRunner(*workspace)
-		server.RunnerFor = func(context.Context, work.WorkItem) (work.CheckRunner, error) {
+		runFor := func(context.Context, work.WorkItem) (work.CheckRunner, error) {
 			return runner, nil
 		}
+		server.RunnerFor = runFor
+		mcpServer.RunnerFor = runFor
 	}
+
+	// One mux for both transports; neither registers a catch-all.
+	mux := http.NewServeMux()
+	server.Register(mux)
+	mcpServer.Register(mux)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"error":{"code":"not_found","message":"no such endpoint"}}`+"\n")
+	})
 
 	httpServer := &http.Server{
 		Addr:              *addr,
-		Handler:           server.Handler(),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      5 * time.Minute,

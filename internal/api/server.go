@@ -44,10 +44,20 @@ func New(svc *worksvc.Service, auth Authenticator) *Server {
 	return &Server{Svc: svc, Auth: auth}
 }
 
-// Handler returns the routed, authenticated handler.
+// Handler returns a standalone handler that answers unknown paths with a JSON
+// 404. Use Register when mounting next to another transport.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.Register(mux)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "not_found", "no such endpoint")
+	})
+	return s.recover(mux)
+}
 
+// Register mounts the work-board routes on mux. It deliberately registers no
+// catch-all so a parent mux can also serve other transports.
+func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/work-items", s.handleList)
 	mux.HandleFunc("POST /api/v1/work-items", s.protect(ScopeWrite, s.handleCreate))
@@ -60,12 +70,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/work-items/{id}/verify", s.protect(ScopeVerify, s.handleVerify))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/verdict", s.protect(ScopeVerify, s.handleVerdict))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/complete", s.protect(ScopeIntegrate, s.handleComplete))
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusNotFound, "not_found", "no such endpoint")
-	})
-
-	return s.recover(mux)
 }
 
 // protect authenticates the caller and checks the required scope before the
@@ -257,14 +261,13 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request, id Identit
 	if !decode(w, r, s.maxBody(), &req) {
 		return
 	}
-	if s.RunnerFor == nil {
-		writeError(w, http.StatusNotImplemented, "runner_unavailable", "no check runner configured for this deployment")
-		return
-	}
-
 	item, ok := s.Svc.Board.Get(r.Context(), r.PathValue("id"))
 	if !ok {
 		s.fail(w, r, work.ErrNotFound)
+		return
+	}
+	if s.RunnerFor == nil {
+		writeError(w, http.StatusNotImplemented, "runner_unavailable", "no check runner configured for this deployment")
 		return
 	}
 	runner, err := s.RunnerFor(r.Context(), item)
@@ -351,6 +354,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	writeError(w, status, code, err.Error())
 }
+
+// Classify maps a domain error to an HTTP status and a stable code. MCP reuses
+// it so both transports report the same code for the same failure.
+func Classify(err error) (int, string) { return classify(err) }
 
 func classify(err error) (int, string) {
 	switch {

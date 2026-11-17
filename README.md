@@ -73,6 +73,33 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/work-items/w1/claim \
   -d '{"role":"worker","plan":"implement","lease_seconds":1200}'
 ```
 
+## MCP
+
+同一个进程同时提供 MCP：`POST /mcp/{token}`，或 `POST /mcp` 加 `X-API-Key`。
+JSON-RPC 2.0，支持 `initialize`、`ping`、`tools/list`、`tools/call`；
+`notifications/*` 返回 202 无 body。
+
+工具与 HTTP 端点一一对应，规则、scope、错误码完全一致：
+
+```
+work_list  work_get  work_handoff  work_create
+work_claim work_heartbeat work_release
+work_submit work_verify work_verdict work_complete
+```
+
+`tools/call` 的失败是**结果**不是协议错误：返回
+`{"content":[{"type":"text","text":"{\"error\":{\"code\",\"message\"}}" }],"isError":true}`，
+模型能看到原因并改正参数；只有鉴权、方法不存在、参数无法解析才走 JSON-RPC error。
+
+鉴权对所有方法生效，没有 key 连 `initialize` 也不通。注意令牌在路径里会进入访问日志，
+生产更推荐 `X-API-Key`。
+
+```bash
+curl -s -X POST "http://127.0.0.1:8080/mcp/$JANUS_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"work_list","arguments":{}}}'
+```
+
 ## 目录
 
 见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。

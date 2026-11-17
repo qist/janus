@@ -102,6 +102,7 @@ janus/
 | `internal/contextpack` | 认领交接包：brief + 胶囊 + 最近拒绝 + workspace 事实 |
 | `internal/worksvc` | 组合层：租约 + 交接包、证据/失败回写胶囊、租约持有者校验 |
 | `internal/api` | HTTP 传输层：`/api/v1/work-items/*`、鉴权与错误映射 |
+| `internal/mcp` | MCP 传输层：`/mcp` JSON-RPC、`work_*` 工具，复用同一批 scope 与错误码 |
 
 依赖方向同样成立：`api → worksvc → work/contextpack/capsule`，`store` 实现接口但不被领域包 import。
 

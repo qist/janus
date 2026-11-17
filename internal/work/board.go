@@ -131,6 +131,11 @@ func (b *Board) ClaimOf(ctx context.Context, itemID string) (Claim, bool) {
 	return claim, ok
 }
 
+// Reviews returns the verifier history for an item, oldest first.
+func (b *Board) Reviews(ctx context.Context, itemID string) ([]Review, error) {
+	return b.repo.ListReviews(ctx, itemID)
+}
+
 // Claim takes a lease for role. Worker: open -> running. Verifier: review
 // stays review. Integrator: approved -> integrating.
 func (b *Board) Claim(ctx context.Context, itemID, agentID string, role Role, plan string, leaseSeconds int64) (Claim, error) {

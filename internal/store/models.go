@@ -78,6 +78,25 @@ type WorkReviewModel struct {
 
 func (WorkReviewModel) TableName() string { return "work_reviews" }
 
+// WorkCapsuleModel is the persisted form of capsule.Capsule. The indexed
+// columns duplicate a few body fields for querying; Body stays authoritative.
+type WorkCapsuleModel struct {
+	ID            string `gorm:"primaryKey;size:64"`
+	WorkItemID    string `gorm:"index;size:64"`
+	WorkspaceID   string `gorm:"index;size:64"`
+	Kind          string `gorm:"index;size:16"`
+	Version       int    `gorm:"index"`
+	BaseCommit    string `gorm:"index;size:64"`
+	PrefixVersion string `gorm:"size:64"`
+	Stale         bool   `gorm:"index"`
+	BudgetTokens  int
+	Body          []byte `gorm:"type:blob"`
+	CreatedAt     int64
+	UpdatedAt     int64
+}
+
+func (WorkCapsuleModel) TableName() string { return "work_capsules" }
+
 // WorkEventModel is an append-only audit/SSE record.
 type WorkEventModel struct {
 	ID         uint   `gorm:"primaryKey;autoIncrement"`

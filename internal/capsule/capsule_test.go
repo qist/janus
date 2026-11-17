@@ -149,14 +149,14 @@ func TestTrimDropsLowestPriorityFirst(t *testing.T) {
 	c.Failures = []Failure{{Attempt: 1, Summary: strings.Repeat("f", 200)}}
 	c.OpenQuestions = []string{strings.Repeat("q", 200)}
 	c.Artifacts = []ArtifactRef{{ID: "a1", Kind: "diff"}}
-	c.budget = 120
+	c.BudgetTokens = 120
 
 	removed := c.Trim()
 	if removed == 0 {
 		t.Fatal("Trim removed nothing")
 	}
-	if c.UsedTokens() > c.budget {
-		t.Fatalf("still over budget: %d > %d", c.UsedTokens(), c.budget)
+	if c.UsedTokens() > c.Budget() {
+		t.Fatalf("still over budget: %d > %d", c.UsedTokens(), c.Budget())
 	}
 	if c.Goal != "goal" || len(c.Constraints) != 1 {
 		t.Fatalf("protected fields were dropped: %+v", c)
@@ -169,7 +169,7 @@ func TestTrimDropsLowestPriorityFirst(t *testing.T) {
 func TestTrimKeepsProtectedFieldsAndReportsFailure(t *testing.T) {
 	c := New("cap-1", "w1", KindDefault, fixedClock(100))
 	c.Constraints = []string{strings.Repeat("c", 4000)}
-	c.budget = 10
+	c.BudgetTokens = 10
 
 	if removed := c.Trim(); removed != 0 {
 		t.Fatalf("removed = %d, want 0", removed)

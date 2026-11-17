@@ -94,8 +94,11 @@ type Capsule struct {
 	CreatedAt int64 `json:"created_at"`
 	UpdatedAt int64 `json:"updated_at"`
 
-	budget int
-	now    func() int64
+	// BudgetTokens is persisted with the capsule so a reload keeps the same
+	// limit even if BudgetFor changes later.
+	BudgetTokens int `json:"budget_tokens"`
+
+	now func() int64
 }
 
 // New creates an empty capsule at version 1. now may be nil.
@@ -109,26 +112,26 @@ func New(id, workItemID string, kind Kind, now func() int64) *Capsule {
 	}
 	ts := now()
 	return &Capsule{
-		ID:         id,
-		WorkItemID: workItemID,
-		Kind:       kind,
-		Version:    1,
-		CreatedAt:  ts,
-		UpdatedAt:  ts,
-		budget:     budget,
-		now:        now,
+		ID:           id,
+		WorkItemID:   workItemID,
+		Kind:         kind,
+		Version:      1,
+		CreatedAt:    ts,
+		UpdatedAt:    ts,
+		BudgetTokens: budget,
+		now:          now,
 	}
 }
 
-// Budget is the token cap for this capsule.
-func (c *Capsule) Budget() int { return c.budget }
+// Budget is the effective token cap for this capsule.
+func (c *Capsule) Budget() int { return c.budgetLimit() }
 
 // UsedTokens is the estimated size of the rendered body.
 func (c *Capsule) UsedTokens() int { return EstimateTokens(c.body()) }
 
 // Remaining is the number of tokens still available.
 func (c *Capsule) Remaining() int {
-	left := c.budget - c.UsedTokens()
+	left := c.budgetLimit() - c.UsedTokens()
 	if left < 0 {
 		return 0
 	}
@@ -138,7 +141,7 @@ func (c *Capsule) Remaining() int {
 func (c *Capsule) SetGoal(text string) error {
 	old := c.Goal
 	c.Goal = strings.TrimSpace(text)
-	if c.UsedTokens() > c.budget {
+	if c.UsedTokens() > c.budgetLimit() {
 		c.Goal = old
 		return c.budgetError()
 	}
@@ -164,7 +167,7 @@ func (c *Capsule) AddDecision(text, rationale string) error {
 		return errors.New("decision text required")
 	}
 	c.Decisions = append(c.Decisions, Decision{Text: text, Rationale: strings.TrimSpace(rationale), CreatedAt: c.now()})
-	if c.UsedTokens() > c.budget {
+	if c.UsedTokens() > c.budgetLimit() {
 		c.Decisions = c.Decisions[:len(c.Decisions)-1]
 		return c.budgetError()
 	}
@@ -178,7 +181,7 @@ func (c *Capsule) AddFailure(attempt int, summary, reason string) error {
 		return errors.New("failure summary required")
 	}
 	c.Failures = append(c.Failures, Failure{Attempt: attempt, Summary: summary, Reason: strings.TrimSpace(reason), CreatedAt: c.now()})
-	if c.UsedTokens() > c.budget {
+	if c.UsedTokens() > c.budgetLimit() {
 		c.Failures = c.Failures[:len(c.Failures)-1]
 		return c.budgetError()
 	}
@@ -198,7 +201,7 @@ func (c *Capsule) AddArtifact(ref ArtifactRef) error {
 		}
 	}
 	c.Artifacts = append(c.Artifacts, ref)
-	if c.UsedTokens() > c.budget {
+	if c.UsedTokens() > c.budgetLimit() {
 		c.Artifacts = c.Artifacts[:len(c.Artifacts)-1]
 		return c.budgetError()
 	}
@@ -212,7 +215,7 @@ func (c *Capsule) AddArtifact(ref ArtifactRef) error {
 // Trim returns 0 and the caller must shorten them.
 func (c *Capsule) Trim() int {
 	removed := 0
-	for c.UsedTokens() > c.budget {
+	for c.UsedTokens() > c.budgetLimit() {
 		switch {
 		case len(c.Decisions) > 0:
 			c.Decisions = c.Decisions[1:]
@@ -261,7 +264,7 @@ func (c *Capsule) Rebase(baseCommit string) {
 func (c *Capsule) Render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "capsule %s v%d kind=%s base=%s tokens=%d/%d",
-		c.ID, c.Version, c.Kind, c.BaseCommit, c.UsedTokens(), c.budget)
+		c.ID, c.Version, c.Kind, c.BaseCommit, c.UsedTokens(), c.budgetLimit())
 	if c.StaleFlag {
 		b.WriteString(" stale=true")
 	}
@@ -324,7 +327,7 @@ func (c *Capsule) appendString(dst *[]string, text string) error {
 		return errors.New("capsule entry required")
 	}
 	*dst = append(*dst, text)
-	if c.UsedTokens() > c.budget {
+	if c.UsedTokens() > c.budgetLimit() {
 		*dst = (*dst)[:len(*dst)-1]
 		return c.budgetError()
 	}
@@ -333,7 +336,7 @@ func (c *Capsule) appendString(dst *[]string, text string) error {
 }
 
 func (c *Capsule) budgetError() error {
-	return fmt.Errorf("%w: %d/%d, archive or trim first", ErrBudgetExceeded, c.UsedTokens(), c.budget)
+	return fmt.Errorf("%w: %d/%d, archive or trim first", ErrBudgetExceeded, c.UsedTokens(), c.budgetLimit())
 }
 
 func (c *Capsule) touch() {

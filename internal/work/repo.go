@@ -15,6 +15,9 @@ type Repository interface {
 	NextLeaseEpoch(ctx context.Context, itemID string) (int64, error)
 	ListClaims(ctx context.Context, itemID string) ([]Claim, error)
 
+	CreateReview(ctx context.Context, review Review) error
+	ListReviews(ctx context.Context, itemID string) ([]Review, error)
+
 	AppendEvent(ctx context.Context, event Event) error
 
 	// Transact runs fn as one atomic unit. Every read and write inside fn must

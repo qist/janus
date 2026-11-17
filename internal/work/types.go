@@ -198,15 +198,17 @@ type Artifact struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
-// Review is one verifier decision with its evidence references.
+// Review is one verifier decision with its evidence references and the checks
+// the verifier actually re-ran in a clean workspace.
 type Review struct {
-	ID         string   `json:"id"`
-	WorkItemID string   `json:"work_item_id"`
-	ReviewerID string   `json:"reviewer_id"`
-	Verdict    Verdict  `json:"verdict"`
-	Reasons    string   `json:"reasons"`
-	Evidence   []string `json:"evidence,omitempty"`
-	CreatedAt  int64    `json:"created_at"`
+	ID         string        `json:"id"`
+	WorkItemID string        `json:"work_item_id"`
+	ReviewerID string        `json:"reviewer_id"`
+	Verdict    Verdict       `json:"verdict"`
+	Reasons    string        `json:"reasons"`
+	Evidence   []string      `json:"evidence,omitempty"`
+	Checks     []CheckResult `json:"checks,omitempty"`
+	CreatedAt  int64         `json:"created_at"`
 }
 
 // Event is one append-only work-board event.

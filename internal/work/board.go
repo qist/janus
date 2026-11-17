@@ -35,6 +35,7 @@ var (
 	ErrCheckNotRun         = errors.New("contract check missing from evidence")
 	ErrCheckFailed         = errors.New("contract check failed")
 	ErrSelfReview          = errors.New("verifier must differ from the submitter")
+	ErrVerifyRequired      = errors.New("verifier must re-run contract checks before approve")
 )
 
 // Board is the single work-board state machine. It reads and writes only
@@ -341,9 +342,84 @@ func (b *Board) Submit(ctx context.Context, itemID string, epoch int64, idempote
 	})
 }
 
+// CheckRunner executes contract checks in a clean workspace. verify.Runner
+// implements it; the Board never shells out itself.
+type CheckRunner interface {
+	Run(ctx context.Context, checks []Check) ([]CheckResult, error)
+}
+
+// Verify runs the contract checks for a verifier lease without changing state.
+// The returned results are what the verifier must hand back to
+// VerdictWithChecks when approving.
+//
+// The board lock is not held while the commands run: a check suite can take
+// minutes and must not block other claims.
+func (b *Board) Verify(ctx context.Context, itemID string, epoch int64, runner CheckRunner) ([]CheckResult, error) {
+	if runner == nil {
+		return nil, errors.New("check runner required")
+	}
+
+	item, err := b.verifierLease(ctx, itemID, epoch)
+	if err != nil {
+		return nil, err
+	}
+	results, err := runner.Run(ctx, item.Contract.Checks)
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// verifierLease validates that agent-independent review is allowed right now.
+func (b *Board) verifierLease(ctx context.Context, itemID string, epoch int64) (WorkItem, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if expired, err := b.expireOutside(ctx, itemID); err != nil {
+		return WorkItem{}, err
+	} else if expired {
+		return WorkItem{}, ErrLeaseExpired
+	}
+
+	item, err := b.repo.GetItem(ctx, itemID)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	claim, ok, err := b.repo.GetActiveClaim(ctx, itemID)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if !ok {
+		return WorkItem{}, ErrLeaseExpired
+	}
+	if claim.Role != RoleVerifier {
+		return WorkItem{}, ErrInvalidTransition
+	}
+	if claim.LeaseEpoch != epoch {
+		return WorkItem{}, ErrStaleEpoch
+	}
+	if item.SelfReview(claim.AgentID) {
+		return WorkItem{}, ErrSelfReview
+	}
+	if item.Status != StatusReview {
+		return WorkItem{}, ErrInvalidTransition
+	}
+	return item, nil
+}
+
 // Verdict closes a verifier lease. Approve -> approved. Reject -> open with
 // attempts+1, or blocked at the attempt limit. NeedsHuman -> blocked.
+//
+// Approving an item whose contract declares checks requires the verifier's own
+// re-run results; see VerdictWithChecks.
 func (b *Board) Verdict(ctx context.Context, itemID string, epoch int64, verdict Verdict, reasons string) error {
+	return b.VerdictWithChecks(ctx, itemID, epoch, verdict, reasons, nil)
+}
+
+// VerdictWithChecks records the verdict plus the check results the verifier
+// observed. For approve, every contract check must be present and pass, so a
+// paper review cannot approve a code item.
+func (b *Board) VerdictWithChecks(ctx context.Context, itemID string, epoch int64, verdict Verdict, reasons string, checks []CheckResult) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -378,6 +454,14 @@ func (b *Board) Verdict(ctx context.Context, itemID string, epoch int64, verdict
 		if item.Status != StatusReview {
 			return ErrInvalidTransition
 		}
+		if verdict == VerdictApprove && len(item.Contract.Checks) > 0 {
+			if len(checks) == 0 {
+				return ErrVerifyRequired
+			}
+			if err := validateCheckResults(item.Contract, checks); err != nil {
+				return err
+			}
+		}
 
 		now := b.now()
 		switch verdict {
@@ -404,6 +488,17 @@ func (b *Board) Verdict(ctx context.Context, itemID string, epoch int64, verdict
 		item.UpdatedAt = now
 		claim.Note = reasons
 
+		if err := repo.CreateReview(ctx, Review{
+			ID:         fmt.Sprintf("rv_%s_%d", itemID, epoch),
+			WorkItemID: itemID,
+			ReviewerID: claim.AgentID,
+			Verdict:    verdict,
+			Reasons:    reasons,
+			Checks:     checks,
+			CreatedAt:  now,
+		}); err != nil {
+			return err
+		}
 		if err := repo.UpdateItem(ctx, item, item.Version); err != nil {
 			return err
 		}

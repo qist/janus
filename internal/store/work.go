@@ -397,6 +397,10 @@ func reviewToModel(r work.Review) (WorkReviewModel, error) {
 	if err != nil {
 		return WorkReviewModel{}, fmt.Errorf("encode review evidence: %w", err)
 	}
+	checks, err := json.Marshal(r.Checks)
+	if err != nil {
+		return WorkReviewModel{}, fmt.Errorf("encode review checks: %w", err)
+	}
 	return WorkReviewModel{
 		ID:           r.ID,
 		WorkItemID:   r.WorkItemID,
@@ -404,6 +408,7 @@ func reviewToModel(r work.Review) (WorkReviewModel, error) {
 		Verdict:      string(r.Verdict),
 		Reasons:      r.Reasons,
 		EvidenceJSON: evidence,
+		ChecksJSON:   checks,
 		CreatedAt:    r.CreatedAt,
 	}, nil
 }
@@ -419,6 +424,9 @@ func reviewFromModel(m WorkReviewModel) (work.Review, error) {
 	}
 	if err := decodeJSON(m.EvidenceJSON, &r.Evidence); err != nil {
 		return work.Review{}, fmt.Errorf("decode review evidence: %w", err)
+	}
+	if err := decodeJSON(m.ChecksJSON, &r.Checks); err != nil {
+		return work.Review{}, fmt.Errorf("decode review checks: %w", err)
 	}
 	return r, nil
 }

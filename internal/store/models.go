@@ -72,6 +72,7 @@ type WorkReviewModel struct {
 	Verdict      string `gorm:"size:16"`
 	Reasons      string `gorm:"size:2048"`
 	EvidenceJSON []byte `gorm:"type:blob"`
+	ChecksJSON   []byte `gorm:"type:blob"`
 	CreatedAt    int64
 }
 

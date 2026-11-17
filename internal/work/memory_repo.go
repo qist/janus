@@ -11,6 +11,7 @@ type MemoryRepo struct {
 	mu          sync.Mutex
 	items       map[string]WorkItem
 	claims      map[string][]Claim
+	reviews     map[string][]Review
 	active      map[string]string
 	epochs      map[string]int64
 	events      []Event
@@ -19,10 +20,11 @@ type MemoryRepo struct {
 
 func NewMemoryRepo() *MemoryRepo {
 	return &MemoryRepo{
-		items:  make(map[string]WorkItem),
-		claims: make(map[string][]Claim),
-		active: make(map[string]string),
-		epochs: make(map[string]int64),
+		items:   make(map[string]WorkItem),
+		claims:  make(map[string][]Claim),
+		reviews: make(map[string][]Review),
+		active:  make(map[string]string),
+		epochs:  make(map[string]int64),
 	}
 }
 
@@ -154,6 +156,24 @@ func (r *MemoryRepo) ListClaims(_ context.Context, itemID string) ([]Claim, erro
 	return out, nil
 }
 
+func (r *MemoryRepo) CreateReview(_ context.Context, review Review) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.reviews[review.WorkItemID] = append(r.reviews[review.WorkItemID], review)
+	return nil
+}
+
+func (r *MemoryRepo) ListReviews(_ context.Context, itemID string) ([]Review, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	reviews := r.reviews[itemID]
+	out := make([]Review, len(reviews))
+	copy(out, reviews)
+	return out, nil
+}
+
 func (r *MemoryRepo) AppendEvent(_ context.Context, event Event) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -179,6 +199,7 @@ func (r *MemoryRepo) Transact(ctx context.Context, fn func(ctx context.Context, 
 type memorySnapshot struct {
 	items       map[string]WorkItem
 	claims      map[string][]Claim
+	reviews     map[string][]Review
 	active      map[string]string
 	epochs      map[string]int64
 	events      []Event
@@ -192,6 +213,7 @@ func (r *MemoryRepo) snapshot() memorySnapshot {
 	s := memorySnapshot{
 		items:       make(map[string]WorkItem, len(r.items)),
 		claims:      make(map[string][]Claim, len(r.claims)),
+		reviews:     make(map[string][]Review, len(r.reviews)),
 		active:      make(map[string]string, len(r.active)),
 		epochs:      make(map[string]int64, len(r.epochs)),
 		events:      append([]Event(nil), r.events...),
@@ -203,6 +225,9 @@ func (r *MemoryRepo) snapshot() memorySnapshot {
 	}
 	for id, claims := range r.claims {
 		s.claims[id] = append([]Claim(nil), claims...)
+	}
+	for id, reviews := range r.reviews {
+		s.reviews[id] = append([]Review(nil), reviews...)
 	}
 	for id, claimID := range r.active {
 		s.active[id] = claimID
@@ -219,6 +244,7 @@ func (r *MemoryRepo) restore(s memorySnapshot) {
 
 	r.items = s.items
 	r.claims = s.claims
+	r.reviews = s.reviews
 	r.active = s.active
 	r.epochs = s.epochs
 	r.events = s.events

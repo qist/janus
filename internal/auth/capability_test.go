@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -92,10 +94,19 @@ func TestCapabilityTampered(t *testing.T) {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	tampered := token[:len(token)-1] + "A"
-	if tampered == token {
-		tampered = token[:len(token)-1] + "B"
+	// Flip a payload byte rather than a base64 character: the last base64
+	// character carries padding bits, so changing it can decode identically.
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		t.Fatalf("token = %q, want two parts", token)
 	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	payload[0] ^= 0xff
+	tampered := base64.RawURLEncoding.EncodeToString(payload) + "." + parts[1]
+
 	if _, err := a.Verify(tampered, testAction()); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("Verify = %v, want ErrInvalidToken", err)
 	}

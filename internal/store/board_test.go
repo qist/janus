@@ -73,6 +73,14 @@ func TestBoardWithSQLiteRepository(t *testing.T) {
 	if err := b2.Verdict(ctx, "w1", v.LeaseEpoch, work.VerdictApprove, "ok"); err != nil {
 		t.Fatalf("verdict: %v", err)
 	}
+
+	reviews, err := s2.ListReviews(ctx, "w1")
+	if err != nil {
+		t.Fatalf("ListReviews: %v", err)
+	}
+	if len(reviews) != 1 || reviews[0].Verdict != work.VerdictApprove || reviews[0].ReviewerID != "verifier-1" {
+		t.Fatalf("reviews = %+v", reviews)
+	}
 	i, err := b2.Claim(ctx, "w1", "integrator-1", work.RoleIntegrator, "merge", 60)
 	if err != nil {
 		t.Fatalf("integrator claim: %v", err)

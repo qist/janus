@@ -26,10 +26,16 @@ func validateEvidence(c Contract, ev Evidence) error {
 	if len(ev.Artifacts) == 0 && strings.TrimSpace(ev.DiffHash) == "" {
 		return ErrEvidenceMissing
 	}
+	return validateCheckResults(c, ev.Checks)
+}
 
-	results := make(map[string]CheckResult, len(ev.Checks))
-	for _, r := range ev.Checks {
-		results[strings.TrimSpace(r.Name)] = r
+// validateCheckResults requires one real result per contract check, with the
+// expected exit code. Used both for the worker's submit evidence and for the
+// verifier's independent re-run before approving.
+func validateCheckResults(c Contract, results []CheckResult) error {
+	byName := make(map[string]CheckResult, len(results))
+	for _, r := range results {
+		byName[strings.TrimSpace(r.Name)] = r
 	}
 
 	for _, check := range c.Checks {
@@ -37,7 +43,7 @@ func validateEvidence(c Contract, ev Evidence) error {
 		if name == "" {
 			continue
 		}
-		result, ok := results[name]
+		result, ok := byName[name]
 		if !ok {
 			return fmt.Errorf("%w: %s", ErrCheckNotRun, name)
 		}

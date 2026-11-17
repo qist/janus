@@ -41,6 +41,8 @@ func NewRunner(root string) *Runner {
 	return &Runner{Root: root, Shell: "sh"}
 }
 
+var _ work.CheckRunner = (*Runner)(nil)
+
 // Run executes every check in order and returns one result per check. It only
 // fails when the runner itself is misconfigured; a failing command is data,
 // not an error.

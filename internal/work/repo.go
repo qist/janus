@@ -16,4 +16,12 @@ type Repository interface {
 	ListClaims(ctx context.Context, itemID string) ([]Claim, error)
 
 	AppendEvent(ctx context.Context, event Event) error
+
+	// Transact runs fn as one atomic unit. Every read and write inside fn must
+	// go through the Repository passed to it; the outer repository must not be
+	// used, otherwise the write falls outside the transaction.
+	//
+	// If fn returns an error, all writes are rolled back. Implementations must
+	// not allow nested Transact calls to open independent transactions.
+	Transact(ctx context.Context, fn func(ctx context.Context, repo Repository) error) error
 }

@@ -5,10 +5,21 @@ import (
 	"errors"
 	"fmt"
 
+	"gorm.io/gorm"
+
 	"janus/internal/work"
 )
 
 var _ work.Repository = (*Store)(nil)
+
+// Transact runs fn inside a single database transaction and hands fn a
+// repository bound to that transaction. Using s directly inside fn would
+// escape the transaction, so callers must use the supplied repo.
+func (s *Store) Transact(ctx context.Context, fn func(context.Context, work.Repository) error) error {
+	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(ctx, &Store{DB: tx})
+	})
+}
 
 func (s *Store) CreateItem(ctx context.Context, item work.WorkItem) error {
 	return s.CreateWorkItem(ctx, item)

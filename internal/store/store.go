@@ -26,19 +26,39 @@ func Open(path string) (*Store, error) {
 		return nil, errors.New("database path required")
 	}
 
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{
+	// Pragmas must be set per connection; a one-off PRAGMA exec only affects
+	// whichever pooled connection happened to serve it.
+	//
+	// _txlock=immediate is the important one: every gorm transaction starts
+	// with BEGIN IMMEDIATE, taking the write lock up front. Two deferred
+	// transactions that read first and then write cannot both upgrade, and
+	// one gets SQLITE_BUSY immediately instead of waiting; immediate avoids
+	// that class of failure entirely and lets busy_timeout do its job.
+	dsn := path
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	dsn += sep + "_busy_timeout=5000&_journal_mode=wal&_txlock=immediate"
+
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
 
-	if err := db.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
-		return nil, fmt.Errorf("enable wal: %w", err)
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite pool: %w", err)
 	}
-	if err := db.Exec("PRAGMA busy_timeout=5000").Error; err != nil {
-		return nil, fmt.Errorf("set busy_timeout: %w", err)
-	}
+	// SQLite still has one writer at a time. Keeping a single connection makes
+	// writes serial in-process and makes DBStatus() counters exact (they are
+	// per connection). With _txlock=immediate, raising this later is safe;
+	// multiple processes on the same file fall back to busy_timeout.
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+
 	if err := db.AutoMigrate(
 		&WorkItemModel{},
 		&WorkClaimModel{},

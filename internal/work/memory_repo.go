@@ -163,3 +163,64 @@ func (r *MemoryRepo) AppendEvent(_ context.Context, event Event) error {
 	r.events = append(r.events, event)
 	return nil
 }
+
+// Transact snapshots the in-memory state, runs fn, and restores the snapshot
+// if fn fails. It is not safe to interleave with another Transact on the same
+// MemoryRepo; the Board's own mutex provides that serialization.
+func (r *MemoryRepo) Transact(ctx context.Context, fn func(ctx context.Context, repo Repository) error) error {
+	snapshot := r.snapshot()
+	if err := fn(ctx, r); err != nil {
+		r.restore(snapshot)
+		return err
+	}
+	return nil
+}
+
+type memorySnapshot struct {
+	items       map[string]WorkItem
+	claims      map[string][]Claim
+	active      map[string]string
+	epochs      map[string]int64
+	events      []Event
+	nextEventID uint64
+}
+
+func (r *MemoryRepo) snapshot() memorySnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s := memorySnapshot{
+		items:       make(map[string]WorkItem, len(r.items)),
+		claims:      make(map[string][]Claim, len(r.claims)),
+		active:      make(map[string]string, len(r.active)),
+		epochs:      make(map[string]int64, len(r.epochs)),
+		events:      append([]Event(nil), r.events...),
+		nextEventID: r.nextEventID,
+	}
+	for id, item := range r.items {
+		current := item
+		s.items[id] = cloneItem(&current)
+	}
+	for id, claims := range r.claims {
+		s.claims[id] = append([]Claim(nil), claims...)
+	}
+	for id, claimID := range r.active {
+		s.active[id] = claimID
+	}
+	for id, epoch := range r.epochs {
+		s.epochs[id] = epoch
+	}
+	return s
+}
+
+func (r *MemoryRepo) restore(s memorySnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.items = s.items
+	r.claims = s.claims
+	r.active = s.active
+	r.epochs = s.epochs
+	r.events = s.events
+	r.nextEventID = s.nextEventID
+}

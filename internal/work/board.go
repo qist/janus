@@ -141,6 +141,11 @@ func (b *Board) ClaimOf(ctx context.Context, itemID string) (Claim, bool) {
 	return claim, ok
 }
 
+// Claims returns the lease history for an item, oldest epoch first.
+func (b *Board) Claims(ctx context.Context, itemID string) ([]Claim, error) {
+	return b.repo.ListClaims(ctx, itemID)
+}
+
 // Reviews returns the verifier history for an item, oldest first.
 func (b *Board) Reviews(ctx context.Context, itemID string) ([]Review, error) {
 	return b.repo.ListReviews(ctx, itemID)
@@ -149,6 +154,11 @@ func (b *Board) Reviews(ctx context.Context, itemID string) ([]Review, error) {
 // Claim takes a lease for role. Worker: open -> running. Verifier: review
 // stays review. Integrator: approved -> integrating.
 func (b *Board) Claim(ctx context.Context, itemID, agentID string, role Role, plan string, leaseSeconds int64) (Claim, error) {
+	return b.ClaimWith(ctx, itemID, Claimant{AgentID: agentID}, role, plan, leaseSeconds)
+}
+
+// ClaimWith takes a lease and records the model identity that will be scored.
+func (b *Board) ClaimWith(ctx context.Context, itemID string, who Claimant, role Role, plan string, leaseSeconds int64) (Claim, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -159,7 +169,7 @@ func (b *Board) Claim(ctx context.Context, itemID, agentID string, role Role, pl
 
 	var claim Claim
 	err := b.repo.Transact(ctx, func(ctx context.Context, repo Repository) error {
-		c, err := b.claim(ctx, repo, itemID, agentID, role, plan, leaseSeconds)
+		c, err := b.claim(ctx, repo, itemID, who, role, plan, leaseSeconds)
 		if err != nil {
 			return err
 		}
@@ -172,12 +182,12 @@ func (b *Board) Claim(ctx context.Context, itemID, agentID string, role Role, pl
 	return claim, nil
 }
 
-func (b *Board) claim(ctx context.Context, repo Repository, itemID, agentID string, role Role, plan string, leaseSeconds int64) (Claim, error) {
+func (b *Board) claim(ctx context.Context, repo Repository, itemID string, who Claimant, role Role, plan string, leaseSeconds int64) (Claim, error) {
 	item, err := repo.GetItem(ctx, itemID)
 	if err != nil {
 		return Claim{}, err
 	}
-	if strings.TrimSpace(agentID) == "" {
+	if strings.TrimSpace(who.AgentID) == "" {
 		return Claim{}, errors.New("agent id required")
 	}
 	if !role.Valid() {
@@ -220,7 +230,11 @@ func (b *Board) claim(ctx context.Context, repo Repository, itemID, agentID stri
 	claim := Claim{
 		ID:             fmt.Sprintf("cl_%s_%d", itemID, epoch),
 		WorkItemID:     itemID,
-		AgentID:        agentID,
+		AgentID:        who.AgentID,
+		ModelID:        who.ModelID,
+		ModelVersion:   who.ModelVersion,
+		ToolMode:       who.ToolMode,
+		TaskClass:      who.TaskClass,
 		Role:           role,
 		LeaseEpoch:     epoch,
 		LeaseExpiresAt: now + leaseSeconds,
@@ -247,7 +261,7 @@ func (b *Board) claim(ctx context.Context, repo Repository, itemID, agentID stri
 	if err := repo.UpdateItem(ctx, item, item.Version); err != nil {
 		return Claim{}, err
 	}
-	if err := b.appendEvent(ctx, repo, itemID, "claimed", agentID); err != nil {
+	if err := b.appendEvent(ctx, repo, itemID, "claimed", who.AgentID); err != nil {
 		return Claim{}, err
 	}
 	return claim, nil

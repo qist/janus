@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"janus/internal/policy"
+	"janus/internal/scoring"
 	"janus/internal/usage"
 	"janus/internal/work"
 	"janus/internal/worksvc"
@@ -42,6 +43,8 @@ type Server struct {
 	Logf func(format string, args ...any)
 	// Usage is the spend ledger exposed at /api/v1/usage; nil answers 501.
 	Usage usage.Ledger
+	// Scores is exposed read-only at /api/v1/scores; nil answers 501.
+	Scores *scoring.Engine
 }
 
 // New returns a server. A nil authenticator rejects every request.
@@ -66,6 +69,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/work-items", s.handleList)
 	mux.HandleFunc("GET /api/v1/usage", s.protect(ScopeRead, s.handleUsage))
+	mux.HandleFunc("GET /api/v1/scores", s.protect(ScopeRead, s.handleScores))
 	mux.HandleFunc("POST /api/v1/work-items", s.protect(ScopeWrite, s.handleCreate))
 	mux.HandleFunc("GET /api/v1/work-items/{id}", s.protect(ScopeRead, s.handleGet))
 	mux.HandleFunc("GET /api/v1/work-items/{id}/handoff", s.protect(ScopeRead, s.handleHandoff))
@@ -192,6 +196,19 @@ func parseUnix(value string) (int64, bool) {
 	return n, true
 }
 
+// handleScores returns the current model tiers, sorted for stable output.
+func (s *Server) handleScores(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.Scores == nil {
+		writeError(w, http.StatusNotImplemented, "scores_unavailable", "scoring is not configured")
+		return
+	}
+	scores := s.Scores.Scores()
+	if scores == nil {
+		scores = []scoring.Score{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scores": scores})
+}
+
 type createRequest struct {
 	WorkItem work.WorkItem `json:"item"`
 }
@@ -242,6 +259,10 @@ type claimRequest struct {
 	Role         work.Role `json:"role"`
 	Plan         string    `json:"plan"`
 	LeaseSeconds int64     `json:"lease_seconds"`
+	ModelID      string    `json:"model_id"`
+	ModelVersion string    `json:"model_version"`
+	ToolMode     string    `json:"tool_mode"`
+	TaskClass    string    `json:"task_class"`
 }
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, id Identity) {
@@ -254,7 +275,14 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, id Identity
 		return
 	}
 
-	result, err := s.Svc.Claim(r.Context(), r.PathValue("id"), id.AgentID, req.Role, req.Plan, req.LeaseSeconds)
+	who := work.Claimant{
+		AgentID:      id.AgentID,
+		ModelID:      req.ModelID,
+		ModelVersion: req.ModelVersion,
+		ToolMode:     req.ToolMode,
+		TaskClass:    req.TaskClass,
+	}
+	result, err := s.Svc.Claim(r.Context(), r.PathValue("id"), who, req.Role, req.Plan, req.LeaseSeconds)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -345,10 +373,11 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request, id Identit
 }
 
 type verdictRequest struct {
-	Epoch   int64              `json:"epoch"`
-	Verdict work.Verdict       `json:"verdict"`
-	Reasons string             `json:"reasons"`
-	Checks  []work.CheckResult `json:"checks"`
+	Epoch        int64                `json:"epoch"`
+	Verdict      work.Verdict         `json:"verdict"`
+	Reasons      string               `json:"reasons"`
+	Checks       []work.CheckResult   `json:"checks"`
+	FailureOwner scoring.FailureOwner `json:"failure_owner"`
 }
 
 func (s *Server) handleVerdict(w http.ResponseWriter, r *http.Request, id Identity) {
@@ -363,7 +392,13 @@ func (s *Server) handleVerdict(w http.ResponseWriter, r *http.Request, id Identi
 		return
 	}
 
-	if err := s.Svc.Verdict(r.Context(), r.PathValue("id"), id.AgentID, req.Epoch, req.Verdict, req.Reasons, req.Checks); err != nil {
+	if req.FailureOwner != "" && !req.FailureOwner.Valid() {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_owner",
+			fmt.Sprintf("unknown failure_owner %q", req.FailureOwner))
+		return
+	}
+
+	if err := s.Svc.Verdict(r.Context(), r.PathValue("id"), id.AgentID, req.Epoch, req.Verdict, req.Reasons, req.Checks, req.FailureOwner); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -484,6 +519,12 @@ func classify(err error) (int, string) {
 		return http.StatusForbidden, "not_lease_holder"
 	case errors.Is(err, worksvc.ErrAuthzUnavailable):
 		return http.StatusNotImplemented, "authz_unavailable"
+	case errors.Is(err, worksvc.ErrTierDenied):
+		return http.StatusForbidden, "tier_denied"
+	case errors.Is(err, worksvc.ErrModelRequired):
+		return http.StatusUnprocessableEntity, "model_required"
+	case errors.Is(err, worksvc.ErrFailureOwnerRequired):
+		return http.StatusUnprocessableEntity, "failure_owner_required"
 	case errors.Is(err, work.ErrVerifyRequired):
 		return http.StatusUnprocessableEntity, "verify_required"
 	default:

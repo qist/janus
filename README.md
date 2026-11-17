@@ -47,15 +47,16 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | POST | `/api/v1/work-items` | write | 建项，body `{"item":{...}}` |
 | GET | `/api/v1/work-items/{id}` | read | 项 + 租约 + 胶囊 + 评审 |
 | GET | `/api/v1/work-items/{id}/handoff` | read | 只读取交接包，不拿租约 |
-| POST | `/api/v1/work-items/{id}/claim` | claim | `{"role","plan","lease_seconds"}` → 租约 + 有界上下文 |
+| POST | `/api/v1/work-items/{id}/claim` | claim | `{"role","plan","lease_seconds","model_id","model_version","tool_mode","task_class"}` → 租约 + 有界上下文 |
 | POST | `/api/v1/work-items/{id}/heartbeat` | claim | `{"epoch","extend_seconds"}` |
 | POST | `/api/v1/work-items/{id}/release` | claim | `{"epoch"}` |
 | POST | `/api/v1/work-items/{id}/submit` | submit | `{"epoch","idempotency_key","evidence"}` |
 | POST | `/api/v1/work-items/{id}/verify` | verify | `{"epoch"}` → verifier 复跑 checks |
-| POST | `/api/v1/work-items/{id}/verdict` | verify | `{"epoch","verdict","reasons","checks"}` |
+| POST | `/api/v1/work-items/{id}/verdict` | verify | `{"epoch","verdict","reasons","checks","failure_owner"}`；reject 必须归因 |
 | POST | `/api/v1/work-items/{id}/complete` | integrate | `{"epoch","idempotency_key"}` |
 | POST | `/api/v1/work-items/{id}/authorize` | authorize | 敏感操作授权，allow 时返回单次能力令牌 |
 | GET | `/api/v1/usage` | read | 用量汇总（按 key/group/工作项/provider/model/账号/时间过滤） |
+| GET | `/api/v1/scores` | read | 模型等级与分数（只读） |
 
 约定：
 
@@ -178,6 +179,36 @@ curl -s "http://127.0.0.1:8080/api/v1/usage?provider=openai&since=1794900000" \
 ```
 
 `cost_usd` 由调用方在知道价格表时填入；账本本身只保证 append-only 与可聚合。
+
+## 打分与准入
+
+认领 Worker 时必须带 `model_id`（以及可选的 `model_version / tool_mode / task_class`），租约把这份身份存进
+`work_claims`，评审和合并都记到**干活的模型**头上，而不是记到当时的 verifier / integrator。
+
+| tier | 能认领 |
+|---|---|
+| `probation`（新 key 默认） | 仅 low 风险、预算 ≤ 50%、非高优、非敏感 |
+| `active` | 普通项；不能接敏感 / critical |
+| `trusted` | 全部，含 auth / 支付 / 迁移 |
+| `suspended` / `retired` | 不可自认领 |
+
+- 分数 = `0.50×Wilson下界 + 0.15×一次通过 + 0.15×可靠性 + 0.12×成本 + 0.08×周期`，零样本为 0。
+- 样本 ≥ 10 时，Wilson < 0.80 / 一次通过 < 0.60 / 可靠性 < 0.85 → 直接 `probation`。
+- 硬闸门：伪造证据、安全或数据事故 → 立即 `suspended`；连续 3 次 model 归因 reject → `suspended`；
+  连续 2 次 → `probation`；租约过期率 > 20%（≥10 次认领）→ `probation`。
+- **reject 必须带 `failure_owner`**（`model|harness|client|task|account|infra`）。只有 `model` 进模型分，
+  其余只留事件——否则一次网络抖动就会冤枉模型。
+- 等级变化全部写 append-only 事件，带分数增量；admin 可 `pin / unpin / reset / reinstate / retire`。
+
+```bash
+# 未带 model_id
+{"error":{"code":"model_required","message":"model_id is required when scoring is enabled"}}
+
+# 新模型接中风险项
+{"error":{"code":"tier_denied","message":"model tier does not allow this claim: probation may only claim low-risk items"}}
+```
+
+`GET /api/v1/scores` 返回当前所有 `(agent, model, task_class, tool_mode, model_version)` 的分数与等级。
 
 ## 目录
 

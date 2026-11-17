@@ -14,6 +14,7 @@ import (
 	"janus/internal/capsule"
 	"janus/internal/contextpack"
 	"janus/internal/policy"
+	"janus/internal/scoring"
 	"janus/internal/work"
 )
 
@@ -29,10 +30,20 @@ type Service struct {
 	Now func() int64
 	// Authz authorizes sensitive actions; nil means the endpoint is disabled.
 	Authz *authz.Service
+	// Scores gates worker claims by model tier when set.
+	Scores *scoring.Engine
 }
 
-// ErrAuthzUnavailable means no authorization service is configured.
-var ErrAuthzUnavailable = errors.New("authorization service is not configured")
+var (
+	// ErrAuthzUnavailable means no authorization service is configured.
+	ErrAuthzUnavailable = errors.New("authorization service is not configured")
+	// ErrTierDenied means the model's tier may not claim this item.
+	ErrTierDenied = errors.New("model tier does not allow this claim")
+	// ErrModelRequired means scoring is on but the claim has no model identity.
+	ErrModelRequired = errors.New("model_id is required when scoring is enabled")
+	// ErrFailureOwnerRequired means a reject was not attributed.
+	ErrFailureOwnerRequired = errors.New("failure_owner is required for a reject")
+)
 
 // New returns a service with the default clock.
 func New(board *work.Board, capsules capsule.Repository) *Service {
@@ -56,9 +67,23 @@ type ItemView struct {
 	Warnings []string         `json:"warnings,omitempty"`
 }
 
-// Claim takes a lease and builds the handover pack for the new holder.
-func (s *Service) Claim(ctx context.Context, itemID, agentID string, role work.Role, plan string, leaseSeconds int64) (ClaimResult, error) {
-	claim, err := s.Board.Claim(ctx, itemID, agentID, role, plan, leaseSeconds)
+// Claim takes a lease and builds the handover pack for the new holder. Worker
+// claims are gated by the model's tier when scoring is enabled.
+func (s *Service) Claim(ctx context.Context, itemID string, who work.Claimant, role work.Role, plan string, leaseSeconds int64) (ClaimResult, error) {
+	if role == work.RoleWorker && s.Scores != nil {
+		item, ok := s.Board.Get(ctx, itemID)
+		if !ok {
+			return ClaimResult{}, work.ErrNotFound
+		}
+		if strings.TrimSpace(who.ModelID) == "" {
+			return ClaimResult{}, ErrModelRequired
+		}
+		if allowed, reason := s.Scores.CanClaim(ScoreKey(who, item), ScoringRequirement(item)); !allowed {
+			return ClaimResult{}, fmt.Errorf("%w: %s", ErrTierDenied, reason)
+		}
+	}
+
+	claim, err := s.Board.ClaimWith(ctx, itemID, who, role, plan, leaseSeconds)
 	if err != nil {
 		return ClaimResult{}, err
 	}
@@ -110,7 +135,130 @@ func (s *Service) Complete(ctx context.Context, itemID, agentID string, epoch in
 	if err := s.requireHolder(ctx, itemID, agentID, epoch, work.RoleIntegrator); err != nil {
 		return err
 	}
-	return s.Board.Complete(ctx, itemID, epoch, idempotencyKey)
+	claim, hasClaim := s.workerClaim(ctx, itemID)
+	if err := s.Board.Complete(ctx, itemID, epoch, idempotencyKey); err != nil {
+		return err
+	}
+	if s.Scores != nil && hasClaim && claim.ModelID != "" {
+		cycle := int64(0)
+		now := s.nowUnix()
+		if claim.CreatedAt > 0 && claim.CreatedAt < now {
+			cycle = now - claim.CreatedAt
+		}
+		_, _ = s.Scores.Record(scoring.Event{
+			Key:          ClaimKey(claim),
+			WorkItemID:   itemID,
+			Type:         scoring.EventMerge,
+			CycleSeconds: cycle,
+			Actor:        agentID,
+		})
+	}
+	return nil
+}
+
+// ScoreKey builds the scoring key for a claimant on an item.
+func ScoreKey(who work.Claimant, item work.WorkItem) scoring.Key {
+	taskClass := strings.TrimSpace(who.TaskClass)
+	if taskClass == "" {
+		taskClass = TaskClassFor(item)
+	}
+	toolMode := strings.TrimSpace(who.ToolMode)
+	if toolMode == "" {
+		toolMode = "native"
+	}
+	version := strings.TrimSpace(who.ModelVersion)
+	if version == "" {
+		version = "unknown"
+	}
+	return scoring.Key{
+		AgentID:      who.AgentID,
+		ModelID:      who.ModelID,
+		TaskClass:    taskClass,
+		ToolMode:     toolMode,
+		ModelVersion: version,
+	}
+}
+
+// ClaimKey builds the scoring key from a stored lease.
+func ClaimKey(claim work.Claim) scoring.Key {
+	return ScoreKey(work.Claimant{
+		AgentID:      claim.AgentID,
+		ModelID:      claim.ModelID,
+		ModelVersion: claim.ModelVersion,
+		ToolMode:     claim.ToolMode,
+		TaskClass:    claim.TaskClass,
+	}, work.WorkItem{})
+}
+
+// TaskClassFor derives a coarse class from the declared paths.
+func TaskClassFor(item work.WorkItem) string {
+	for _, path := range item.Contract.Paths {
+		lower := strings.ToLower(path)
+		switch {
+		case strings.HasPrefix(lower, "docs/") || strings.HasSuffix(lower, ".md"):
+			return "docs"
+		case strings.HasSuffix(lower, "_test.go") || strings.HasPrefix(lower, "tests/"):
+			return "tests"
+		case strings.Contains(lower, "auth") || strings.Contains(lower, "payment") || strings.Contains(lower, "billing"):
+			return "security"
+		case strings.HasPrefix(lower, "deploy/") || strings.HasPrefix(lower, ".github/"):
+			return "infra"
+		}
+	}
+	return "default"
+}
+
+// SensitiveItem reports whether an item touches security-critical code or data.
+func SensitiveItem(item work.WorkItem) bool {
+	if item.Contract.Risk == work.RiskCritical {
+		return true
+	}
+	for _, path := range item.Contract.Paths {
+		lower := strings.ToLower(path)
+		for _, marker := range []string{"internal/auth", "/auth/", "payment", "billing", "migrat", "secret", ".github/"} {
+			if strings.Contains(lower, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ScoringRequirement projects an item onto the scoring access rules.
+func ScoringRequirement(item work.WorkItem) scoring.Requirement {
+	return scoring.Requirement{
+		Risk:         item.Contract.Risk,
+		Priority:     item.Priority,
+		Sensitive:    SensitiveItem(item),
+		BudgetTokens: item.Contract.BudgetTokens,
+	}
+}
+
+// workerClaim returns the newest worker lease for an item. Scoring attributes
+// outcomes to the worker, never to the verifier or integrator holding the
+// lease when the verdict or merge happens.
+func (s *Service) workerClaim(ctx context.Context, itemID string) (work.Claim, bool) {
+	claims, err := s.Board.Claims(ctx, itemID)
+	if err != nil {
+		return work.Claim{}, false
+	}
+	var found work.Claim
+	for _, claim := range claims {
+		if claim.Role != work.RoleWorker {
+			continue
+		}
+		if found.ID == "" || claim.LeaseEpoch >= found.LeaseEpoch {
+			found = claim
+		}
+	}
+	return found, found.ID != ""
+}
+
+func (s *Service) nowUnix() int64 {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now().Unix()
 }
 
 // Verify runs the contract checks for an existing verifier lease.
@@ -218,20 +366,54 @@ func (s *Service) Submit(ctx context.Context, itemID, agentID string, epoch int6
 	return nil
 }
 
-// Verdict delegates to the board and records a failure in the capsule so the
-// next claimer starts from the previous attempt instead of from zero.
-func (s *Service) Verdict(ctx context.Context, itemID, agentID string, epoch int64, verdict work.Verdict, reasons string, checks []work.CheckResult) error {
+// Verdict delegates to the board, records the outcome for scoring and, on a
+// rejection, stores the failure in the capsule so the next claimer starts from
+// it instead of from zero.
+func (s *Service) Verdict(ctx context.Context, itemID, agentID string, epoch int64, verdict work.Verdict, reasons string, checks []work.CheckResult, owner scoring.FailureOwner) error {
+	if verdict == work.VerdictReject && s.Scores != nil && !owner.Valid() {
+		return ErrFailureOwnerRequired
+	}
 	if err := s.requireHolder(ctx, itemID, agentID, epoch, work.RoleVerifier); err != nil {
 		return err
 	}
+
+	// Score the worker's lease, not the verifier's: the model that wrote the
+	// change is the one being judged.
+	claim, hasClaim := s.workerClaim(ctx, itemID)
+	item, hasItem := s.Board.Get(ctx, itemID)
+
 	if err := s.Board.VerdictWithChecks(ctx, itemID, epoch, verdict, reasons, checks); err != nil {
 		return err
 	}
+	s.recordVerdictScore(itemID, item, hasItem, claim, hasClaim, agentID, verdict, owner)
 	if verdict == work.VerdictApprove {
 		return nil
 	}
 	s.recordFailure(ctx, itemID, reasons, checks)
 	return nil
+}
+
+func (s *Service) recordVerdictScore(itemID string, item work.WorkItem, hasItem bool, claim work.Claim, hasClaim bool, agentID string, verdict work.Verdict, owner scoring.FailureOwner) {
+	if s.Scores == nil || !hasClaim || claim.ModelID == "" {
+		return
+	}
+	attempt := 1
+	if hasItem {
+		attempt = item.Attempts + 1
+	}
+	if verdict == work.VerdictNeedsHuman && !owner.Valid() {
+		// Lack of clarity is a task-definition problem, not a model failure.
+		owner = scoring.OwnerTask
+	}
+	_, _ = s.Scores.Record(scoring.Event{
+		Key:        ClaimKey(claim),
+		WorkItemID: itemID,
+		Type:       scoring.EventVerdict,
+		Verdict:    verdict,
+		Attempt:    attempt,
+		Owner:      owner,
+		Actor:      agentID,
+	})
 }
 
 func (s *Service) recordEvidence(ctx context.Context, itemID string, evidence work.Evidence) {

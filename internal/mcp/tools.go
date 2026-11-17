@@ -74,6 +74,10 @@ func toolDefs() []toolInfo {
 				"role":          enum("Role to claim", "worker", "verifier", "integrator"),
 				"plan":          str("What you intend to do, max 512 bytes; required and shown to the next holder"),
 				"lease_seconds": integer("Lease length in seconds (default 1200, max 7200)"),
+				"model_id":      str("Model that will do the work; required for worker claims when scoring is on"),
+				"model_version": str("Model version; a version bump starts a fresh score"),
+				"tool_mode":     enum("How tools are executed", "native", "bridge", "none"),
+				"task_class":    str("Task class for scoring (defaults from the declared paths)"),
 			}, "id", "role", "plan"),
 		},
 		{
@@ -132,6 +136,8 @@ func toolDefs() []toolInfo {
 					"description": "Verifier check results (required when approving an item with contract checks)",
 					"items":       map[string]any{"type": "object"},
 				},
+				"failure_owner": enum("Who caused a reject; only model affects the model score",
+					"model", "harness", "client", "task", "account", "infra"),
 			}, "id", "epoch", "verdict"),
 		},
 		{

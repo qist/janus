@@ -16,6 +16,7 @@ import (
 	"janus/internal/api"
 	"janus/internal/auth"
 	"janus/internal/policy"
+	"janus/internal/scoring"
 	"janus/internal/work"
 	"janus/internal/worksvc"
 )
@@ -337,6 +338,10 @@ func (s *Server) workClaim(ctx context.Context, id auth.Identity, raw json.RawMe
 		Role         work.Role `json:"role"`
 		Plan         string    `json:"plan"`
 		LeaseSeconds int64     `json:"lease_seconds"`
+		ModelID      string    `json:"model_id"`
+		ModelVersion string    `json:"model_version"`
+		ToolMode     string    `json:"tool_mode"`
+		TaskClass    string    `json:"task_class"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return nil, err
@@ -344,7 +349,14 @@ func (s *Server) workClaim(ctx context.Context, id auth.Identity, raw json.RawMe
 	if !args.Role.Valid() {
 		return nil, fail("invalid_role", fmt.Sprintf("unknown role %q", args.Role))
 	}
-	return s.Svc.Claim(ctx, args.ID, id.AgentID, args.Role, args.Plan, args.LeaseSeconds)
+	who := work.Claimant{
+		AgentID:      id.AgentID,
+		ModelID:      args.ModelID,
+		ModelVersion: args.ModelVersion,
+		ToolMode:     args.ToolMode,
+		TaskClass:    args.TaskClass,
+	}
+	return s.Svc.Claim(ctx, args.ID, who, args.Role, args.Plan, args.LeaseSeconds)
 }
 
 func (s *Server) workHeartbeat(ctx context.Context, id auth.Identity, raw json.RawMessage) (any, error) {
@@ -438,11 +450,12 @@ func (s *Server) workVerdict(ctx context.Context, id auth.Identity, raw json.Raw
 		return nil, err
 	}
 	var args struct {
-		ID      string             `json:"id"`
-		Epoch   int64              `json:"epoch"`
-		Verdict work.Verdict       `json:"verdict"`
-		Reasons string             `json:"reasons"`
-		Checks  []work.CheckResult `json:"checks"`
+		ID           string               `json:"id"`
+		Epoch        int64                `json:"epoch"`
+		Verdict      work.Verdict         `json:"verdict"`
+		Reasons      string               `json:"reasons"`
+		Checks       []work.CheckResult   `json:"checks"`
+		FailureOwner scoring.FailureOwner `json:"failure_owner"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return nil, err
@@ -452,7 +465,10 @@ func (s *Server) workVerdict(ctx context.Context, id auth.Identity, raw json.Raw
 	default:
 		return nil, fail("invalid_verdict", fmt.Sprintf("unknown verdict %q", args.Verdict))
 	}
-	if err := s.Svc.Verdict(ctx, args.ID, id.AgentID, args.Epoch, args.Verdict, args.Reasons, args.Checks); err != nil {
+	if args.FailureOwner != "" && !args.FailureOwner.Valid() {
+		return nil, fail("invalid_owner", fmt.Sprintf("unknown failure_owner %q", args.FailureOwner))
+	}
+	if err := s.Svc.Verdict(ctx, args.ID, id.AgentID, args.Epoch, args.Verdict, args.Reasons, args.Checks, args.FailureOwner); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true}, nil

@@ -183,7 +183,34 @@ type Claim struct {
 	Status         ClaimStatus `json:"status"`
 	IdempotencyKey string      `json:"idempotency_key,omitempty"`
 	Evidence       *Evidence   `json:"evidence,omitempty"`
-	CreatedAt      int64       `json:"created_at"`
+	// Model identity is recorded with the lease so scoring can attribute the
+	// outcome to the model that actually did the work.
+	ModelID      string `json:"model_id,omitempty"`
+	ModelVersion string `json:"model_version,omitempty"`
+	ToolMode     string `json:"tool_mode,omitempty"`
+	TaskClass    string `json:"task_class,omitempty"`
+	CreatedAt    int64  `json:"created_at"`
+}
+
+// Claimant returns the identity recorded with this lease.
+func (c Claim) Claimant() Claimant {
+	return Claimant{
+		AgentID:      c.AgentID,
+		ModelID:      c.ModelID,
+		ModelVersion: c.ModelVersion,
+		ToolMode:     c.ToolMode,
+		TaskClass:    c.TaskClass,
+	}
+}
+
+// Claimant is who asks for a lease. The board stores the identity but never
+// scores it; scoring happens in the service layer.
+type Claimant struct {
+	AgentID      string `json:"agent_id"`
+	ModelID      string `json:"model_id,omitempty"`
+	ModelVersion string `json:"model_version,omitempty"`
+	ToolMode     string `json:"tool_mode,omitempty"`
+	TaskClass    string `json:"task_class,omitempty"`
 }
 
 // Artifact is an evidence or output file produced while working an item.

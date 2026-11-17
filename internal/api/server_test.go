@@ -12,6 +12,7 @@ import (
 	"janus/internal/auth"
 	"janus/internal/authz"
 	"janus/internal/policy"
+	"janus/internal/scoring"
 	"janus/internal/usage"
 	"janus/internal/work"
 	"janus/internal/worksvc"
@@ -30,6 +31,7 @@ type testEnv struct {
 	srv    *httptest.Server
 	board  *work.Board
 	server *Server
+	svc    *worksvc.Service
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -51,7 +53,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	server := New(svc, keys)
 	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
-	return &testEnv{srv: ts, board: board, server: server}
+	return &testEnv{srv: ts, board: board, server: server, svc: svc}
 }
 
 func (e *testEnv) do(t *testing.T, method, path, key string, body any) *http.Response {
@@ -600,9 +602,10 @@ func newAuthzEnv(t *testing.T) (*testEnv, *auth.Authority) {
 	keys.Add(adminKey, Identity{AgentID: adminAgent, Scopes: []Scope{ScopeAdmin}})
 	keys.Add("authz-other-key", Identity{AgentID: "agent-other", Scopes: []Scope{ScopeAuthorize, ScopeRead}})
 
-	ts := httptest.NewServer(New(svc, keys).Handler())
+	server := New(svc, keys)
+	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
-	return &testEnv{srv: ts, board: board}, authority
+	return &testEnv{srv: ts, board: board, server: server, svc: svc}, authority
 }
 
 func TestAuthorizeIssuesToken(t *testing.T) {
@@ -739,6 +742,139 @@ func TestUsageWithoutLedgerIsNotImplemented(t *testing.T) {
 	e := newTestEnv(t)
 	resp := e.expect(t, http.MethodGet, "/api/v1/usage", readerKey, nil, http.StatusNotImplemented)
 	if code := errCode(t, resp); code != "usage_unavailable" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestClaimTierGate(t *testing.T) {
+	e := newTestEnv(t)
+	engine := scoring.New(scoring.Config{Now: func() int64 { return 1_700_000_000 }})
+	e.svc.Scores = engine
+	e.server.Scores = engine
+
+	createItem(t, e, work.WorkItem{
+		ID:          "w1",
+		WorkspaceID: "ws",
+		Title:       "medium",
+		Contract:    work.Contract{Goal: "ship", Risk: work.RiskMedium, Paths: []string{"internal/work"}},
+	})
+
+	// Scoring on: a worker claim must name its model.
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", workerKey,
+		claimRequest{Role: work.RoleWorker, Plan: "p"}, http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "model_required" {
+		t.Fatalf("code = %q", code)
+	}
+
+	// A new key is probation, which cannot take medium risk.
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", workerKey,
+		claimRequest{Role: work.RoleWorker, Plan: "p", ModelID: "m1", ModelVersion: "v1"}, http.StatusForbidden)
+	if code := errCode(t, resp); code != "tier_denied" {
+		t.Fatalf("code = %q", code)
+	}
+
+	// Low risk is allowed for probation.
+	createItem(t, e, work.WorkItem{
+		ID:          "w2",
+		WorkspaceID: "ws",
+		Title:       "low",
+		Contract:    work.Contract{Goal: "ship", Risk: work.RiskLow, Paths: []string{"internal/work"}},
+	})
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w2/claim", workerKey,
+		claimRequest{Role: work.RoleWorker, Plan: "p", ModelID: "m1", ModelVersion: "v1", ToolMode: "native", TaskClass: "default"},
+		http.StatusOK)
+	var claimed worksvc.ClaimResult
+	decodeBody(t, resp, &claimed)
+	if claimed.Claim.ModelID != "m1" || claimed.Claim.TaskClass != "default" {
+		t.Fatalf("claim = %+v", claimed.Claim)
+	}
+}
+
+func TestVerdictRequiresFailureOwner(t *testing.T) {
+	e := newTestEnv(t)
+	engine := scoring.New(scoring.Config{Now: func() int64 { return 1_700_000_000 }})
+	e.svc.Scores = engine
+	e.server.Scores = engine
+
+	createItem(t, e, work.WorkItem{
+		ID:          "w1",
+		WorkspaceID: "ws",
+		Title:       "low",
+		Contract:    work.Contract{Goal: "ship", Risk: work.RiskLow, Paths: []string{"internal/work"}},
+	})
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", workerKey,
+		claimRequest{Role: work.RoleWorker, Plan: "p", ModelID: "m1"}, http.StatusOK)
+	var worker worksvc.ClaimResult
+	decodeBody(t, resp, &worker)
+
+	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/submit", workerKey, submitRequest{
+		Epoch:          worker.Claim.LeaseEpoch,
+		IdempotencyKey: "k1",
+		Evidence:       work.Evidence{Artifacts: []string{"a1"}},
+	}, http.StatusNoContent)
+
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", otherKey,
+		claimRequest{Role: work.RoleVerifier, Plan: "review"}, http.StatusOK)
+	var verifier worksvc.ClaimResult
+	decodeBody(t, resp, &verifier)
+
+	// A reject without attribution is refused before the board is touched.
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w1/verdict", otherKey,
+		verdictRequest{Epoch: verifier.Claim.LeaseEpoch, Verdict: work.VerdictReject, Reasons: "bad"},
+		http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "failure_owner_required" {
+		t.Fatalf("code = %q", code)
+	}
+
+	// An unknown owner is rejected by the transport.
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w1/verdict", otherKey,
+		verdictRequest{Epoch: verifier.Claim.LeaseEpoch, Verdict: work.VerdictReject, FailureOwner: "someone"},
+		http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "invalid_owner" {
+		t.Fatalf("code = %q", code)
+	}
+
+	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/verdict", otherKey,
+		verdictRequest{Epoch: verifier.Claim.LeaseEpoch, Verdict: work.VerdictReject, Reasons: "harness timeout", FailureOwner: "harness"},
+		http.StatusNoContent)
+
+	// Harness failure must not change the model score.
+	score, ok := engine.Get(worksvc.ScoreKey(work.Claimant{AgentID: "agent-worker", ModelID: "m1"}, work.WorkItem{}))
+	if !ok {
+		t.Fatal("no score recorded")
+	}
+	if score.Samples != 0 {
+		t.Fatalf("score = %+v", score)
+	}
+}
+
+func TestScoresEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	engine := scoring.New(scoring.Config{Now: func() int64 { return 1000 }})
+	key := scoring.Key{AgentID: "agent-1", ModelID: "m1", TaskClass: "default", ToolMode: "native", ModelVersion: "v1"}
+	if _, err := engine.Record(scoring.Event{Key: key, Type: scoring.EventVerdict, Verdict: work.VerdictApprove, Attempt: 1}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	e.server.Scores = engine
+
+	resp := e.expect(t, http.MethodGet, "/api/v1/scores", readerKey, nil, http.StatusOK)
+	var body struct {
+		Scores []scoring.Score `json:"scores"`
+	}
+	decodeBody(t, resp, &body)
+	if len(body.Scores) != 1 || body.Scores[0].Key.ModelID != "m1" {
+		t.Fatalf("scores = %+v", body.Scores)
+	}
+	if body.Scores[0].Samples != 1 || body.Scores[0].Tier != scoring.TierProbation {
+		t.Fatalf("score = %+v", body.Scores[0])
+	}
+}
+
+func TestScoresWithoutEngineIsNotImplemented(t *testing.T) {
+	e := newTestEnv(t)
+	resp := e.expect(t, http.MethodGet, "/api/v1/scores", readerKey, nil, http.StatusNotImplemented)
+	if code := errCode(t, resp); code != "scores_unavailable" {
 		t.Fatalf("code = %q", code)
 	}
 }

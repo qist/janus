@@ -80,6 +80,15 @@ const (
 	OwnerInfra   FailureOwner = "infra"
 )
 
+// Valid reports whether the owner is one this engine knows.
+func (o FailureOwner) Valid() bool {
+	switch o {
+	case OwnerModel, OwnerHarness, OwnerClient, OwnerTask, OwnerAccount, OwnerInfra:
+		return true
+	}
+	return false
+}
+
 // Incident kinds that suspend immediately without waiting for a weighted score.
 const (
 	IncidentFakeEvidence = "fake_evidence"

@@ -23,6 +23,7 @@ import (
 	"janus/internal/gateway"
 	"janus/internal/mcp"
 	"janus/internal/pool"
+	"janus/internal/scoring"
 	"janus/internal/store"
 	"janus/internal/usage"
 	"janus/internal/verify"
@@ -81,12 +82,15 @@ func run() error {
 		return err
 	}
 	svc.Authz = authz.New(gate, authority)
+	scores := scoring.New(scoring.Config{})
+	svc.Scores = scores
 
 	keys := api.NewStaticKeys()
 	keys.Add(apiKey, api.Identity{AgentID: *agentID, Scopes: []api.Scope{api.ScopeAdmin}})
 
 	server := api.New(svc, keys)
 	server.Usage = ledger
+	server.Scores = scores
 	mcpServer := mcp.New(svc, keys)
 	mcpServer.Version = version
 

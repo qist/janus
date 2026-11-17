@@ -22,7 +22,13 @@ func TestBoardWithSQLiteRepository(t *testing.T) {
 	if err := b.Add(ctx, work.WorkItem{ID: "w1", WorkspaceID: "ws", Title: "w1"}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	c, err := b.Claim(ctx, "w1", "worker-1", work.RoleWorker, "implement", 60)
+	c, err := b.ClaimWith(ctx, "w1", work.Claimant{
+		AgentID:      "worker-1",
+		ModelID:      "model-1",
+		ModelVersion: "v1",
+		ToolMode:     "native",
+		TaskClass:    "default",
+	}, work.RoleWorker, "implement", 60)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -64,6 +70,10 @@ func TestBoardWithSQLiteRepository(t *testing.T) {
 	}
 	if len(claims[0].Evidence.Artifacts) != 1 || claims[0].Evidence.DiffHash != "sha256:diff" {
 		t.Fatalf("evidence after reopen = %+v", claims[0].Evidence)
+	}
+	if claims[0].ModelID != "model-1" || claims[0].ModelVersion != "v1" ||
+		claims[0].ToolMode != "native" || claims[0].TaskClass != "default" {
+		t.Fatalf("model identity after reopen = %+v", claims[0])
 	}
 
 	v, err := b2.Claim(ctx, "w1", "verifier-1", work.RoleVerifier, "review", 60)

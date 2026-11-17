@@ -44,6 +44,10 @@ type WorkClaimModel struct {
 	Status         string `gorm:"index;size:16"`
 	IdempotencyKey string `gorm:"index;size:64"`
 	EvidenceJSON   []byte `gorm:"type:blob"`
+	ModelID        string `gorm:"index;size:200"`
+	ModelVersion   string `gorm:"size:64"`
+	ToolMode       string `gorm:"size:16"`
+	TaskClass      string `gorm:"size:64"`
 	CreatedAt      int64
 }
 

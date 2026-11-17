@@ -334,6 +334,10 @@ func claimToModel(c work.Claim) (WorkClaimModel, error) {
 		Status:         string(c.Status),
 		IdempotencyKey: c.IdempotencyKey,
 		EvidenceJSON:   evidence,
+		ModelID:        c.ModelID,
+		ModelVersion:   c.ModelVersion,
+		ToolMode:       c.ToolMode,
+		TaskClass:      c.TaskClass,
 		CreatedAt:      c.CreatedAt,
 	}, nil
 }
@@ -352,6 +356,10 @@ func claimFromModel(m WorkClaimModel) (work.Claim, error) {
 		Note:           m.Note,
 		Status:         work.ClaimStatus(m.Status),
 		IdempotencyKey: m.IdempotencyKey,
+		ModelID:        m.ModelID,
+		ModelVersion:   m.ModelVersion,
+		ToolMode:       m.ToolMode,
+		TaskClass:      m.TaskClass,
 		CreatedAt:      m.CreatedAt,
 	}
 	if len(m.EvidenceJSON) > 0 {

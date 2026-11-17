@@ -106,7 +106,7 @@ func TestClaimBuildsPack(t *testing.T) {
 	ctx := context.Background()
 	svc, _, _, _ := setup(t)
 
-	result, err := svc.Claim(ctx, "w1", "worker-1", work.RoleWorker, "implement", 60)
+	result, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "worker-1"}, work.RoleWorker, "implement", 60)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestGetReturnsClaimCapsuleAndReviews(t *testing.T) {
 	ctx := context.Background()
 	svc, _, _, _ := setup(t)
 
-	if _, err := svc.Claim(ctx, "w1", "worker-1", work.RoleWorker, "implement", 60); err != nil {
+	if _, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "worker-1"}, work.RoleWorker, "implement", 60); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestSubmitRecordsEvidenceInCapsule(t *testing.T) {
 	ctx := context.Background()
 	svc, _, repo, _ := setup(t)
 
-	c, err := svc.Claim(ctx, "w1", "worker-1", work.RoleWorker, "implement", 60)
+	c, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "worker-1"}, work.RoleWorker, "implement", 60)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestVerdictRecordsFailureForNextClaimer(t *testing.T) {
 	ctx := context.Background()
 	svc, _, repo, _ := setup(t)
 
-	w, err := svc.Claim(ctx, "w1", "worker-1", work.RoleWorker, "implement", 60)
+	w, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "worker-1"}, work.RoleWorker, "implement", 60)
 	if err != nil {
 		t.Fatalf("worker claim: %v", err)
 	}
@@ -213,13 +213,13 @@ func TestVerdictRecordsFailureForNextClaimer(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	v, err := svc.Claim(ctx, "w1", "verifier-1", work.RoleVerifier, "review", 60)
+	v, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "verifier-1"}, work.RoleVerifier, "review", 60)
 	if err != nil {
 		t.Fatalf("verifier claim: %v", err)
 	}
 	if err := svc.Verdict(ctx, "w1", "verifier-1", v.Claim.LeaseEpoch, work.VerdictReject, "unit failed", []work.CheckResult{
 		{Name: "unit", ExitCode: 1, OutputTail: "FAIL: claim race"},
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("Verdict: %v", err)
 	}
 
@@ -254,18 +254,18 @@ func TestApproveDoesNotRecordFailure(t *testing.T) {
 	ctx := context.Background()
 	svc, _, repo, _ := setup(t)
 
-	w, err := svc.Claim(ctx, "w1", "worker-1", work.RoleWorker, "implement", 60)
+	w, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "worker-1"}, work.RoleWorker, "implement", 60)
 	if err != nil {
 		t.Fatalf("worker claim: %v", err)
 	}
 	if err := svc.Submit(ctx, "w1", "worker-1", w.Claim.LeaseEpoch, "k1", work.Evidence{Artifacts: []string{"a1"}}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	v, err := svc.Claim(ctx, "w1", "verifier-1", work.RoleVerifier, "review", 60)
+	v, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "verifier-1"}, work.RoleVerifier, "review", 60)
 	if err != nil {
 		t.Fatalf("verifier claim: %v", err)
 	}
-	if err := svc.Verdict(ctx, "w1", "verifier-1", v.Claim.LeaseEpoch, work.VerdictApprove, "ok", nil); err != nil {
+	if err := svc.Verdict(ctx, "w1", "verifier-1", v.Claim.LeaseEpoch, work.VerdictApprove, "ok", nil, ""); err != nil {
 		t.Fatalf("Verdict: %v", err)
 	}
 
@@ -285,7 +285,7 @@ func TestFactsErrorBecomesWarning(t *testing.T) {
 		return contextpack.WorkspaceFacts{}, errors.New("facts backend down")
 	}
 
-	result, err := svc.Claim(ctx, "w1", "worker-1", work.RoleWorker, "implement", 60)
+	result, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "worker-1"}, work.RoleWorker, "implement", 60)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestClaimWithoutCapsuleStore(t *testing.T) {
 	svc, _, _, _ := setup(t)
 	svc.Capsules = nil
 
-	result, err := svc.Claim(ctx, "w1", "worker-1", work.RoleWorker, "implement", 60)
+	result, err := svc.Claim(ctx, "w1", work.Claimant{AgentID: "worker-1"}, work.RoleWorker, "implement", 60)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}

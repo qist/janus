@@ -14,3 +14,5 @@ JANUS_WORKSPACE=
 JANUS_CAPABILITY_KEY=
 # 审计模型（JSON 数组）；不设置则敏感操作一律 deny
 # JANUS_AUDITORS=[{"name":"openai","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-4o-mini"}]
+# /v1 代理暴露的模型（aliases 可选，api_key_envs 支持多 key 失败切换）
+# JANUS_MODELS=[{"name":"openai","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","aliases":["fast"],"api_key_envs":["OPENAI_KEY_1","OPENAI_KEY_2"]}]

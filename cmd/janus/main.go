@@ -23,6 +23,7 @@ import (
 	"janus/internal/gateway"
 	"janus/internal/mcp"
 	"janus/internal/pool"
+	"janus/internal/proxy"
 	"janus/internal/scoring"
 	"janus/internal/store"
 	"janus/internal/usage"
@@ -88,6 +89,12 @@ func run() error {
 	keys := api.NewStaticKeys()
 	keys.Add(apiKey, api.Identity{AgentID: *agentID, Scopes: []api.Scope{api.ScopeAdmin}})
 
+	routes, err := buildModelRoutes()
+	if err != nil {
+		return err
+	}
+	proxyServer := proxy.New(routes, keys, ledger)
+
 	server := api.New(svc, keys)
 	server.Usage = ledger
 	server.Scores = scores
@@ -109,6 +116,7 @@ func run() error {
 	mux := http.NewServeMux()
 	server.Register(mux)
 	mcpServer.Register(mux)
+	proxyServer.Register(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
@@ -169,7 +177,7 @@ func buildGate(ledger usage.Ledger) (*auditor.Gate, error) {
 	}
 
 	for _, cfg := range configs {
-		client, err := gateway.New(cfg)
+		client, err := newModelClient(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("auditor %q: %w", cfg.Name, err)
 		}
@@ -184,31 +192,80 @@ func buildGate(ledger usage.Ledger) (*auditor.Gate, error) {
 				})
 			}
 		}
-		if len(cfg.APIKeyEnvs) > 0 {
-			accounts := pool.New(nil)
-			for i, envName := range cfg.APIKeyEnvs {
-				key := strings.TrimSpace(os.Getenv(envName))
-				if key == "" {
-					return nil, fmt.Errorf("auditor %q: %s is empty", client.Name, envName)
-				}
-				account := pool.Account{
-					ID:         fmt.Sprintf("%s#%d", client.Name, i+1),
-					ProviderID: client.Name,
-					APIKey:     key,
-					Models:     []string{client.Model},
-					Priority:   i,
-				}
-				if err := accounts.Add(account); err != nil {
-					return nil, fmt.Errorf("auditor %q: %w", client.Name, err)
-				}
-			}
-			client.Credentials = poolCredentials{accounts}
-			log.Printf("auditor %s: %d account(s) in the pool", client.Name, accounts.Len())
-		}
 		gate.Auditors = append(gate.Auditors, auditor.NewModelAuditor(client.Name, client.Model, modelCompleter{client}))
 	}
 	log.Printf("configured %d auditor model(s)", len(gate.Auditors))
 	return gate, nil
+}
+
+// buildModelRoutes exposes JANUS_MODELS over /v1. Each entry is one upstream
+// model plus optional aliases.
+func buildModelRoutes() (map[string]*gateway.Client, error) {
+	raw := strings.TrimSpace(os.Getenv("JANUS_MODELS"))
+	if raw == "" {
+		return map[string]*gateway.Client{}, nil
+	}
+
+	var configs []gateway.Config
+	if err := json.Unmarshal([]byte(raw), &configs); err != nil {
+		return nil, fmt.Errorf("JANUS_MODELS must be a JSON array: %w", err)
+	}
+
+	routes := make(map[string]*gateway.Client, len(configs))
+	for _, cfg := range configs {
+		client, err := newModelClient(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("model %q: %w", cfg.Model, err)
+		}
+		if _, exists := routes[client.Model]; exists {
+			return nil, fmt.Errorf("model %q is defined twice", client.Model)
+		}
+		routes[client.Model] = client
+		for _, alias := range cfg.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias == "" {
+				continue
+			}
+			if _, exists := routes[alias]; exists {
+				return nil, fmt.Errorf("model alias %q is defined twice", alias)
+			}
+			routes[alias] = client
+		}
+	}
+	log.Printf("configured %d model route(s)", len(routes))
+	return routes, nil
+}
+
+// newModelClient builds one upstream client, including its account pool.
+func newModelClient(cfg gateway.Config) (*gateway.Client, error) {
+	client, err := gateway.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.APIKeyEnvs) == 0 {
+		return client, nil
+	}
+
+	accounts := pool.New(nil)
+	for i, envName := range cfg.APIKeyEnvs {
+		key := strings.TrimSpace(os.Getenv(envName))
+		if key == "" {
+			return nil, fmt.Errorf("%s is empty", envName)
+		}
+		account := pool.Account{
+			ID:         fmt.Sprintf("%s#%d", client.Name, i+1),
+			ProviderID: client.Name,
+			APIKey:     key,
+			Models:     []string{client.Model},
+			Priority:   i,
+		}
+		if err := accounts.Add(account); err != nil {
+			return nil, err
+		}
+	}
+	client.Credentials = poolCredentials{accounts}
+	log.Printf("model %s: %d account(s) in the pool", client.Name, accounts.Len())
+	return client, nil
 }
 
 // modelCompleter adapts the gateway client to auditor.Completer, keeping the

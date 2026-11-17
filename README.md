@@ -33,6 +33,7 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | `JANUS_DB` | `janus.db` | SQLite 路径 |
 | `JANUS_WORKSPACE` | 空 | 若设置，`/verify` 在该目录跑契约 checks |
 | `JANUS_AUDITORS` | 空 | 审计模型 JSON 数组；不设则敏感操作一律 deny |
+| `JANUS_MODELS` | 空 | `/v1` 代理暴露的模型/别名 JSON 数组 |
 | `JANUS_CAPABILITY_KEY` | 空 | 能力令牌签名密钥（≥32 字节） |
 
 ## HTTP API
@@ -103,6 +104,39 @@ work_submit work_verify work_verdict work_complete work_authorize
 curl -s -X POST "http://127.0.0.1:8080/mcp/$JANUS_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"work_list","arguments":{}}}'
+```
+
+## /v1 模型代理
+
+对客户端暴露 OpenAI 线格式，复用同一批 key、账号池和用量账本：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/v1/models` | 列出暴露的模型与别名 |
+| POST | `/v1/chat/completions` | 非流式 / `stream:true` 流式透传 |
+
+鉴权用 `Authorization: Bearer <API key>`，需要 `chat` scope。上游 key 由 janus 注入，客户端看不到。
+
+模型与别名由 `JANUS_MODELS` 配置，每项就是一个 OpenAI 兼容端点：
+
+```bash
+export JANUS_MODELS='[
+  {"name":"openai","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini",
+   "aliases":["fast"],"api_key_envs":["OPENAI_KEY_1","OPENAI_KEY_2"]}
+]'
+```
+
+- 请求里的 `model` 可以是别名；转发时改写成真实模型名，其余字段原样透传（tools、temperature、stream_options 都不动）。
+- 流式是**边收边发**的 SSE 直通，不缓冲整段响应；`stream_options.include_usage` 的 usage 会被解析出来记账。
+- 账号相关失败自动换 key（同上一节），全部耗尽返回 `503 all_accounts_exhausted` 并带 `Retry-After`。
+- 上游错误 → `502 upstream_error`，错误体保持 OpenAI 形状：
+  `{"error":{"message","type":"janus_error","code"}}`。
+- 每次成功调用写一条用量账，可通过 `/api/v1/usage?key=...` 对账。
+
+```bash
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $JANUS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"fast","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## 敏感操作授权

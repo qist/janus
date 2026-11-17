@@ -20,6 +20,7 @@ const (
 	ScopeVerify    Scope = "verify"    // run checks, post verdicts
 	ScopeIntegrate Scope = "integrate" // complete an approved item
 	ScopeAuthorize Scope = "authorize" // request a capability token for a sensitive action
+	ScopeChat      Scope = "chat"      // use the /v1 model proxy
 	ScopeAdmin     Scope = "admin"     // everything
 )
 

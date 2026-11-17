@@ -32,6 +32,8 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | `JANUS_ADDR` | `127.0.0.1:8080` | 监听地址 |
 | `JANUS_DB` | `janus.db` | SQLite 路径 |
 | `JANUS_WORKSPACE` | 空 | 若设置，`/verify` 在该目录跑契约 checks |
+| `JANUS_AUDITORS` | 空 | 审计模型 JSON 数组；不设则敏感操作一律 deny |
+| `JANUS_CAPABILITY_KEY` | 空 | 能力令牌签名密钥（≥32 字节） |
 
 ## HTTP API
 
@@ -124,8 +126,19 @@ action → policy（确定性分类 + 路径/命令规则）
   执行器用 `auth.Authority.Verify` 校验，重放返回 `ErrReplay`。
 - 决策按 `action_hash + policy_version + contract_version + evidence` 缓存；缓存命中仍会现签新令牌。
 
-当前进程没有接审计模型（gateway 未完成），所以**敏感操作默认全部 deny**——这是刻意的 fail-closed，
-不是 bug。普通读写与单测不经过审计，直接 allow，也不签令牌。
+审计模型通过 `JANUS_AUDITORS` 配置，每个元素是一个 OpenAI 兼容端点：
+
+```bash
+export JANUS_AUDITORS='[
+  {"name":"openai","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-4o-mini"},
+  {"name":"deepseek","base_url":"https://api.deepseek.com/v1","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-chat"}
+]'
+```
+
+- 配置几个就并发/顺序跑几个；`high` 需要 2 个、`critical` 需要 3 个，配置不足直接 deny。
+- 只支持 `POST {base_url}/chat/completions`（OpenAI、DeepSeek、Moonshot、vLLM、Ollama 都兼容）。
+- `api_key_env` 比 `api_key` 安全：密钥留在环境里，不进配置文件。
+- 不配置 = **敏感操作全部 deny**，这是刻意的 fail-closed，不是 bug。普通读写与单测不经过审计，直接 allow，也不签令牌。
 
 令牌签名密钥：
 

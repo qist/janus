@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"janus/internal/auditor"
 	"janus/internal/auth"
 	"janus/internal/authz"
+	"janus/internal/gateway"
 	"janus/internal/mcp"
 	"janus/internal/store"
 	"janus/internal/verify"
@@ -70,10 +72,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// No auditor models are wired yet, so every sensitive action is denied
-	// until the gateway exists. That is the intended fail-closed default.
-	gate := auditor.NewGate()
-	gate.Cache = auditor.NewMemoryCache(600, nil)
+	gate, err := buildGate()
+	if err != nil {
+		return err
+	}
 	svc.Authz = authz.New(gate, authority)
 
 	keys := api.NewStaticKeys()
@@ -134,6 +136,56 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// buildGate wires the auditor models from JANUS_AUDITORS. Without any model the
+// gate stays empty and every sensitive action is denied, which is the intended
+// fail-closed default.
+func buildGate() (*auditor.Gate, error) {
+	gate := auditor.NewGate()
+	gate.Cache = auditor.NewMemoryCache(600, nil)
+
+	raw := strings.TrimSpace(os.Getenv("JANUS_AUDITORS"))
+	if raw == "" {
+		log.Print("JANUS_AUDITORS unset: sensitive actions will be denied (fail-closed)")
+		return gate, nil
+	}
+
+	var configs []gateway.Config
+	if err := json.Unmarshal([]byte(raw), &configs); err != nil {
+		return nil, fmt.Errorf("JANUS_AUDITORS must be a JSON array: %w", err)
+	}
+	if len(configs) == 0 {
+		return nil, errors.New("JANUS_AUDITORS is empty")
+	}
+
+	for _, cfg := range configs {
+		client, err := gateway.New(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("auditor %q: %w", cfg.Name, err)
+		}
+		gate.Auditors = append(gate.Auditors, auditor.NewModelAuditor(client.Name, client.Model, modelCompleter{client}))
+	}
+	log.Printf("configured %d auditor model(s)", len(gate.Auditors))
+	return gate, nil
+}
+
+// modelCompleter adapts the gateway client to auditor.Completer, keeping the
+// auditor package free of any provider or HTTP detail.
+type modelCompleter struct {
+	client *gateway.Client
+}
+
+func (m modelCompleter) Complete(ctx context.Context, req auditor.CompletionRequest) (string, error) {
+	resp, err := m.client.Complete(ctx, gateway.Request{
+		System: req.System,
+		User:   req.User,
+		Model:  req.Model,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.Text, nil
 }
 
 // capabilityAuthority signs the single-use tokens executors verify. Production

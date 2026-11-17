@@ -1,18 +1,20 @@
-# 本地配置（含 API Key），不要提交
+# 本地配置
 janus.env
+janus.bootstrap.env
 
-# 编译产物
+# 构建产物
+/build/
+/dist/
 /janus
 
-# 兼容测试用的 Python 虚拟环境
+# 运行期数据
+/workspaces/
+/data/
+*.log
+
+# 测试
 .venv/
 __pycache__/
 
-# 日志与临时文件
-*.log
-
-# 发布产物
-/dist/
-
-# 第三方插件源码分析（本地参考材料，转录结论已进 workbuddy*.go 注释）
+# 旧分析材料
 /.wb-analysis/

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -267,5 +268,186 @@ func TestRequestOverridesModel(t *testing.T) {
 	}
 	if model != "other-model" {
 		t.Fatalf("model = %q", model)
+	}
+}
+
+type credentialReport struct {
+	id     string
+	status int
+	body   string
+}
+
+type fakeSource struct {
+	creds   []Credential
+	idx     int
+	reports []credentialReport
+}
+
+func (f *fakeSource) Next(context.Context, string, string) (Credential, error) {
+	if f.idx >= len(f.creds) {
+		return Credential{}, errors.New("pool empty")
+	}
+	credential := f.creds[f.idx]
+	f.idx++
+	return credential, nil
+}
+
+func (f *fakeSource) Report(_ context.Context, id string, status int, body string, _ time.Duration) {
+	f.reports = append(f.reports, credentialReport{id: id, status: status, body: body})
+}
+
+func TestFailoverOnQuota(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer k1" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":{"code":"insufficient_quota","message":"out of credits"}}`)
+			return
+		}
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	c, _ := New(Config{BaseURL: srv.URL, Model: "m"})
+	source := &fakeSource{creds: []Credential{{ID: "a1", APIKey: "k1"}, {ID: "a2", APIKey: "k2"}}}
+	c.Credentials = source
+
+	resp, err := c.Complete(context.Background(), Request{User: "x"})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Text != "ok" {
+		t.Fatalf("text = %q", resp.Text)
+	}
+	if source.idx != 2 {
+		t.Fatalf("credentials tried = %d, want 2", source.idx)
+	}
+	if len(source.reports) != 2 || source.reports[0].status != 429 || source.reports[1].status != 200 {
+		t.Fatalf("reports = %+v", source.reports)
+	}
+}
+
+func TestNoFailoverOnServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		io.WriteString(w, "upstream down")
+	}))
+	defer srv.Close()
+
+	c, _ := New(Config{BaseURL: srv.URL, Model: "m"})
+	source := &fakeSource{creds: []Credential{{ID: "a1", APIKey: "k1"}, {ID: "a2", APIKey: "k2"}}}
+	c.Credentials = source
+
+	if _, err := c.Complete(context.Background(), Request{User: "x"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if source.idx != 1 {
+		t.Fatalf("credentials tried = %d, want 1 (5xx is not account-specific)", source.idx)
+	}
+	if len(source.reports) != 1 || source.reports[0].status != 503 {
+		t.Fatalf("reports = %+v", source.reports)
+	}
+}
+
+func TestFailoverOnInvalidAuth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer bad" {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, "bad key")
+			return
+		}
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	c, _ := New(Config{BaseURL: srv.URL, Model: "m"})
+	source := &fakeSource{creds: []Credential{{ID: "a1", APIKey: "bad"}, {ID: "a2", APIKey: "good"}}}
+	c.Credentials = source
+
+	if _, err := c.Complete(context.Background(), Request{User: "x"}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+}
+
+func TestAllCredentialsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":{"code":"insufficient_quota"}}`)
+	}))
+	defer srv.Close()
+
+	c, _ := New(Config{BaseURL: srv.URL, Model: "m"})
+	source := &fakeSource{creds: []Credential{{ID: "a1", APIKey: "k1"}, {ID: "a2", APIKey: "k2"}}}
+	c.Credentials = source
+
+	_, err := c.Complete(context.Background(), Request{User: "x"})
+	if err == nil || !strings.Contains(err.Error(), "pool empty") {
+		t.Fatalf("err = %v", err)
+	}
+	if source.idx != 2 {
+		t.Fatalf("credentials tried = %d, want 2", source.idx)
+	}
+}
+
+func TestSuccessReportsCredential(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	c, _ := New(Config{BaseURL: srv.URL, Model: "m"})
+	source := &fakeSource{creds: []Credential{{ID: "a1", APIKey: "k1"}}}
+	c.Credentials = source
+
+	if _, err := c.Complete(context.Background(), Request{User: "x"}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(source.reports) != 1 || source.reports[0].status != 200 || source.reports[0].id != "a1" {
+		t.Fatalf("reports = %+v", source.reports)
+	}
+}
+
+func TestUsageCallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"model":"m-returned","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":9,"completion_tokens":4}}`)
+	}))
+	defer srv.Close()
+
+	c, _ := New(Config{BaseURL: srv.URL, Model: "m"})
+	source := &fakeSource{creds: []Credential{{ID: "a1", APIKey: "k1"}}}
+	c.Credentials = source
+
+	var got []Usage
+	c.OnUsage = func(u Usage) { got = append(got, u) }
+
+	if _, err := c.Complete(context.Background(), Request{User: "x"}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("usage callbacks = %d", len(got))
+	}
+	u := got[0]
+	if u.ProviderID != c.Name || u.CredentialID != "a1" || u.Model != "m-returned" {
+		t.Fatalf("usage = %+v", u)
+	}
+	if u.PromptTokens != 9 || u.CompletionTokens != 4 {
+		t.Fatalf("tokens = %+v", u)
+	}
+}
+
+func TestNoUsageOnFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c, _ := New(Config{BaseURL: srv.URL, Model: "m"})
+	called := false
+	c.OnUsage = func(Usage) { called = true }
+
+	if _, err := c.Complete(context.Background(), Request{User: "x"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if called {
+		t.Fatal("usage callback fired for a failed call")
 	}
 }

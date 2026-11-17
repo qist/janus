@@ -22,7 +22,9 @@ import (
 	"janus/internal/authz"
 	"janus/internal/gateway"
 	"janus/internal/mcp"
+	"janus/internal/pool"
 	"janus/internal/store"
+	"janus/internal/usage"
 	"janus/internal/verify"
 	"janus/internal/work"
 	"janus/internal/worksvc"
@@ -72,7 +74,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	gate, err := buildGate()
+	ledger := usage.NewMemoryLedger(nil)
+
+	gate, err := buildGate(ledger)
 	if err != nil {
 		return err
 	}
@@ -82,6 +86,7 @@ func run() error {
 	keys.Add(apiKey, api.Identity{AgentID: *agentID, Scopes: []api.Scope{api.ScopeAdmin}})
 
 	server := api.New(svc, keys)
+	server.Usage = ledger
 	mcpServer := mcp.New(svc, keys)
 	mcpServer.Version = version
 
@@ -141,7 +146,7 @@ func run() error {
 // buildGate wires the auditor models from JANUS_AUDITORS. Without any model the
 // gate stays empty and every sensitive action is denied, which is the intended
 // fail-closed default.
-func buildGate() (*auditor.Gate, error) {
+func buildGate(ledger usage.Ledger) (*auditor.Gate, error) {
 	gate := auditor.NewGate()
 	gate.Cache = auditor.NewMemoryCache(600, nil)
 
@@ -163,6 +168,38 @@ func buildGate() (*auditor.Gate, error) {
 		client, err := gateway.New(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("auditor %q: %w", cfg.Name, err)
+		}
+		if ledger != nil {
+			client.OnUsage = func(u gateway.Usage) {
+				_ = ledger.Append(context.Background(), usage.Entry{
+					ProviderID:       u.ProviderID,
+					CredentialID:     u.CredentialID,
+					Model:            u.Model,
+					PromptTokens:     u.PromptTokens,
+					CompletionTokens: u.CompletionTokens,
+				})
+			}
+		}
+		if len(cfg.APIKeyEnvs) > 0 {
+			accounts := pool.New(nil)
+			for i, envName := range cfg.APIKeyEnvs {
+				key := strings.TrimSpace(os.Getenv(envName))
+				if key == "" {
+					return nil, fmt.Errorf("auditor %q: %s is empty", client.Name, envName)
+				}
+				account := pool.Account{
+					ID:         fmt.Sprintf("%s#%d", client.Name, i+1),
+					ProviderID: client.Name,
+					APIKey:     key,
+					Models:     []string{client.Model},
+					Priority:   i,
+				}
+				if err := accounts.Add(account); err != nil {
+					return nil, fmt.Errorf("auditor %q: %w", client.Name, err)
+				}
+			}
+			client.Credentials = poolCredentials{accounts}
+			log.Printf("auditor %s: %d account(s) in the pool", client.Name, accounts.Len())
 		}
 		gate.Auditors = append(gate.Auditors, auditor.NewModelAuditor(client.Name, client.Model, modelCompleter{client}))
 	}
@@ -186,6 +223,29 @@ func (m modelCompleter) Complete(ctx context.Context, req auditor.CompletionRequ
 		return "", err
 	}
 	return resp.Text, nil
+}
+
+// poolCredentials adapts the account pool to gateway.CredentialSource. The
+// pool decides selection order and account health; the client only reports what
+// the upstream said.
+type poolCredentials struct {
+	accounts *pool.Pool
+}
+
+func (p poolCredentials) Next(_ context.Context, provider, model string) (gateway.Credential, error) {
+	account, err := p.accounts.Next(provider, model)
+	if err != nil {
+		return gateway.Credential{}, err
+	}
+	return gateway.Credential{ID: account.ID, APIKey: account.APIKey}, nil
+}
+
+func (p poolCredentials) Report(_ context.Context, credentialID string, status int, body string, retryAfter time.Duration) {
+	if status >= 200 && status <= 299 {
+		p.accounts.ReportSuccess(credentialID)
+		return
+	}
+	p.accounts.ReportFailure(credentialID, pool.ClassifyHTTP(status, body, retryAfter))
 }
 
 // capabilityAuthority signs the single-use tokens executors verify. Production

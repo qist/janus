@@ -12,9 +12,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"janus/internal/policy"
+	"janus/internal/usage"
 	"janus/internal/work"
 	"janus/internal/worksvc"
 )
@@ -38,6 +40,8 @@ type Server struct {
 	MaxBodyBytes int64
 	// Logf receives server-side failures; nil means log.Printf.
 	Logf func(format string, args ...any)
+	// Usage is the spend ledger exposed at /api/v1/usage; nil answers 501.
+	Usage usage.Ledger
 }
 
 // New returns a server. A nil authenticator rejects every request.
@@ -61,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/work-items", s.handleList)
+	mux.HandleFunc("GET /api/v1/usage", s.protect(ScopeRead, s.handleUsage))
 	mux.HandleFunc("POST /api/v1/work-items", s.protect(ScopeWrite, s.handleCreate))
 	mux.HandleFunc("GET /api/v1/work-items/{id}", s.protect(ScopeRead, s.handleGet))
 	mux.HandleFunc("GET /api/v1/work-items/{id}/handoff", s.protect(ScopeRead, s.handleHandoff))
@@ -135,6 +140,56 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		items = []work.WorkItem{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// handleUsage returns aggregated spend. Filters: key, group, work_item,
+// provider, model, credential, since, until (Unix seconds, inclusive).
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.Usage == nil {
+		writeError(w, http.StatusNotImplemented, "usage_unavailable", "usage ledger is not configured")
+		return
+	}
+
+	query := r.URL.Query()
+	filter := usage.Filter{
+		KeyID:        strings.TrimSpace(query.Get("key")),
+		GroupID:      strings.TrimSpace(query.Get("group")),
+		WorkItemID:   strings.TrimSpace(query.Get("work_item")),
+		ProviderID:   strings.TrimSpace(query.Get("provider")),
+		Model:        strings.TrimSpace(query.Get("model")),
+		CredentialID: strings.TrimSpace(query.Get("credential")),
+	}
+
+	since, ok := parseUnix(query.Get("since"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_time", "since must be Unix seconds")
+		return
+	}
+	until, ok := parseUnix(query.Get("until"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_time", "until must be Unix seconds")
+		return
+	}
+	filter.Since, filter.Until = since, until
+
+	totals, err := s.Usage.Totals(r.Context(), filter)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, totals)
+}
+
+func parseUnix(value string) (int64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, true
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 type createRequest struct {

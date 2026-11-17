@@ -12,6 +12,7 @@ import (
 	"janus/internal/auth"
 	"janus/internal/authz"
 	"janus/internal/policy"
+	"janus/internal/usage"
 	"janus/internal/work"
 	"janus/internal/worksvc"
 )
@@ -26,8 +27,9 @@ const (
 )
 
 type testEnv struct {
-	srv   *httptest.Server
-	board *work.Board
+	srv    *httptest.Server
+	board  *work.Board
+	server *Server
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -49,7 +51,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	server := New(svc, keys)
 	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
-	return &testEnv{srv: ts, board: board}
+	return &testEnv{srv: ts, board: board, server: server}
 }
 
 func (e *testEnv) do(t *testing.T, method, path, key string, body any) *http.Response {
@@ -697,6 +699,46 @@ func TestAuthorizeWithoutServiceIsNotImplemented(t *testing.T) {
 		Action: policy.Action{Kind: "fs.write", Targets: []string{"x.go"}},
 	}, http.StatusNotImplemented)
 	if code := errCode(t, resp); code != "authz_unavailable" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestUsageEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	ledger := usage.NewMemoryLedger(func() int64 { return 1000 })
+	for _, entry := range []usage.Entry{
+		{Model: "m1", ProviderID: "p1", PromptTokens: 10, CompletionTokens: 5, CostUSD: 0.01, CreatedAt: 100},
+		{Model: "m2", ProviderID: "p2", PromptTokens: 20, CompletionTokens: 10, CostUSD: 0.02, CreatedAt: 200},
+	} {
+		if err := ledger.Append(context.Background(), entry); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	e.server.Usage = ledger
+
+	resp := e.expect(t, http.MethodGet, "/api/v1/usage", readerKey, nil, http.StatusOK)
+	var totals usage.Totals
+	decodeBody(t, resp, &totals)
+	if totals.Entries != 2 || totals.Tokens() != 45 || totals.CostUSD != 0.03 {
+		t.Fatalf("totals = %+v", totals)
+	}
+
+	resp = e.expect(t, http.MethodGet, "/api/v1/usage?provider=p2", readerKey, nil, http.StatusOK)
+	decodeBody(t, resp, &totals)
+	if totals.Entries != 1 || totals.PromptTokens != 20 {
+		t.Fatalf("filtered totals = %+v", totals)
+	}
+
+	resp = e.expect(t, http.MethodGet, "/api/v1/usage?since=nope", readerKey, nil, http.StatusBadRequest)
+	if code := errCode(t, resp); code != "invalid_time" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestUsageWithoutLedgerIsNotImplemented(t *testing.T) {
+	e := newTestEnv(t)
+	resp := e.expect(t, http.MethodGet, "/api/v1/usage", readerKey, nil, http.StatusNotImplemented)
+	if code := errCode(t, resp); code != "usage_unavailable" {
 		t.Fatalf("code = %q", code)
 	}
 }

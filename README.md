@@ -55,6 +55,7 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | POST | `/api/v1/work-items/{id}/verdict` | verify | `{"epoch","verdict","reasons","checks"}` |
 | POST | `/api/v1/work-items/{id}/complete` | integrate | `{"epoch","idempotency_key"}` |
 | POST | `/api/v1/work-items/{id}/authorize` | authorize | 敏感操作授权，allow 时返回单次能力令牌 |
+| GET | `/api/v1/usage` | read | 用量汇总（按 key/group/工作项/provider/model/账号/时间过滤） |
 
 约定：
 
@@ -146,6 +147,37 @@ export JANUS_AUDITORS='[
 |---|---|
 | `JANUS_CAPABILITY_KEY` | ≥32 字节；生产必须设置，多实例要一致 |
 | 未设置时 | 由 `JANUS_API_KEY` 派生的进程内密钥，重启后旧令牌失效 |
+
+### 账号池
+
+同一个审计模型可以挂多把 key：`JANUS_AUDITORS` 的条目加 `api_key_envs`。
+
+```json
+{"name":"openai","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini",
+ "api_key_envs":["OPENAI_KEY_1","OPENAI_KEY_2"]}
+```
+
+- 只在**账号相关**的失败时换下一把：`429 insufficient_quota` / `402`（额度）、`429`（限流）、
+  `401/403`（失效）。`5xx` 和 `400` 不换账号——那不是账号的问题。
+- 换 key 不换模型，单次请求最多试 3 把，避免热循环。
+- 冷却与状态：限流默认 60s（尊重 `Retry-After`），`401/403` 直接停用，额度耗尽等到 `ResetsAt`；
+  重置时间未知时保持不可用，直到人工/成功调用恢复。
+- **不对健康账号做轮询**：切账号会丢 prompt cache，损失大于均衡收益，这是有意的。
+- 账号事件 append-only：`selected / exhausted / rate_limited / invalid / probe_failed / reset`，供对账。
+- key 只在内存里，`Account.APIKey` 带 `json:"-"`，不会被序列化进日志或配置。
+
+### 用量
+
+每次**成功**调用写一条账：provider / credential / model / prompt / completion tokens；
+失败调用不记账。
+
+```bash
+curl -s "http://127.0.0.1:8080/api/v1/usage?provider=openai&since=1794900000" \
+  -H "X-API-Key: $JANUS_API_KEY"
+# {"entries":1,"prompt_tokens":12,"completion_tokens":6,"cached_tokens":0,"cost_usd":0}
+```
+
+`cost_usd` 由调用方在知道价格表时填入；账本本身只保证 append-only 与可聚合。
 
 ## 目录
 

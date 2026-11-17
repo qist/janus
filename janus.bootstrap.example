@@ -4,3 +4,9 @@ JANUS_DB_KEY=
 JANUS_DATA_DIR=./data
 JANUS_LOG_LEVEL=info
 JANUS_BOOTSTRAP_TOKEN=
+
+# HTTP API：不设置则进程拒绝启动
+JANUS_API_KEY=
+JANUS_AGENT_ID=admin
+# 可选：设置后 /verify 在该目录执行契约 checks
+JANUS_WORKSPACE=

@@ -34,19 +34,19 @@ func New(board *work.Board, capsules capsule.Repository) *Service {
 
 // ClaimResult is what work_claim returns: the lease plus a bounded handover.
 type ClaimResult struct {
-	Claim    work.Claim
-	Pack     contextpack.Pack
-	Capsule  *capsule.Capsule
-	Warnings []string
+	Claim    work.Claim       `json:"claim"`
+	Pack     contextpack.Pack `json:"pack"`
+	Capsule  *capsule.Capsule `json:"capsule,omitempty"`
+	Warnings []string         `json:"warnings,omitempty"`
 }
 
 // ItemView is what work_get returns.
 type ItemView struct {
-	Item     work.WorkItem
-	Claim    *work.Claim
-	Capsule  *capsule.Capsule
-	Reviews  []work.Review
-	Warnings []string
+	Item     work.WorkItem    `json:"item"`
+	Claim    *work.Claim      `json:"claim,omitempty"`
+	Capsule  *capsule.Capsule `json:"capsule,omitempty"`
+	Reviews  []work.Review    `json:"reviews"`
+	Warnings []string         `json:"warnings,omitempty"`
 }
 
 // Claim takes a lease and builds the handover pack for the new holder.
@@ -69,6 +69,73 @@ func (s *Service) Claim(ctx context.Context, itemID, agentID string, role work.R
 		Capsule:  caps,
 		Warnings: append(warnings, packWarnings...),
 	}, nil
+}
+
+// List returns board items, optionally filtered by status and workspace.
+func (s *Service) List(ctx context.Context, status work.Status, workspaceID string) ([]work.WorkItem, error) {
+	return s.Board.List(ctx, status, workspaceID)
+}
+
+// Add creates a work item.
+func (s *Service) Add(ctx context.Context, item work.WorkItem) error {
+	return s.Board.Add(ctx, item)
+}
+
+// Heartbeat extends the lease held on itemID. Only the current holder may
+// extend it; the caller's identity comes from the transport, not the body.
+func (s *Service) Heartbeat(ctx context.Context, itemID, agentID string, epoch, extendSeconds int64) error {
+	if err := s.requireHolder(ctx, itemID, agentID, epoch, ""); err != nil {
+		return err
+	}
+	return s.Board.Heartbeat(ctx, itemID, epoch, extendSeconds)
+}
+
+// Release gives the item back without completing it.
+func (s *Service) Release(ctx context.Context, itemID, agentID string, epoch int64) error {
+	if err := s.requireHolder(ctx, itemID, agentID, epoch, ""); err != nil {
+		return err
+	}
+	return s.Board.Release(ctx, itemID, epoch)
+}
+
+// Complete closes an integrator lease and marks the item done.
+func (s *Service) Complete(ctx context.Context, itemID, agentID string, epoch int64, idempotencyKey string) error {
+	if err := s.requireHolder(ctx, itemID, agentID, epoch, work.RoleIntegrator); err != nil {
+		return err
+	}
+	return s.Board.Complete(ctx, itemID, epoch, idempotencyKey)
+}
+
+// Verify runs the contract checks for an existing verifier lease.
+func (s *Service) Verify(ctx context.Context, itemID, agentID string, epoch int64, runner work.CheckRunner) ([]work.CheckResult, error) {
+	if err := s.requireHolder(ctx, itemID, agentID, epoch, work.RoleVerifier); err != nil {
+		return nil, err
+	}
+	return s.Board.Verify(ctx, itemID, epoch, runner)
+}
+
+// requireHolder rejects a caller that does not own the active lease. Role is
+// checked when role is non-empty. The board re-checks the epoch under its own
+// lock, so a lease change between these two steps fails as a stale epoch
+// rather than acting for the wrong agent.
+func (s *Service) requireHolder(ctx context.Context, itemID, agentID string, epoch int64, role work.Role) error {
+	if strings.TrimSpace(agentID) == "" {
+		return work.ErrNotHolder
+	}
+	claim, ok := s.Board.ClaimOf(ctx, itemID)
+	if !ok {
+		return work.ErrLeaseExpired
+	}
+	if claim.LeaseEpoch != epoch {
+		return work.ErrStaleEpoch
+	}
+	if claim.AgentID != agentID {
+		return work.ErrNotHolder
+	}
+	if role != "" && claim.Role != role {
+		return work.ErrInvalidTransition
+	}
+	return nil
 }
 
 // Handoff rebuilds the pack without taking a lease.
@@ -107,7 +174,10 @@ func (s *Service) Get(ctx context.Context, itemID string) (ItemView, error) {
 
 // Submit delegates to the board and records the evidence in the capsule.
 // Capsule bookkeeping is best effort: a failed write must not undo a submit.
-func (s *Service) Submit(ctx context.Context, itemID string, epoch int64, idempotencyKey string, evidence work.Evidence) error {
+func (s *Service) Submit(ctx context.Context, itemID, agentID string, epoch int64, idempotencyKey string, evidence work.Evidence) error {
+	if err := s.requireHolder(ctx, itemID, agentID, epoch, work.RoleWorker); err != nil {
+		return err
+	}
 	if err := s.Board.Submit(ctx, itemID, epoch, idempotencyKey, evidence); err != nil {
 		return err
 	}
@@ -117,7 +187,10 @@ func (s *Service) Submit(ctx context.Context, itemID string, epoch int64, idempo
 
 // Verdict delegates to the board and records a failure in the capsule so the
 // next claimer starts from the previous attempt instead of from zero.
-func (s *Service) Verdict(ctx context.Context, itemID string, epoch int64, verdict work.Verdict, reasons string, checks []work.CheckResult) error {
+func (s *Service) Verdict(ctx context.Context, itemID, agentID string, epoch int64, verdict work.Verdict, reasons string, checks []work.CheckResult) error {
+	if err := s.requireHolder(ctx, itemID, agentID, epoch, work.RoleVerifier); err != nil {
+		return err
+	}
 	if err := s.Board.VerdictWithChecks(ctx, itemID, epoch, verdict, reasons, checks); err != nil {
 		return err
 	}

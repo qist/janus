@@ -167,7 +167,7 @@ func TestSubmitRecordsEvidenceInCapsule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := svc.Submit(ctx, "w1", c.Claim.LeaseEpoch, "k1", work.Evidence{
+	if err := svc.Submit(ctx, "w1", "worker-1", c.Claim.LeaseEpoch, "k1", work.Evidence{
 		Artifacts: []string{"artifact:1"},
 		DiffHash:  "sha-diff",
 	}); err != nil {
@@ -190,7 +190,7 @@ func TestSubmitFailureDoesNotTouchCapsule(t *testing.T) {
 	ctx := context.Background()
 	svc, _, repo, _ := setup(t)
 
-	err := svc.Submit(ctx, "w1", 99, "k1", work.Evidence{Artifacts: []string{"a1"}})
+	err := svc.Submit(ctx, "w1", "worker-1", 99, "k1", work.Evidence{Artifacts: []string{"a1"}})
 	if !errors.Is(err, work.ErrLeaseExpired) {
 		t.Fatalf("Submit = %v, want ErrLeaseExpired", err)
 	}
@@ -207,7 +207,7 @@ func TestVerdictRecordsFailureForNextClaimer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worker claim: %v", err)
 	}
-	if err := svc.Submit(ctx, "w1", w.Claim.LeaseEpoch, "k1", work.Evidence{
+	if err := svc.Submit(ctx, "w1", "worker-1", w.Claim.LeaseEpoch, "k1", work.Evidence{
 		Artifacts: []string{"artifact:1"},
 	}); err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -217,7 +217,7 @@ func TestVerdictRecordsFailureForNextClaimer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verifier claim: %v", err)
 	}
-	if err := svc.Verdict(ctx, "w1", v.Claim.LeaseEpoch, work.VerdictReject, "unit failed", []work.CheckResult{
+	if err := svc.Verdict(ctx, "w1", "verifier-1", v.Claim.LeaseEpoch, work.VerdictReject, "unit failed", []work.CheckResult{
 		{Name: "unit", ExitCode: 1, OutputTail: "FAIL: claim race"},
 	}); err != nil {
 		t.Fatalf("Verdict: %v", err)
@@ -258,14 +258,14 @@ func TestApproveDoesNotRecordFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worker claim: %v", err)
 	}
-	if err := svc.Submit(ctx, "w1", w.Claim.LeaseEpoch, "k1", work.Evidence{Artifacts: []string{"a1"}}); err != nil {
+	if err := svc.Submit(ctx, "w1", "worker-1", w.Claim.LeaseEpoch, "k1", work.Evidence{Artifacts: []string{"a1"}}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	v, err := svc.Claim(ctx, "w1", "verifier-1", work.RoleVerifier, "review", 60)
 	if err != nil {
 		t.Fatalf("verifier claim: %v", err)
 	}
-	if err := svc.Verdict(ctx, "w1", v.Claim.LeaseEpoch, work.VerdictApprove, "ok", nil); err != nil {
+	if err := svc.Verdict(ctx, "w1", "verifier-1", v.Claim.LeaseEpoch, work.VerdictApprove, "ok", nil); err != nil {
 		t.Fatalf("Verdict: %v", err)
 	}
 

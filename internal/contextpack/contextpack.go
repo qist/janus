@@ -43,10 +43,10 @@ type Input struct {
 
 // Pack is the rendered handover.
 type Pack struct {
-	Text    string
-	Tokens  int
-	Budget  int
-	Omitted []string
+	Text    string   `json:"text"`
+	Tokens  int      `json:"tokens"`
+	Budget  int      `json:"budget"`
+	Omitted []string `json:"omitted,omitempty"`
 }
 
 // Build renders a pack that is guaranteed to fit its budget.

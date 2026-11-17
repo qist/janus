@@ -88,6 +88,23 @@ janus/
 | 平台 | `platform` / `observe` | 路径、进程、网络、时钟、日志、指标 | 不依赖领域包 |
 | 入口 | `cmd/*` | 装配依赖、启动/关闭 | 不写业务逻辑 |
 
+### 当前已落地的包（v2 骨架）
+
+上面的目录是目标形态；截至 v2 起步，实际存在且被测试覆盖的只有这些：
+
+| 包 | 职责 |
+|---|---|
+| `internal/work` | 工作板状态机：契约、租约、fencing、路径锁、证据与评审；只通过 `Repository` 读写 |
+| `internal/store` | GORM 模型与实现：`Repository`、事务、胶囊表、SQLite 指标（`DBStatus`） |
+| `internal/auth` | API key scope、capability token、路径作用域 |
+| `internal/verify` | 执行契约 checks（超时、输出哈希、尾部截断） |
+| `internal/capsule` | 有界上下文胶囊：token 预算、版本、stale、裁剪 |
+| `internal/contextpack` | 认领交接包：brief + 胶囊 + 最近拒绝 + workspace 事实 |
+| `internal/worksvc` | 组合层：租约 + 交接包、证据/失败回写胶囊、租约持有者校验 |
+| `internal/api` | HTTP 传输层：`/api/v1/work-items/*`、鉴权与错误映射 |
+
+依赖方向同样成立：`api → worksvc → work/contextpack/capsule`，`store` 实现接口但不被领域包 import。
+
 ### 依赖方向
 
 ```

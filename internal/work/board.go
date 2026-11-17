@@ -37,6 +37,7 @@ var (
 	ErrSelfReview          = errors.New("verifier must differ from the submitter")
 	ErrVerifyRequired      = errors.New("verifier must re-run contract checks before approve")
 	ErrPathLocked          = errors.New("path scope locked by another active work item")
+	ErrNotHolder           = errors.New("agent does not hold the lease")
 )
 
 // Board is the single work-board state machine. It reads and writes only
@@ -120,6 +121,15 @@ func (b *Board) Get(ctx context.Context, id string) (WorkItem, bool) {
 		return WorkItem{}, false
 	}
 	return item, true
+}
+
+// List returns items filtered by status and workspace. Empty filters match
+// everything. It is a read-only view; expired leases are not reclaimed here.
+func (b *Board) List(ctx context.Context, status Status, workspaceID string) ([]WorkItem, error) {
+	if status != "" && !status.Valid() {
+		return nil, fmt.Errorf("invalid work item status %q", status)
+	}
+	return b.repo.ListItems(ctx, status, workspaceID)
 }
 
 // ClaimOf returns the current active lease for an item.

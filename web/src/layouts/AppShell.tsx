@@ -8,6 +8,7 @@ import {
   ListChecks,
   LogOut,
   Moon,
+  Send,
   Sun,
   Target,
 } from "lucide-react";
@@ -24,6 +25,7 @@ const NAV: { to: string; key: MessageKey; icon: typeof LayoutDashboard; end?: bo
   { to: "/items", key: "nav.items", icon: ListChecks },
   { to: "/models", key: "nav.models", icon: Boxes },
   { to: "/usage", key: "nav.usage", icon: BarChart3 },
+  { to: "/playground", key: "nav.playground", icon: Send },
   { to: "/scores", key: "nav.scores", icon: Gauge },
 ];
 

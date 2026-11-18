@@ -9,6 +9,7 @@ const Items = lazy(() => import("@/views/work/Items"));
 const ItemDetail = lazy(() => import("@/views/work/ItemDetail"));
 const Models = lazy(() => import("@/views/models/Models"));
 const Usage = lazy(() => import("@/views/insight/Usage"));
+const Playground = lazy(() => import("@/views/playground/Playground"));
 const Scores = lazy(() => import("@/views/insight/Scores"));
 const Login = lazy(() => import("@/views/system/Login"));
 
@@ -26,6 +27,7 @@ export const router = createHashRouter([
       { path: "items/:id", element: <ItemDetail /> },
       { path: "models", element: <Models /> },
       { path: "usage", element: <Usage /> },
+      { path: "playground", element: <Playground /> },
       { path: "scores", element: <Scores /> },
     ],
   },

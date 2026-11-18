@@ -365,3 +365,24 @@ export type OAuthStart = {
   redirect_uri: string;
   expires_in: number;
 };
+
+export type KeyKind = "admin" | "client" | "agent" | "tool";
+
+export type APIKey = {
+  id: string;
+  kind: KeyKind;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  notes?: string;
+  expires_at?: number;
+  revoked: boolean;
+  last_used_at?: number;
+  created_at: number;
+};
+
+/** The plaintext is only present in the create/rotate response. */
+export type CreatedKey = {
+  key: APIKey;
+  plaintext: string;
+};

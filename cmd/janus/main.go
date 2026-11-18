@@ -100,8 +100,11 @@ func run() error {
 	scores := scoring.New(scoring.Config{})
 	svc.Scores = scores
 
-	keys := api.NewStaticKeys()
-	keys.Add(apiKey, api.Identity{AgentID: *agentID, Scopes: []api.Scope{api.ScopeAdmin}})
+	// The env key stays first so an operator can always get in; stored keys
+	// add client/agent/tool identities without a restart.
+	staticKeys := api.NewStaticKeys()
+	staticKeys.Add(apiKey, api.Identity{AgentID: *agentID, Scopes: []api.Scope{api.ScopeAdmin}})
+	keys := auth.NewChain(staticKeys, auth.NewDynamicKeys(st))
 
 	providers, err := buildProviders(st)
 	if err != nil {
@@ -150,6 +153,7 @@ func run() error {
 	server.Scores = scores
 	server.Goals = goalSvc
 	server.Providers = providers
+	server.Keys = st
 	server.ReloadModels = reloadModels
 	mcpServer := mcp.New(svc, keys)
 	mcpServer.Version = version

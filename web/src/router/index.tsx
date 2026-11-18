@@ -12,6 +12,7 @@ const Usage = lazy(() => import("@/views/insight/Usage"));
 const Playground = lazy(() => import("@/views/playground/Playground"));
 const Scores = lazy(() => import("@/views/insight/Scores"));
 const Login = lazy(() => import("@/views/system/Login"));
+const Keys = lazy(() => import("@/views/system/Keys"));
 
 // hash 路由：静态文件由 Go embed 提供，不需要服务端 rewrite。
 export const router = createHashRouter([
@@ -26,6 +27,7 @@ export const router = createHashRouter([
       { path: "items", element: <Items /> },
       { path: "items/:id", element: <ItemDetail /> },
       { path: "models", element: <Models /> },
+      { path: "keys", element: <Keys /> },
       { path: "usage", element: <Usage /> },
       { path: "playground", element: <Playground /> },
       { path: "scores", element: <Scores /> },

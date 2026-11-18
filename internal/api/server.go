@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"janus/internal/auth"
 	"janus/internal/goals"
 	"janus/internal/oauth"
 	"janus/internal/policy"
@@ -53,6 +54,8 @@ type Server struct {
 	Goals *goals.Service
 	// Providers manages upstream providers and credentials; nil answers 501.
 	Providers *provider.Service
+	// Keys manages stored API keys; nil answers 501 on key routes.
+	Keys KeyStore
 	// ReloadModels rebuilds the proxy route table after a provider change.
 	// Failures are logged rather than returned: the write already succeeded and
 	// the previous table keeps serving.
@@ -99,6 +102,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/providers/{id}/quota", s.protect(ScopeAdmin, s.handleRefreshQuota))
 	mux.HandleFunc("POST /api/v1/providers/{id}/sync-routes", s.protect(ScopeAdmin, s.handleSyncRoutes))
 	mux.HandleFunc("GET /api/v1/quotas", s.protect(ScopeRead, s.handleListQuotas))
+	mux.HandleFunc("GET /api/v1/keys", s.protect(ScopeAdmin, s.handleListKeys))
+	mux.HandleFunc("POST /api/v1/keys", s.protect(ScopeAdmin, s.handleCreateKey))
+	mux.HandleFunc("DELETE /api/v1/keys/{id}", s.protect(ScopeAdmin, s.handleRevokeKey))
+	mux.HandleFunc("POST /api/v1/keys/{id}/rotate", s.protect(ScopeAdmin, s.handleRotateKey))
 	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/start", s.protect(ScopeAdmin, s.handleStartProviderOAuth))
 	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/complete", s.protect(ScopeAdmin, s.handleCompleteProviderOAuth))
 	mux.HandleFunc("POST /api/v1/providers/{id}/device/start", s.protect(ScopeAdmin, s.handleStartDevice))
@@ -137,6 +144,12 @@ func (s *Server) protect(scope Scope, next func(http.ResponseWriter, *http.Reque
 		id, err := s.authenticate(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key")
+			return
+		}
+		// Kinds separate the console from the model surface. An empty kind is
+		// the legacy env key, which stays a full admin.
+		if id.Kind != "" && id.Kind != auth.KeyKindAdmin {
+			writeError(w, http.StatusForbidden, "forbidden", "key kind "+id.Kind+" cannot use the admin API")
 			return
 		}
 		if !id.Has(scope) {

@@ -314,6 +314,11 @@ func (s *Server) checkChatKey(r *http.Request) (auth.Identity, int, string, stri
 	if err != nil {
 		return auth.Identity{}, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key"
 	}
+	// Admin and tool keys cannot spend tokens on the model surface. An empty
+	// kind is the legacy env key and keeps its old behaviour.
+	if identity.Kind != "" && identity.Kind != auth.KeyKindClient && identity.Kind != auth.KeyKindAgent {
+		return auth.Identity{}, http.StatusForbidden, "forbidden", "key kind " + identity.Kind + " cannot use model endpoints"
+	}
 	if !identity.Has(auth.ScopeChat) {
 		return auth.Identity{}, http.StatusForbidden, "forbidden", "key lacks scope chat"
 	}

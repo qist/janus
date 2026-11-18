@@ -24,12 +24,17 @@ const (
 // channel with gemini in Protocols but Kind=custom is visible in the catalogue
 // without pretending the gateway supports it yet.
 type Channel struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Category    string   `json:"category"`
-	Kind        Kind     `json:"kind"`
-	Protocols   []string `json:"protocols"`
-	Auth        []string `json:"auth"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Category  string   `json:"category"`
+	Kind      Kind     `json:"kind"`
+	Protocols []string `json:"protocols"`
+	Auth      []string `json:"auth"`
+	// Login names the one-click sign-in this channel has today: "oauth" for the
+	// built-in authorization-code flows, "device_code" for GitHub. Empty means
+	// the channel supports OAuth in principle but janus needs an operator
+	// supplied client (custom oauth config) before a button can work.
+	Login       string   `json:"login,omitempty"`
 	BaseURL     string   `json:"base_url"`
 	AltBaseURLs []string `json:"alt_base_urls,omitempty"`
 	Note        string   `json:"note,omitempty"`
@@ -44,12 +49,14 @@ var channelCatalog = []Channel{
 	{
 		ID: "openai-codex", Name: "OpenAI Codex (ChatGPT plan)", Category: ChannelSubscription,
 		Kind: KindOpenAI, Protocols: []string{"responses", "chat"}, Auth: []string{"oauth"},
+		Login:   "oauth",
 		BaseURL: "https://chatgpt.com/backend-api/codex",
 		Note:    "OAuth only; Responses protocol, needs the Codex adapter.",
 	},
 	{
 		ID: "claude-code", Name: "Claude Code (Anthropic plan)", Category: ChannelSubscription,
 		Kind: KindAnthropic, Protocols: []string{"anthropic"}, Auth: []string{"oauth"},
+		Login:   "oauth",
 		BaseURL: "https://api.anthropic.com",
 		Note:    "OAuth token needs the anthropic-beta oauth header.",
 	},
@@ -68,6 +75,7 @@ var channelCatalog = []Channel{
 	{
 		ID: "github-copilot", Name: "GitHub Copilot", Category: ChannelSubscription,
 		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"device_code"},
+		Login:   "device_code",
 		BaseURL: "https://api.githubcopilot.com",
 		Note:    "GitHub device flow, then exchange for a short-lived Copilot token.",
 	},
@@ -76,13 +84,13 @@ var channelCatalog = []Channel{
 		Kind: KindCustom, Protocols: []string{"gemini"}, Auth: []string{"oauth"},
 		BaseURL:     "https://cloudcode-pa.googleapis.com",
 		AltBaseURLs: []string{"https://daily-cloudcode-pa.googleapis.com"},
-		Note:        "Gemini protocol; needs a Gemini adapter.",
+		Note:        "Gemini protocol; a Gemini adapter and a custom OAuth client are required before login can work.",
 	},
 	{
 		ID: "antigravity", Name: "Google Antigravity", Category: ChannelSubscription,
 		Kind: KindCustom, Protocols: []string{"gemini"}, Auth: []string{"oauth"},
 		BaseURL: "https://cloudcode-pa.googleapis.com",
-		Note:    "Same Code Assist quota as Gemini CLI.",
+		Note:    "Same Code Assist quota as Gemini CLI; needs a custom OAuth client.",
 	},
 	{
 		ID: "command-code", Name: "Command Code", Category: ChannelSubscription,
@@ -93,6 +101,7 @@ var channelCatalog = []Channel{
 		ID: "cline", Name: "Cline", Category: ChannelSubscription,
 		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"api_key", "oauth"},
 		BaseURL: "https://api.cline.bot/api/v1",
+		Note:    "Cline's OAuth lives in its editor extension; use an API key or configure a custom OAuth client.",
 	},
 
 	// --- first-party vendors ---

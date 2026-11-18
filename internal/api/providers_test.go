@@ -642,6 +642,20 @@ func TestProxyListingExposesAuthMethods(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateProvider ds: %v", err)
 	}
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "codex", Kind: provider.KindOpenAI, Channel: "openai-codex",
+		BaseURL: "https://chatgpt.com/backend-api/codex",
+	}); err != nil {
+		t.Fatalf("CreateProvider codex: %v", err)
+	}
+	// The catalogue documents OAuth but janus has no client for it; the console
+	// must see oauth_ready=false instead of a dead button.
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "google", Kind: provider.KindCustom, Channel: "google-code-assist",
+		BaseURL: "https://cloudcode-pa.googleapis.com",
+	}); err != nil {
+		t.Fatalf("CreateProvider google: %v", err)
+	}
 
 	resp := e.expect(t, http.MethodGet, "/api/v1/providers", readerKey, nil, http.StatusOK)
 	var list struct {
@@ -649,13 +663,27 @@ func TestProxyListingExposesAuthMethods(t *testing.T) {
 	}
 	decodeBody(t, resp, &list)
 	auths := map[string][]string{}
+	ready := map[string][2]bool{}
 	for _, item := range list.Providers {
 		auths[item.ID] = item.Auth
+		ready[item.ID] = [2]bool{item.OAuthReady, item.DeviceReady}
 	}
 	if len(auths["gh"]) == 0 || auths["gh"][0] != "device_code" {
 		t.Fatalf("gh auth = %v", auths["gh"])
 	}
 	if len(auths["ds"]) == 0 || auths["ds"][0] != "api_key" {
 		t.Fatalf("ds auth = %v", auths["ds"])
+	}
+	if !ready["codex"][0] {
+		t.Fatal("codex should be oauth_ready")
+	}
+	if !ready["gh"][1] {
+		t.Fatal("github-copilot should be device_ready")
+	}
+	if ready["google"][0] || ready["google"][1] {
+		t.Fatalf("google reported a login flow that does not exist: %v", ready["google"])
+	}
+	if len(auths["google"]) == 0 || auths["google"][0] != "oauth" {
+		t.Fatalf("google auth = %v", auths["google"])
 	}
 }

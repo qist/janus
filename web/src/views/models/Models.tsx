@@ -182,6 +182,7 @@ export default function Models() {
     label: "",
     secret: "",
   });
+  const [oauthConfigDraft, setOauthConfigDraft] = useState("");
 
   const canAdmin = Boolean(me?.scopes.includes("admin"));
   const credentialProvider = providers?.find((p) => p.id === credentialForm.provider_id);
@@ -189,19 +190,25 @@ export default function Models() {
   // not offer an OAuth button, and a device-code channel must not be sent to an
   // authorization-code page.
   const authMethods = credentialProvider?.auth ?? [];
-  const supportsOAuth = authMethods.includes("oauth");
-  const supportsDevice = authMethods.includes("device_code");
+  const supportsOAuth = Boolean(credentialProvider?.oauth_ready);
+  const supportsDevice = Boolean(credentialProvider?.device_ready);
+  const needsOAuthConfig = authMethods.includes("oauth") && !supportsOAuth && !supportsDevice;
 
   // Quick connect: the channel decides what the next action is, and the
   // upstream is created on demand so signing in is one step.
   const quickChannel = channels.find((channel) => channel.id === quick.channel);
   const quickMethods = quickChannel?.auth ?? ["api_key"];
-  const quickOAuth = quickMethods.includes("oauth");
-  const quickDevice = quickMethods.includes("device_code");
-  const quickApiKey =
-    quickMethods.length === 0 ||
-    quickMethods.includes("api_key") ||
-    quickMethods.includes("none");
+  const quickOAuth = quickChannel?.login === "oauth";
+  const quickDevice = quickChannel?.login === "device_code";
+  const quickNeedsConfig =
+    Boolean(quickChannel) &&
+    quickMethods.includes("oauth") &&
+    !quickOAuth &&
+    !quickDevice;
+  const quickApiKey = quickMethods.length === 0 || quickMethods.includes("api_key");
+  // Local endpoints need no credential at all: creating the upstream is the
+  // whole setup.
+  const quickNoAuth = quickMethods.length > 0 && quickMethods.every((method) => method === "none");
 
   const load = useCallback(async () => {
     setError(null);
@@ -479,6 +486,40 @@ export default function Models() {
     return created.id;
   }
 
+  // A channel without a built-in client needs its PKCE endpoints before a login
+  // button can exist; saving them here is what turns oauth_ready on.
+  async function onSaveOAuthConfig() {
+    if (!credentialForm.provider_id) return;
+    let parsed: OAuthConfig;
+    try {
+      parsed = JSON.parse(oauthConfigDraft) as OAuthConfig;
+    } catch {
+      setError(new Error(t("models.oauthJsonInvalid")));
+      return;
+    }
+    await run("oauth:config", () =>
+      updateProvider(credentialForm.provider_id, { oauth: parsed })
+    );
+    setOauthConfigDraft("");
+  }
+
+  // Used when the channel has nothing to sign in with yet: create the upstream
+  // and jump straight to its row so the operator can finish the setup.
+  async function onQuickSetup() {
+    if (!quickChannel) return;
+    setBusy("quick:setup");
+    setError(null);
+    try {
+      const providerID = await ensureChannelProvider(quickChannel);
+      setCredentialForm((form) => ({ ...form, provider_id: providerID }));
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function onQuickConnect(mode: "key" | "oauth" | "device") {
     if (!quickChannel) return;
     setBusy(`quick:${mode}`);
@@ -635,6 +676,24 @@ export default function Models() {
                   <KeyRound className="h-4 w-4" />
                   {busy === "quick:device" ? t("models.deviceStarting") : t("models.deviceLogin")}
                 </Button>
+              ) : null}
+              {quickNeedsConfig || quickNoAuth ? (
+                <Button
+                  disabled={!quickChannel || busy === "quick:setup"}
+                  onClick={() => void onQuickSetup()}
+                >
+                  <Plus className="h-4 w-4" />
+                  {busy === "quick:setup"
+                    ? t("models.saving")
+                    : quickNoAuth
+                      ? t("models.quickConnect")
+                      : t("models.quickSetup")}
+                </Button>
+              ) : null}
+              {quickNeedsConfig ? (
+                <p className="basis-full text-xs text-amber-600 dark:text-amber-400">
+                  {t("models.oauthNeedsConfig")}
+                </p>
               ) : null}
               {quickChannel?.note ? (
                 <p className="basis-full text-xs text-muted-foreground">{quickChannel.note}</p>
@@ -931,6 +990,26 @@ export default function Models() {
                   : t("models.quotaRefresh")}
               </Button>
             </div>
+
+            {canAdmin && needsOAuthConfig ? (
+              <div className="mb-3 space-y-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-3">
+                <p className="text-xs">{t("models.oauthNeedsConfig")}</p>
+                <textarea
+                  rows={3}
+                  spellCheck={false}
+                  placeholder='{"client_id":"...","authorize_url":"https://...","token_url":"https://...","redirect_uri":"https://..."}'
+                  className="w-full rounded-lg border bg-transparent px-3 py-2 font-mono text-xs outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  value={oauthConfigDraft}
+                  onChange={(event) => setOauthConfigDraft(event.target.value)}
+                />
+                <Button
+                  disabled={!oauthConfigDraft.trim() || busy === "oauth:config"}
+                  onClick={() => void onSaveOAuthConfig()}
+                >
+                  {busy === "oauth:config" ? t("models.saving") : t("models.oauthSaveConfig")}
+                </Button>
+              </div>
+            ) : null}
 
             {canAdmin && supportsOAuth ? (
               <div className="mb-3 rounded-lg border p-3">

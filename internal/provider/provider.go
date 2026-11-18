@@ -117,12 +117,16 @@ type Provider struct {
 	// their own public client (PKCE) for a vendor janus has no preset for,
 	// instead of janus shipping somebody else's client id.
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
-	// Auth lists how this provider can be authenticated, derived from its
-	// channel. It is computed for the console and never stored.
-	Auth      []string `json:"auth,omitempty"`
-	Enabled   bool     `json:"enabled"`
-	CreatedAt int64    `json:"created_at"`
-	UpdatedAt int64    `json:"updated_at"`
+	// Auth lists how this provider could authenticate, derived from its
+	// channel. OAuthReady and DeviceReady say whether a one-click flow exists
+	// right now, so the console does not show a button that cannot open a page.
+	// All three are computed and never stored.
+	Auth        []string `json:"auth,omitempty"`
+	OAuthReady  bool     `json:"oauth_ready,omitempty"`
+	DeviceReady bool     `json:"device_ready,omitempty"`
+	Enabled     bool     `json:"enabled"`
+	CreatedAt   int64    `json:"created_at"`
+	UpdatedAt   int64    `json:"updated_at"`
 }
 
 // AuthMethods reports how an operator can sign in. The catalogue decides:
@@ -145,9 +149,16 @@ func (p Provider) AuthMethods() []string {
 	return []string{"api_key"}
 }
 
-// WithAuth fills the computed field for API responses.
-func (p Provider) WithAuth() Provider {
+// WithCapabilities fills the computed fields for API responses. It needs the
+// service because the registries decide whether a flow is actually registered.
+func (s *Service) WithCapabilities(p Provider) Provider {
 	p.Auth = p.AuthMethods()
+	if _, ok := s.oauthConfig(p); ok {
+		p.OAuthReady = true
+	}
+	if _, ok := s.deviceConfig(p); ok {
+		p.DeviceReady = true
+	}
 	return p
 }
 

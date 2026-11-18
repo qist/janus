@@ -233,6 +233,9 @@ export type Provider = {
   oauth?: OAuthConfig;
   /** How this channel can authenticate: api_key | oauth | device_code | none. */
   auth?: string[];
+  /** One-click flow registered right now (empty means a custom client is needed). */
+  oauth_ready?: boolean;
+  device_ready?: boolean;
   enabled: boolean;
   created_at: number;
   updated_at: number;
@@ -245,6 +248,8 @@ export type Channel = {
   kind: ProviderKind;
   protocols: string[];
   auth: string[];
+  /** Built-in one-click sign-in: "oauth" or "device_code"; empty needs a custom client. */
+  login?: string;
   base_url: string;
   alt_base_urls?: string[];
   note?: string;

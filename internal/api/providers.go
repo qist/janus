@@ -93,7 +93,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request, _ I
 		list = []provider.Provider{}
 	}
 	for index := range list {
-		list[index] = list[index].WithAuth()
+		list[index] = s.Providers.WithCapabilities(list[index])
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": list})
 }
@@ -129,7 +129,7 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 	s.reloadModels(r.Context())
-	writeJSON(w, http.StatusCreated, created.WithAuth())
+	writeJSON(w, http.StatusCreated, s.Providers.WithCapabilities(created))
 }
 
 func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ Identity) {
@@ -153,7 +153,7 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 	s.reloadModels(r.Context())
-	writeJSON(w, http.StatusOK, updated.WithAuth())
+	writeJSON(w, http.StatusOK, s.Providers.WithCapabilities(updated))
 }
 
 func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request, _ Identity) {

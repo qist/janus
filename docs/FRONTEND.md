@@ -123,10 +123,17 @@ web/
 - 控制台拿不到任何令牌，只能看到 `masked`。
 
 **按渠道决定登录方式**。`GET /api/v1/providers` 的每条记录带 `auth`（`api_key` / `oauth` /
-`device_code` / `none`），取自渠道目录：DeepSeek、Qwen 等只显示 API Key 输入；`openai-codex`、
-`claude-code` 显示 OAuth；`github-copilot` 显示设备码。**不再按 `kind` 回落到 OpenAI 登录页**——
-这正是之前"选任何渠道都弹 OpenAI 授权"的原因。手动粘贴密钥的入口保留：Copilot 渠道粘贴
-GitHub token 也能用（会先换取短期 token）。
+`device_code` / `none`）、`oauth_ready` 与 `device_ready`：前者是渠道目录声明的能力，后两者表示
+janus **当前真的注册了**对应流程。只有 `oauth_ready` 才显示 OAuth 按钮，只有 `device_ready` 才显示
+设备码按钮。**不再按 `kind` 回落到 OpenAI 登录页**——这正是之前"选任何渠道都弹 OpenAI 授权"的原因。
+
+目录里 `login` 字段标明内置的一键登录：`openai-codex` / `claude-code` 为 `oauth`，
+`github-copilot` 为 `device_code`。Google Code Assist、Antigravity、Cline、OpenCode Zen 虽然
+文档上支持 OAuth，但 janus 没有它们的 client，因此 `login` 为空、`oauth_ready=false`：控制台不再
+给一个点了没反应的按钮，而是提示「需要自带客户端」，并就地提供 JSON 编辑框填写
+`client_id / authorize_url / token_url / redirect_uri`，保存后 `oauth_ready` 变为 true，登录即可用
+（`PATCH /providers/{id}` 的 `oauth` 字段）。纯本地渠道（`auth=none`，如 Ollama）只需创建上游，
+不产生凭据。
 
 ### GitHub Copilot 设备码
 

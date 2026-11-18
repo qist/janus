@@ -356,3 +356,54 @@ func TestDeviceReauthorizationRejectsForeignKey(t *testing.T) {
 		t.Fatal("re-authorized a credential from another provider")
 	}
 }
+
+func TestCapabilitiesTellWhichLoginActuallyWorks(t *testing.T) {
+	ctx := context.Background()
+	svc := testService(t)
+
+	cases := []struct {
+		id           string
+		channel      string
+		kind         Kind
+		wantAuth     string
+		wantOAuth    bool
+		wantDevice   bool
+		customConfig bool
+	}{
+		{"codex", "openai-codex", KindOpenAI, "oauth", true, false, false},
+		{"claude", "claude-code", KindAnthropic, "oauth", true, false, false},
+		{"copilot", "github-copilot", KindOpenAI, "device_code", false, true, false},
+		{"deepseek", "deepseek", KindOpenAI, "api_key", false, false, false},
+		// The catalogue documents OAuth, but janus has no client for it; the
+		// console must not offer a button that opens nothing.
+		{"google", "google-code-assist", KindCustom, "oauth", false, false, false},
+		{"antigravity", "antigravity", KindCustom, "oauth", false, false, false},
+		{"custom", "custom", KindOpenAI, "oauth", true, false, true},
+	}
+	for _, tc := range cases {
+		provider := Provider{ID: tc.id, Kind: tc.kind, Channel: tc.channel, BaseURL: "https://api.example.com/v1"}
+		if tc.customConfig {
+			provider.OAuth = &OAuthConfig{
+				ClientID: "cid", AuthorizeURL: "https://login.example.com/a",
+				TokenURL: "https://login.example.com/t", RedirectURI: "https://login.example.com/cb",
+			}
+		}
+		if _, err := svc.CreateProvider(ctx, provider); err != nil {
+			t.Fatalf("%s: CreateProvider: %v", tc.id, err)
+		}
+		stored, err := svc.Store.GetProvider(ctx, tc.id)
+		if err != nil {
+			t.Fatalf("%s: GetProvider: %v", tc.id, err)
+		}
+		filled := svc.WithCapabilities(stored)
+		if len(filled.Auth) == 0 || filled.Auth[0] != tc.wantAuth {
+			t.Fatalf("%s: auth = %v, want %s", tc.id, filled.Auth, tc.wantAuth)
+		}
+		if filled.OAuthReady != tc.wantOAuth {
+			t.Fatalf("%s: oauth_ready = %v", tc.id, filled.OAuthReady)
+		}
+		if filled.DeviceReady != tc.wantDevice {
+			t.Fatalf("%s: device_ready = %v", tc.id, filled.DeviceReady)
+		}
+	}
+}

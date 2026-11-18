@@ -144,6 +144,13 @@ var channelCatalog = []Channel{
 		Note:    "Cline's OAuth lives in its editor extension; use an API key or configure a custom OAuth client.",
 	},
 
+	{
+		ID: "grok", Name: "Grok (X Premium)", Category: ChannelSubscription,
+		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"oauth"},
+		BaseURL: "https://cli-chat-proxy.grok.com/v1",
+		Note:    "xAI OAuth; the subscription token is served by the CLI proxy.",
+	},
+
 	// --- first-party vendors ---
 	{
 		ID: "openai", Name: "OpenAI", Category: ChannelVendor,

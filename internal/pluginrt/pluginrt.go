@@ -58,10 +58,15 @@ type Row struct {
 type State string
 
 const (
-	StateOff    State = "off"
-	StateActive State = "active"
-	StateFailed State = "failed"
+	StateOff         State = "off"
+	StateActive      State = "active"
+	StateNeedsConfig State = "needs_config"
+	StateFailed      State = "failed"
 )
+
+// ErrNeedsConfig is a plugin saying "enabled, but I need a value first". It is
+// not a failure: the console shows what to fill instead of a broken flow.
+var ErrNeedsConfig = errors.New("configuration required")
 
 // Status is one plugin as this process applied it. Config values are not
 // returned: they may contain a client id the operator would rather not print.
@@ -138,6 +143,7 @@ func (c *Ctx) OAuthLogin(channelID string, config oauth.Config) error {
 		return fmt.Errorf("oauth login: unknown channel %q", channelID)
 	}
 	channel.Login = "oauth"
+	channel.Auth = withAuth(channel.Auth, "oauth")
 	channel.Source = "plugin"
 	if err := provider.RegisterChannel(channel); err != nil {
 		return err
@@ -157,6 +163,7 @@ func (c *Ctx) DeviceLogin(channelID string, config oauth.DeviceConfig) error {
 		return fmt.Errorf("device login: unknown channel %q", channelID)
 	}
 	channel.Login = "device_code"
+	channel.Auth = withAuth(channel.Auth, "device_code")
 	channel.Source = "plugin"
 	if err := provider.RegisterChannel(channel); err != nil {
 		return err
@@ -182,6 +189,7 @@ func (c *Ctx) PollLogin(channelID string, config oauth.PollConfig) error {
 		return fmt.Errorf("poll login: unknown channel %q", channelID)
 	}
 	channel.Login = "poll"
+	channel.Auth = withAuth(channel.Auth, "oauth")
 	channel.Source = "plugin"
 	if err := provider.RegisterChannel(channel); err != nil {
 		return err
@@ -192,6 +200,19 @@ func (c *Ctx) PollLogin(channelID string, config oauth.PollConfig) error {
 	config.Kind = channel.ID
 	c.targets.Polls.Set(config)
 	return nil
+}
+
+// withAuth appends a capability the catalogue did not declare. A channel that
+// ships with API keys only becomes "api_key + oauth" once a login plugin exists.
+func withAuth(methods []string, method string) []string {
+	for _, existing := range methods {
+		if existing == method {
+			return methods
+		}
+	}
+	out := make([]string, 0, len(methods)+1)
+	out = append(out, methods...)
+	return append(out, method)
 }
 
 // Register adds a compiled plugin; packages call it from init. A duplicate id is
@@ -328,9 +349,14 @@ func ApplyManifests(manifests []Manifest, file File, targets Targets) *Runtime {
 		}
 		ctx := &Ctx{ID: composed.Manifest.ID, Config: composed.Config, targets: targets}
 		if err := safeApply(composed.Manifest, ctx); err != nil {
-			status.State = StateFailed
-			status.Error = err.Error()
-			log.Printf("plugin %s failed: %v", composed.Manifest.ID, err)
+			if errors.Is(err, ErrNeedsConfig) {
+				status.State = StateNeedsConfig
+				status.Error = err.Error()
+			} else {
+				status.State = StateFailed
+				status.Error = err.Error()
+				log.Printf("plugin %s failed: %v", composed.Manifest.ID, err)
+			}
 		} else {
 			status.State = StateActive
 			runtime.closers = append(runtime.closers, ctx.onClose...)

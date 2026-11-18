@@ -212,6 +212,9 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
 | `claude` | `claude-code` | 授权码 + PKCE |
 | `copilot` | `github-copilot` | 设备码 + 短期令牌交换 |
 | `workbuddy` | `workbuddy` | 网页登录 + 轮询取 token + 厂商刷新 |
+| `grok` | `grok` | xAI OAuth，token 由 Grok CLI 代理服务 |
+| `gemini` | `google-code-assist` | Google OAuth（需要 client_secret） |
+| `antigravity` | `antigravity` | Google OAuth（需要 client_secret） |
 
 配置（`JANUS_PLUGINS` 指向 JSON，缺省表示全部按默认启用）：
 
@@ -230,6 +233,8 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
   而不是点了没反应的按钮；
 - `config` 覆盖插件默认值（`client_id`、`authorize_url`、`token_url`、`redirect_uri`、`scopes`、
   `device_url` 等），所以自带 client 不必改代码；
+- `state=needs_config` 表示插件已启用但缺配置（Google 的 `client_secret`），
+  补上后自动变 active，不算失败；
 - 单个插件失败（panic 或返回错误）只标记为 failed，其它插件继续；
 - `GET /api/v1/plugins` 返回每个插件的 state（active/off/failed）与错误，不含配置值。
 
@@ -247,10 +252,12 @@ refresh_header`，字段名留空时按常见命名容错识别（含 `data` 包
 刷新时按 `refresh_header` 带上 refresh token。WorkBuddy 属于这一类：登录后拿到的就是 API token，
 可直接用于 OpenAI chat 路径，不需要额外的协议适配。
 
-Google Code Assist / Antigravity 仍需要「自带 client」：它们是标准的授权码流程，
-但 janus 没内置对应 client；自定义 OAuth 支持 `client_secret`（confidential client），
-配置后 `oauth_ready` 立即为 true。注意 Code Assist 的推理走 Gemini 私有协议，
-登录成功之后仍需要 Gemini 适配器才能真正发请求。
+Google Code Assist / Antigravity 是标准的授权码流程，janus 没有内置它们需要的
+`client_secret`：在 plugins.json 里给 `gemini` / `antigravity` 填 `client_secret`
+（可同时覆盖 `client_id`、`redirect_uri`），插件即从 `needs_config` 变为 `active`。
+自定义 OAuth 也支持 `client_secret`，适合一次性试某个 client。
+注意 Code Assist / Antigravity 的推理走 Gemini 私有协议，登录成功之后仍需要对应适配器
+（`antigravity` 还需要它的网关）才能真正发请求；`grok`、`workbuddy` 则是 OpenAI 协议，登录即可调用。
 
 插件只负责"渠道 + 登录能力"：它给已有目录条目打上 `login` 标记并注册 flow，
 不重复定义渠道元数据。

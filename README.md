@@ -88,15 +88,21 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/work-items/w1/claim \
 
 ## 控制台 /ui
 
-`GET /` 302 到 `/ui/`。页面是无构建步骤的原生 HTML/JS，直接 embed 进二进制；静态资源公开且不含数据，
-所有数据由页面带着操作员填写的 API key 调 `/api/v1`，key 只存在当前标签页的 `sessionStorage`。
+React 19 + TypeScript + Vite + Tailwind 的 SPA（hash 路由），构建产物 embed 在二进制里；
+`GET /` 302 到 `/ui/`。架构与取舍见 [前端架构](docs/FRONTEND.md)。
 
-- **目标**：列表、创建（`202` 异步拆项）、进度条、取消；
-- **工作项**：按状态筛选、查看租约与评审记录、人工建项、强制派工（admin）、取消；
-- 自动刷新可开关，且输入框聚焦时不会打断你正在填的表单。
+- 概览、目标（创建 / 进度 / 取消）、工作项（筛选 / 租约 / 证据输出 / 评审 / 强制派工 / 取消）、
+  模型、用量、评分；
+- 登录即输入 API key，存本机 `localStorage`，服务端无会话；401 自动回登录；
+- 页面静态资源公开，数据全部经 `/api/v1` 且带 key。
 
-设计与目录里预留了 Preact/Svelte 构建链（`web/ → internal/ui/dist`），当前手写页面是为了让看板先能用；
-后续接入构建链时只替换静态资源，服务端接口不变。
+```bash
+make ui        # 重新构建并更新 internal/ui/dist（dist 随仓库提交，go build 不需要 Node）
+make ui-dev    # 本地 Vite 开发，/api 与 /v1 代理到 127.0.0.1:8080
+```
+
+模型页目前只读：模型与别名来自 `JANUS_MODELS`。provider / 凭据的在线管理（含 OAuth 登录）
+需要后端 CRUD 与加密存储，方案见 `docs/FRONTEND.md` §7。
 
 ## 目标与进度
 

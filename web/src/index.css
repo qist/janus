@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+    --border: 220 13% 91%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 0 0% 100%;
+    --danger: 0 72% 45%;
+  }
+
+  .dark {
+    --background: 222 47% 7%;
+    --foreground: 210 20% 92%;
+    --card: 222 40% 10%;
+    --muted: 222 32% 15%;
+    --muted-foreground: 217 12% 62%;
+    --border: 222 30% 19%;
+    --primary: 217 91% 65%;
+    --primary-foreground: 222 47% 8%;
+    --danger: 0 74% 62%;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  a {
+    @apply text-primary;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border bg-card p-5 shadow-sm;
+  }
+
+  .input {
+    @apply w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none;
+    @apply focus:ring-2 focus:ring-primary/30;
+  }
+
+  .label {
+    @apply text-xs font-medium text-muted-foreground;
+  }
+}

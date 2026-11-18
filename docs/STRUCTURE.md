@@ -47,10 +47,11 @@ janus/
 │   ├── observe/               # 日志、指标、trace
 │   ├── platform/              # paths、fs、proc、net、clock、ids
 │   └── testkit/               # fakes、fixtures、golden（只允许测试引用）
-├── web/                       # 前端源码（Preact + htm 或 Svelte）
+├── web/                       # 控制台源码（React 19 + TS + Vite + Tailwind）
 ├── docs/
 │   ├── REFACTOR.md            # 设计基线
 │   ├── STRUCTURE.md           # 本文
+│   ├── FRONTEND.md            # 控制台架构、构建与后续模型管理
 │   ├── OPERATIONS.md          # 部署、升级、排障
 │   ├── SECURITY.md            # 威胁模型、密钥、审计
 │   └── ADR/                   # 架构决策记录
@@ -109,7 +110,7 @@ janus/
 | `internal/pool` | 账号池：额度状态、冷却、候选排序、失败分类、append-only 账号事件 |
 | `internal/proxy` | `/v1` 模型代理：OpenAI 线格式、别名路由、SSE 透传、上游错误映射 |
 | `internal/goals` | 目标：意图 → 工作项（planner 接口）、进度聚合、SSE 数据源 |
-| `internal/ui` | 人用控制台：embed 的静态页面，调 `/api/v1`；当前无构建步骤 |
+| `internal/ui` | 人用控制台：embed 的 `dist`（React SPA），源码在 `web/`，见 `docs/FRONTEND.md` |
 | `internal/usage` | 用量账本：append-only 记账、按 key/group/工作项/账号/时间聚合 |
 | `internal/scoring` | 模型打分：Wilson 下界、质量闸门、probation/active/trusted、硬闸门停权、事件可重算 |
 | `internal/authz` | 授权编排：policy → auditor → 单次能力令牌，绑定租约与动作哈希 |

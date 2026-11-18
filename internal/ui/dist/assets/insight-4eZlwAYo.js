@@ -1,0 +1,1 @@
+import{a as s,q as a}from"./api-BwJtJOU1.js";function t(){return s("/v1/models")}function i(r={}){return s(`/api/v1/usage${a(r)}`)}function n(){return s("/api/v1/scores")}export{t as a,i as g,n as l};

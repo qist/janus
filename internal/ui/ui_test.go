@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -23,29 +24,43 @@ func TestIndexServesConsole(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Fatalf("content type = %q", ct)
 	}
+	if resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("cache-control = %q", resp.Header.Get("Cache-Control"))
+	}
 	raw, _ := io.ReadAll(resp.Body)
 	body := string(raw)
-	if !strings.Contains(body, "Janus") || !strings.Contains(body, "/ui/static/app.js") {
+	if !strings.Contains(body, "Janus") || !strings.Contains(body, "/ui/assets/") {
 		t.Fatalf("body = %s", body)
 	}
 }
 
-func TestStaticAssets(t *testing.T) {
+// The hashed asset referenced by index.html must be served and cacheable.
+func TestHashedAsset(t *testing.T) {
 	srv := httptest.NewServer(Handler())
 	defer srv.Close()
 
-	for _, path := range []string{"/ui/static/app.js", "/ui/static/styles.css"} {
-		resp, err := srv.Client().Get(srv.URL + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("%s status = %d", path, resp.StatusCode)
-		}
-		if resp.Header.Get("Cache-Control") != "no-cache" {
-			t.Fatalf("%s cache-control = %q", path, resp.Header.Get("Cache-Control"))
-		}
-		resp.Body.Close()
+	index, err := srv.Client().Get(srv.URL + "/ui/")
+	if err != nil {
+		t.Fatalf("GET /ui/: %v", err)
+	}
+	raw, _ := io.ReadAll(index.Body)
+	index.Body.Close()
+
+	match := regexp.MustCompile(`src="(/ui/assets/[^"]+\.js)"`).FindStringSubmatch(string(raw))
+	if len(match) != 2 {
+		t.Fatalf("no hashed js asset in index: %s", raw)
+	}
+
+	resp, err := srv.Client().Get(srv.URL + match[1])
+	if err != nil {
+		t.Fatalf("GET %s: %v", match[1], err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("asset status = %d", resp.StatusCode)
+	}
+	if cache := resp.Header.Get("Cache-Control"); !strings.Contains(cache, "immutable") {
+		t.Fatalf("asset cache-control = %q", cache)
 	}
 }
 
@@ -73,7 +88,7 @@ func TestUnknownAssetIsNotFound(t *testing.T) {
 	srv := httptest.NewServer(Handler())
 	defer srv.Close()
 
-	resp, err := srv.Client().Get(srv.URL + "/ui/static/missing.js")
+	resp, err := srv.Client().Get(srv.URL + "/ui/assets/missing.js")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}

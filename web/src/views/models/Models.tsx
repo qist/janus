@@ -175,6 +175,12 @@ export default function Models() {
     aliases: "",
     priority: "0",
   });
+  const [quick, setQuick] = useState({
+    channel: "",
+    base_url: "",
+    label: "",
+    secret: "",
+  });
 
   const canAdmin = Boolean(me?.scopes.includes("admin"));
   const credentialProvider = providers?.find((p) => p.id === credentialForm.provider_id);
@@ -184,6 +190,17 @@ export default function Models() {
   const authMethods = credentialProvider?.auth ?? [];
   const supportsOAuth = authMethods.includes("oauth");
   const supportsDevice = authMethods.includes("device_code");
+
+  // Quick connect: the channel decides what the next action is, and the
+  // upstream is created on demand so signing in is one step.
+  const quickChannel = channels.find((channel) => channel.id === quick.channel);
+  const quickMethods = quickChannel?.auth ?? ["api_key"];
+  const quickOAuth = quickMethods.includes("oauth");
+  const quickDevice = quickMethods.includes("device_code");
+  const quickApiKey =
+    quickMethods.length === 0 ||
+    quickMethods.includes("api_key") ||
+    quickMethods.includes("none");
 
   const load = useCallback(async () => {
     setError(null);
@@ -329,15 +346,17 @@ export default function Models() {
     });
   }
 
-  async function onStartOAuth(credentialID?: string) {
-    const target = providers?.find((p) => p.id === credentialForm.provider_id);
-    if (!target) return;
+  async function onStartOAuth(credentialID?: string, providerID?: string) {
+    // Use the id, not a providers lookup: quick connect just created the
+    // provider and this render's list may not contain it yet.
+    const targetID = providerID ?? credentialForm.provider_id;
+    if (!targetID) return;
     setBusy("oauth:start");
     setError(null);
     try {
-      const start = await startOAuth(target.id, credentialID);
+      const start = await startOAuth(targetID, credentialID);
       setOauth({
-        providerID: target.id,
+        providerID: targetID,
         sessionID: start.session_id,
         authURL: start.auth_url,
         credentialID,
@@ -436,6 +455,58 @@ export default function Models() {
     });
   }
 
+  // ensureChannelProvider adopts an existing upstream for the channel or creates
+  // one, so the console never asks for "add upstream" as a separate step.
+  async function ensureChannelProvider(channel: Channel): Promise<string> {
+    const existing = (providers ?? []).find((provider) => provider.channel === channel.id);
+    if (existing) return existing.id;
+    const base = (quick.base_url.trim() || channel.base_url).trim();
+    if (!base) throw new Error(t("models.baseUrlRequired"));
+    const taken = new Set((providers ?? []).map((provider) => provider.id));
+    let id = channel.id;
+    for (let suffix = 2; taken.has(id); suffix += 1) {
+      id = `${channel.id}-${suffix}`;
+    }
+    const created = await createProvider({
+      id,
+      name: channel.name,
+      kind: channel.kind,
+      base_url: base,
+      channel: channel.id,
+    });
+    return created.id;
+  }
+
+  async function onQuickConnect(mode: "key" | "oauth" | "device") {
+    if (!quickChannel) return;
+    setBusy(`quick:${mode}`);
+    setError(null);
+    try {
+      const providerID = await ensureChannelProvider(quickChannel);
+      setCredentialForm((form) => ({ ...form, provider_id: providerID }));
+      if (mode === "key") {
+        if (!quick.secret.trim()) throw new Error(t("models.secretRequired"));
+        await createCredential(providerID, {
+          label: quick.label.trim() || undefined,
+          secret: quick.secret,
+        });
+        setQuick({ ...quick, secret: "" });
+        await load();
+        return;
+      }
+      await load();
+      if (mode === "oauth") {
+        await onStartOAuth(undefined, providerID);
+      } else {
+        await onStartDevice(providerID, quick.label.trim() || undefined);
+      }
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -481,6 +552,95 @@ export default function Models() {
               </Badge>
             ))}
           </div>
+        )}
+      </Card>
+
+      <Card>
+        <h2 className="mb-1 text-sm font-semibold">{t("models.quickTitle")}</h2>
+        <p className="mb-3 text-xs text-muted-foreground">{t("models.quickHint")}</p>
+        {canAdmin ? (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label={t("models.channel")}>
+              <Select
+                value={quick.channel}
+                onChange={(event) => {
+                  const id = event.target.value;
+                  const channel = channels.find((item) => item.id === id);
+                  setQuick({
+                    ...quick,
+                    channel: id,
+                    base_url: channel?.base_url ?? "",
+                  });
+                }}
+              >
+                <option value="">{t("models.quickPick")}</option>
+                {channels.map((channel) => (
+                  <option key={channel.id} value={channel.id}>
+                    {channel.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label={t("models.baseUrl")}>
+              <Input
+                value={quick.base_url}
+                placeholder="https://api.openai.com/v1"
+                onChange={(event) => setQuick({ ...quick, base_url: event.target.value })}
+              />
+            </Field>
+            <Field label={t("models.accountLabel")}>
+              <Input
+                value={quick.label}
+                placeholder={t("models.accountLabelPlaceholder")}
+                onChange={(event) => setQuick({ ...quick, label: event.target.value })}
+              />
+            </Field>
+            {quickApiKey ? (
+              <Field label={t("models.apiKey")}>
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  placeholder={t("models.secretPlaceholder")}
+                  value={quick.secret}
+                  onChange={(event) => setQuick({ ...quick, secret: event.target.value })}
+                />
+              </Field>
+            ) : null}
+            <div className="flex flex-wrap items-end gap-2 sm:col-span-2 lg:col-span-4">
+              {quickApiKey ? (
+                <Button
+                  disabled={!quickChannel || busy === "quick:key"}
+                  onClick={() => void onQuickConnect("key")}
+                >
+                  <Plus className="h-4 w-4" />
+                  {busy === "quick:key" ? t("models.saving") : t("models.quickAddKey")}
+                </Button>
+              ) : null}
+              {quickOAuth ? (
+                <Button
+                  disabled={!quickChannel || busy === "quick:oauth"}
+                  onClick={() => void onQuickConnect("oauth")}
+                >
+                  <KeyRound className="h-4 w-4" />
+                  {busy === "quick:oauth" ? t("models.oauthStarting") : t("models.oauthLogin")}
+                </Button>
+              ) : null}
+              {quickDevice ? (
+                <Button
+                  disabled={!quickChannel || busy === "quick:device"}
+                  onClick={() => void onQuickConnect("device")}
+                >
+                  <KeyRound className="h-4 w-4" />
+                  {busy === "quick:device" ? t("models.deviceStarting") : t("models.deviceLogin")}
+                </Button>
+              ) : null}
+              {quickChannel?.note ? (
+                <p className="basis-full text-xs text-muted-foreground">{quickChannel.note}</p>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">{t("models.readOnly")}</p>
         )}
       </Card>
 

@@ -240,6 +240,10 @@ CodeBuddy、美团 LongCat 等约 55 个入口；
 新增上游时选渠道会自动填 `id / name / kind / base_url` 并可继续改；`channel` 只存 id，
 路由与鉴权仍只看 `kind + base_url`。目录是静态数据，双方不共享代码，仅对齐了端点与认证方式。
 
+控制台顶部是「接入渠道」，一步完成：选中渠道后直接登录（OAuth / GitHub 设备码）或填 API Key，
+上游在第一次使用时自动创建（已有同渠道上游则复用，同名 id 冲突时加 `-2` 后缀）。
+高级场景仍可在下方手动新增空上游，再单独管理凭据。
+
 ### 余量（quota）
 
 `POST /api/v1/providers/{id}/quota` 逐个凭据读取厂商额度并落库（`provider_credentials.quota`）：

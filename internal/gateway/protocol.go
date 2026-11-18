@@ -29,6 +29,9 @@ const (
 	ProtocolAnthropic Protocol = "anthropic"
 	// ProtocolGemini is the Code Assist generateContent envelope.
 	ProtocolGemini Protocol = "gemini"
+	// ProtocolAntigravity is the same v1internal envelope with Antigravity's
+	// own metadata (userAgent/requestId/requestType) and client user agent.
+	ProtocolAntigravity Protocol = "antigravity"
 )
 
 // ParseProtocol validates a configured protocol name. Empty means chat, because
@@ -43,6 +46,8 @@ func ParseProtocol(value string) (Protocol, bool) {
 		return ProtocolAnthropic, true
 	case ProtocolGemini:
 		return ProtocolGemini, true
+	case ProtocolAntigravity:
+		return ProtocolAntigravity, true
 	}
 	return "", false
 }

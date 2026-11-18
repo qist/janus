@@ -129,8 +129,9 @@ var channelCatalog = []Channel{
 	{
 		ID: "antigravity", Name: "Google Antigravity", Category: ChannelSubscription,
 		Kind: KindCustom, Protocols: []string{"gemini"}, Auth: []string{"oauth"},
-		BaseURL: "https://cloudcode-pa.googleapis.com",
-		Note:    "Same Code Assist quota as Gemini CLI; needs a custom OAuth client.",
+		Protocol: ProtocolAntigravity,
+		BaseURL:  "https://cloudcode-pa.googleapis.com",
+		Note:     "Same Code Assist quota as Gemini CLI; needs a custom OAuth client.",
 	},
 	{
 		ID: "command-code", Name: "Command Code", Category: ChannelSubscription,

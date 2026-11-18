@@ -1,1 +1,0 @@
-import{g as t,q as a}from"./index-9OzGkrci.js";function r(){return t("/v1/models")}function n(s={}){return t(`/api/v1/usage${a(s)}`)}function g(s={}){return t(`/api/v1/usage/stats${a(s)}`)}function i(s={}){return t(`/api/v1/usage/logs${a(s)}`)}function o(){return t("/api/v1/scores")}export{r as a,g as b,i as c,n as g,o as l};

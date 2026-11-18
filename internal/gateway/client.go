@@ -42,8 +42,9 @@ type Config struct {
 	// Headers adds provider-specific headers (e.g. anthropic-version).
 	Headers map[string]string `json:"headers,omitempty"`
 	// Protocol is what the upstream speaks: "chat" (default), "responses"
-	// (OpenAI Responses / Codex) or "anthropic" (Messages). Callers always use
-	// chat completions; the translation happens in this package.
+	// (OpenAI Responses / Codex), "anthropic" (Messages), "gemini" (Code Assist)
+	// or "antigravity". Callers always use chat completions; the translation
+	// happens in this package.
 	Protocol string `json:"protocol,omitempty"`
 	// MaxTokens caps the completion. Zero means the provider default.
 	MaxTokens int `json:"max_tokens,omitempty"`
@@ -157,7 +158,19 @@ func New(cfg Config) (*Client, error) {
 	}
 	protocol, ok := ParseProtocol(cfg.Protocol)
 	if !ok {
-		return nil, fmt.Errorf("gateway protocol %q must be chat, responses or anthropic", cfg.Protocol)
+		return nil, fmt.Errorf("gateway protocol %q must be chat, responses, anthropic, gemini or antigravity", cfg.Protocol)
+	}
+	if protocol == ProtocolAntigravity {
+		// Antigravity expects its own client name; an operator can still pin a
+		// version through the environment.
+		headers := make(map[string]string, len(cfg.Headers)+1)
+		for name, value := range cfg.Headers {
+			headers[name] = value
+		}
+		if _, set := headers["User-Agent"]; !set {
+			headers["User-Agent"] = antigravityUserAgent()
+		}
+		cfg.Headers = headers
 	}
 
 	return &Client{
@@ -258,6 +271,8 @@ func (c *Client) Chat(ctx context.Context, model string, body []byte) ([]byte, U
 		return c.chatAnthropic(ctx, model, body)
 	case ProtocolGemini:
 		return c.chatGemini(ctx, model, body)
+	case ProtocolAntigravity:
+		return c.chatAntigravity(ctx, model, body)
 	}
 	attempts := 1
 	if c.Credentials != nil {
@@ -315,6 +330,8 @@ func (c *Client) ChatStream(ctx context.Context, model string, body []byte, dst 
 		return c.streamAnthropic(ctx, model, body, dst)
 	case ProtocolGemini:
 		return c.streamGemini(ctx, model, body, dst)
+	case ProtocolAntigravity:
+		return c.streamAntigravity(ctx, model, body, dst)
 	}
 	attempts := 1
 	if c.Credentials != nil {

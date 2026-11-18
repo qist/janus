@@ -29,7 +29,7 @@ export type CreateProviderBody = {
   kind: ProviderKind;
   base_url: string;
   channel?: string;
-  protocol?: "chat" | "responses" | "anthropic" | "gemini";
+  protocol?: "chat" | "responses" | "anthropic" | "gemini" | "antigravity";
   oauth?: OAuthConfig;
 };
 
@@ -41,7 +41,7 @@ export type ProviderPatch = {
   name?: string;
   base_url?: string;
   enabled?: boolean;
-  protocol?: "chat" | "responses" | "anthropic" | "gemini";
+  protocol?: "chat" | "responses" | "anthropic" | "gemini" | "antigravity";
   oauth?: OAuthConfig;
   clear_oauth?: boolean;
 };

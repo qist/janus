@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -48,20 +49,59 @@ type geminiGenerationConfig struct {
 	Temperature     *float64 `json:"temperature,omitempty"`
 }
 
+type geminiToolConfig struct {
+	FunctionCallingConfig struct {
+		Mode string `json:"mode"`
+	} `json:"functionCallingConfig"`
+}
+
 type geminiInnerRequest struct {
 	Contents          []geminiContent         `json:"contents"`
 	SystemInstruction *geminiContent          `json:"systemInstruction,omitempty"`
 	Tools             []geminiTool            `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig       `json:"toolConfig,omitempty"`
 	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
 type geminiEnvelope struct {
-	Model   string             `json:"model"`
-	Project string             `json:"project,omitempty"`
-	Request geminiInnerRequest `json:"request"`
+	Model   string `json:"model"`
+	Project string `json:"project,omitempty"`
+	// RequestID, UserAgent and RequestType are Antigravity's envelope
+	// metadata; an empty field is omitted so Code Assist requests stay clean.
+	RequestID   string             `json:"requestId,omitempty"`
+	UserAgent   string             `json:"userAgent,omitempty"`
+	RequestType string             `json:"requestType,omitempty"`
+	Request     geminiInnerRequest `json:"request"`
 }
 
-func buildGeminiRequest(in chatRequestIn) geminiEnvelope {
+// geminiMode selects the vendor dialect that shares the v1internal envelope.
+// Antigravity accepts the same contents but wants its own request metadata and
+// client user agent.
+type geminiMode struct {
+	antigravity bool
+}
+
+func (m geminiMode) decorate(envelope *geminiEnvelope) {
+	if !m.antigravity {
+		return
+	}
+	envelope.RequestID = "agent-" + randomToken(16)
+	envelope.UserAgent = "antigravity"
+	envelope.RequestType = "agent"
+}
+
+// antigravityUserAgent is what the official client sends. The version can be
+// pinned with JANUS_ANTIGRAVITY_VERSION when a deployment has to match a
+// specific build.
+func antigravityUserAgent() string {
+	version := strings.TrimSpace(os.Getenv("JANUS_ANTIGRAVITY_VERSION"))
+	if version == "" {
+		version = "1.10.0"
+	}
+	return "antigravity/hub/" + version + " windows/amd64"
+}
+
+func buildGeminiRequest(in chatRequestIn, mode geminiMode) geminiEnvelope {
 	envelope := geminiEnvelope{
 		Model: in.Model,
 		Request: geminiInnerRequest{
@@ -162,6 +202,14 @@ func buildGeminiRequest(in chatRequestIn) geminiEnvelope {
 		}
 		envelope.Request.Tools[0].FunctionDeclarations = append(envelope.Request.Tools[0].FunctionDeclarations, declaration)
 	}
+	if len(envelope.Request.Tools) > 0 && mode.antigravity {
+		// Antigravity validates tool arguments against the schema by default;
+		// saying so explicitly keeps the same behaviour when tools are present.
+		config := &geminiToolConfig{}
+		config.FunctionCallingConfig.Mode = "VALIDATED"
+		envelope.Request.ToolConfig = config
+	}
+	mode.decorate(&envelope)
 	return envelope
 }
 
@@ -295,16 +343,25 @@ func geminiEndpoint(base, method string) string {
 
 // chatGemini calls generateContent and renders a chat completion.
 func (c *Client) chatGemini(ctx context.Context, model string, body []byte) ([]byte, Usage, error) {
+	return c.chatGeminiMode(ctx, model, body, geminiMode{})
+}
+
+// chatAntigravity is the same call with Antigravity's envelope metadata.
+func (c *Client) chatAntigravity(ctx context.Context, model string, body []byte) ([]byte, Usage, error) {
+	return c.chatGeminiMode(ctx, model, body, geminiMode{antigravity: true})
+}
+
+func (c *Client) chatGeminiMode(ctx context.Context, model string, body []byte, mode geminiMode) ([]byte, Usage, error) {
 	var in chatRequestIn
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, Usage{}, fmt.Errorf("gateway %s: decode chat request: %w", c.Name, err)
 	}
-	envelope := buildGeminiRequest(in)
+	envelope := buildGeminiRequest(in, mode)
 	envelope.Model = model
 
 	resp, credentialID, err := c.sendBuild(ctx, model, geminiEndpoint(c.BaseURL, "generateContent"), false,
 		func(credential Credential) ([]byte, error) {
-			envelope.Project = c.geminiProject(ctx, credential)
+			envelope.Project = c.geminiProject(ctx, credential, mode)
 			return json.Marshal(envelope)
 		})
 	if err != nil {
@@ -335,17 +392,26 @@ func (c *Client) chatGemini(ctx context.Context, model string, body []byte) ([]b
 
 // streamGemini forwards Code Assist SSE as chat chunks.
 func (c *Client) streamGemini(ctx context.Context, model string, body []byte, dst io.Writer) (Usage, error) {
+	return c.streamGeminiMode(ctx, model, body, dst, geminiMode{})
+}
+
+// streamAntigravity is the streaming half of the Antigravity dialect.
+func (c *Client) streamAntigravity(ctx context.Context, model string, body []byte, dst io.Writer) (Usage, error) {
+	return c.streamGeminiMode(ctx, model, body, dst, geminiMode{antigravity: true})
+}
+
+func (c *Client) streamGeminiMode(ctx context.Context, model string, body []byte, dst io.Writer, mode geminiMode) (Usage, error) {
 	var in chatRequestIn
 	if err := json.Unmarshal(body, &in); err != nil {
 		return Usage{}, fmt.Errorf("gateway %s: decode chat request: %w", c.Name, err)
 	}
-	envelope := buildGeminiRequest(in)
+	envelope := buildGeminiRequest(in, mode)
 	envelope.Model = model
 
 	endpoint := geminiEndpoint(c.BaseURL, "streamGenerateContent") + "?alt=sse"
 	resp, credentialID, err := c.sendBuild(ctx, model, endpoint, true,
 		func(credential Credential) ([]byte, error) {
-			envelope.Project = c.geminiProject(ctx, credential)
+			envelope.Project = c.geminiProject(ctx, credential, mode)
 			return json.Marshal(envelope)
 		})
 	if err != nil {
@@ -416,9 +482,9 @@ func (c *Client) streamGemini(ctx context.Context, model string, body []byte, ds
 	return used, nil
 }
 
-// geminiProject resolves the cloud project Code Assist needs. The answer is
-// stable for an account, so it is cached per credential.
-func (c *Client) geminiProject(ctx context.Context, credential Credential) string {
+// geminiProject resolves the cloud project the v1internal envelope needs. The
+// answer is stable for an account, so it is cached per credential.
+func (c *Client) geminiProject(ctx context.Context, credential Credential, mode geminiMode) string {
 	c.projectMu.Lock()
 	if cached, ok := c.projects[credential.ID]; ok && time.Now().Before(cached.expires) {
 		project := cached.project
@@ -430,31 +496,100 @@ func (c *Client) geminiProject(ctx context.Context, credential Credential) strin
 	// Best effort: a project that cannot be read leaves the field empty and the
 	// generation call reports the real error. It must not be reported to the
 	// pool as an account failure.
-	request, err := c.protoRequest(ctx, geminiEndpoint(c.BaseURL, "loadCodeAssist"),
-		[]byte(`{"metadata":{"pluginType":"GEMINI_CLI"}}`), credential, false)
-	if err != nil {
-		return ""
+	loadBody := `{"metadata":{"pluginType":"GEMINI_CLI"}}`
+	if mode.antigravity {
+		loadBody = `{"metadata":{"ideType":"ANTIGRAVITY","pluginType":"GEMINI"}}`
 	}
-	resp, err := c.HTTP.Do(request)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return ""
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
+	raw, ok := c.geminiPost(ctx, credential, "loadCodeAssist", []byte(loadBody))
+	if !ok {
 		return ""
 	}
 	project := parseGeminiProject(raw)
+	if project == "" && mode.antigravity {
+		// A fresh account often has no project until onboarding runs once.
+		project = c.onboardAntigravity(ctx, credential, parseGeminiTier(raw))
+	}
+
 	c.projectMu.Lock()
 	if c.projects == nil {
 		c.projects = map[string]cachedProject{}
 	}
-	c.projects[credential.ID] = cachedProject{project: project, expires: time.Now().Add(30 * time.Minute)}
+	// An empty answer is cached too, but briefly: retrying every request would
+	// add a round trip to each call, while caching it for the full window would
+	// hide a project that onboarding just created.
+	ttl := 30 * time.Minute
+	if project == "" {
+		ttl = time.Minute
+	}
+	c.projects[credential.ID] = cachedProject{project: project, expires: time.Now().Add(ttl)}
 	c.projectMu.Unlock()
 	return project
+}
+
+// geminiPost performs one metadata call with the given credential. It returns
+// the raw body only on success.
+func (c *Client) geminiPost(ctx context.Context, credential Credential, method string, body []byte) ([]byte, bool) {
+	request, err := c.protoRequest(ctx, geminiEndpoint(c.BaseURL, method), body, credential, false)
+	if err != nil {
+		return nil, false
+	}
+	resp, err := c.HTTP.Do(request)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, false
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// onboardAntigravity creates the Code Assist project for an account that has
+// none yet, which is what the official client does on first run.
+func (c *Client) onboardAntigravity(ctx context.Context, credential Credential, tier string) string {
+	if tier == "" {
+		return ""
+	}
+	body, err := json.Marshal(map[string]any{
+		"tierId": tier,
+		"metadata": map[string]any{
+			"ideType":    "ANTIGRAVITY",
+			"platform":   "PLATFORM_UNSPECIFIED",
+			"pluginType": "GEMINI",
+		},
+	})
+	if err != nil {
+		return ""
+	}
+	raw, ok := c.geminiPost(ctx, credential, "onboardUser", body)
+	if !ok {
+		return ""
+	}
+	// The operation may still be running; a project id is what we need, so an
+	// incomplete answer simply means "try again on the next call".
+	var payload struct {
+		Response map[string]any `json:"response"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return projectFromAny(payload.Response["cloudaicompanionProject"])
+}
+
+func projectFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]any:
+		if id, ok := typed["id"].(string); ok {
+			return strings.TrimSpace(id)
+		}
+	}
+	return ""
 }
 
 func parseGeminiProject(raw []byte) string {
@@ -464,15 +599,26 @@ func parseGeminiProject(raw []byte) string {
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return ""
 	}
-	switch typed := payload.CloudAICompanionProject.(type) {
-	case string:
-		return strings.TrimSpace(typed)
-	case map[string]any:
-		if id, ok := typed["id"].(string); ok {
-			return strings.TrimSpace(id)
-		}
+	return projectFromAny(payload.CloudAICompanionProject)
+}
+
+// parseGeminiTier reads the account's tier, preferring the paid one.
+func parseGeminiTier(raw []byte) string {
+	var payload struct {
+		PaidTier struct {
+			ID string `json:"id"`
+		} `json:"paidTier"`
+		CurrentTier struct {
+			ID string `json:"id"`
+		} `json:"currentTier"`
 	}
-	return ""
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	if payload.PaidTier.ID != "" {
+		return payload.PaidTier.ID
+	}
+	return payload.CurrentTier.ID
 }
 
 type cachedProject struct {

@@ -90,12 +90,15 @@ const (
 	ProtocolResponses Protocol = "responses"
 	ProtocolAnthropic Protocol = "anthropic"
 	ProtocolGemini    Protocol = "gemini"
+	// ProtocolAntigravity is Google Antigravity: Code Assist's v1internal
+	// envelope with its own client metadata.
+	ProtocolAntigravity Protocol = "antigravity"
 )
 
 // Valid reports whether p is a protocol janus can translate.
 func (p Protocol) Valid() bool {
 	switch p {
-	case ProtocolChat, ProtocolResponses, ProtocolAnthropic, ProtocolGemini:
+	case ProtocolChat, ProtocolResponses, ProtocolAnthropic, ProtocolGemini, ProtocolAntigravity:
 		return true
 	}
 	return false

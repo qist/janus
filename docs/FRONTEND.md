@@ -258,7 +258,8 @@ Google Code Assist / Antigravity 是标准的授权码流程，janus 没有内�
 自定义 OAuth 也支持 `client_secret`，适合一次性试某个 client。
 Code Assist 走 `gemini` 适配器：`google-code-assist` 渠道自动使用它——`loadCodeAssist` 解析并缓存
 project（30 分钟），`generateContent` / `streamGenerateContent?alt=sse` 与 chat 互转，工具调用映射为
-`functionCall` / `functionResponse`，用量取 `usageMetadata`。Antigravity 的请求结构不同，仍需单独网关。
+`functionCall` / `functionResponse`，用量取 `usageMetadata`。
+Antigravity 走 `antigravity` 适配器（见下），两者共用同一份 contents 转换。
 `grok`、`workbuddy` 是 OpenAI 协议，登录即可调用。
 
 插件只负责"渠道 + 登录能力"：它给已有目录条目打上 `login` 标记并注册 flow，
@@ -274,11 +275,21 @@ project（30 分钟），`generateContent` / `streamGenerateContent?alt=sse` 与
 | `responses` | OpenAI Responses / Codex 后端 | `{base}/responses`（`/backend-api/*` 不加 `/v1`） |
 | `anthropic` | Anthropic Messages / Claude Code | `{base}/v1/messages` |
 | `gemini` | Google Code Assist（Gemini CLI 套餐） | `{base}/v1internal:generateContent` |
+| `antigravity` | Google Antigravity | `{base}/v1internal:generateContent`（同一端点，独立信封） |
 
 `protocol` 为空时按渠道推断：`openai-codex` → `responses`，`claude-code` 或 `kind=anthropic` →
-`anthropic`，其余 `chat`。控制台新建上游时可显式覆盖。
+`anthropic`，`google-code-assist` → `gemini`，`antigravity` → `antigravity`，其余 `chat`。
+控制台新建上游时可显式覆盖。
 
-翻译层在 `internal/gateway`，三种协议共用同一套选号、失败切换与用量采集：
+Antigravity 与 Code Assist 的差别在信封与客户端标识，不在内容转换：请求额外带
+`requestId`（`agent-` 前缀）、`userAgent: "antigravity"`、`requestType: "agent"`，并把
+`User-Agent` 设为 `antigravity/hub/<version> windows/amd64`（版本可用
+`JANUS_ANTIGRAVITY_VERSION` 固定）；有工具时补 `toolConfig.functionCallingConfig.mode=VALIDATED`。
+`loadCodeAssist` 用 `ideType=ANTIGRAVITY`；账号还没有 project 时调用 `onboardUser`（tier 取自
+`loadCodeAssist` 的 `paidTier/currentTier`）拿到 project，再缓存 30 分钟。空 project 只缓存 1 分钟，
+避免一次失败把后续请求都钉在空值上。
+
+翻译层在 `internal/gateway`，各协议共用同一套选号、失败切换与用量采集：
 
 - **请求**：system 提为 `instructions`（Responses）或 `system`（Messages）；OpenAI `tools` 映射为
   Responses 的 `{type:function,...}` 或 Messages 的 `input_schema`；`assistant.tool_calls` 映射为

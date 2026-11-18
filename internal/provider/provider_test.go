@@ -369,6 +369,8 @@ func TestEffectiveProtocol(t *testing.T) {
 		{"anthropic kind", Provider{Kind: KindAnthropic}, ProtocolAnthropic},
 		{"codex channel", Provider{Kind: KindOpenAI, Channel: "openai-codex"}, ProtocolResponses},
 		{"claude channel", Provider{Kind: KindOpenAI, Channel: "claude-code"}, ProtocolAnthropic},
+		{"gemini channel", Provider{Kind: KindCustom, Channel: "google-code-assist"}, ProtocolGemini},
+		{"antigravity channel", Provider{Kind: KindCustom, Channel: "antigravity"}, ProtocolAntigravity},
 		{"explicit wins", Provider{Kind: KindAnthropic, Protocol: ProtocolChat}, ProtocolChat},
 	}
 	for _, tc := range cases {

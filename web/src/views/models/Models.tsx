@@ -161,7 +161,7 @@ export default function Models() {
     kind: "openai" as ProviderKind,
     base_url: "",
     channel: "",
-    protocol: "" as "" | "chat" | "responses" | "anthropic" | "gemini",
+    protocol: "" as "" | "chat" | "responses" | "anthropic" | "gemini" | "antigravity",
     oauthJson: "",
   });
   const [credentialForm, setCredentialForm] = useState({
@@ -909,7 +909,7 @@ export default function Models() {
                 onChange={(event) =>
                   setProviderForm({
                     ...providerForm,
-                    protocol: event.target.value as "" | "chat" | "responses" | "anthropic" | "gemini",
+                    protocol: event.target.value as "" | "chat" | "responses" | "anthropic" | "gemini" | "antigravity",
                   })
                 }
               >
@@ -918,6 +918,7 @@ export default function Models() {
                 <option value="responses">responses</option>
                 <option value="anthropic">anthropic</option>
                 <option value="gemini">gemini</option>
+                <option value="antigravity">antigravity</option>
               </Select>
             </Field>
             <Field label={t("models.providerKind")}>

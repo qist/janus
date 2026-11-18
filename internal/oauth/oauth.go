@@ -147,8 +147,9 @@ func (r *Registry) Set(config Config) {
 	r.configs[config.Kind] = config
 }
 
-// ErrUnsupported means the provider kind has no OAuth client.
-var ErrUnsupported = errors.New("oauth is not supported for this provider kind")
+// ErrUnsupported means the provider has no usable sign-in flow. Callers wrap it
+// with the reason (missing channel, device-only channel, …).
+var ErrUnsupported = errors.New("sign-in flow unavailable for this provider")
 
 // ErrExchange means the vendor rejected the code or refresh.
 var ErrExchange = errors.New("oauth token exchange failed")

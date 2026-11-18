@@ -80,6 +80,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// happens here so a route works from either wire format.
 	mux.HandleFunc("POST /v1/messages", s.handleMessages)
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
+	// Codex CLI and other Responses clients speak this dialect; conversion to
+	// chat happens here, same as the Messages endpoint.
+	mux.HandleFunc("POST /v1/responses", s.handleResponses)
 }
 
 // Handler returns a standalone handler.

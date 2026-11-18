@@ -303,6 +303,12 @@ Antigravity 与 Code Assist 的差别在信封与客户端标识，不在内容�
 - **鉴权**：`anthropic` + API key 用 `x-api-key`，OAuth 用 `Authorization` + `anthropic-beta:
   oauth-2025-04-20`；`responses` + OAuth 额外带 `OpenAI-Beta: responses=experimental`、
   `originator: codex_cli_rs` 与从 access token 里解出的 `chatgpt-account-id`。
+- **入站也支持 Responses**：`POST /v1/responses` 让 Codex CLI 这类客户端直接指向 janus。
+  `instructions` 提为 system，`input` 里的 `message` / `function_call` / `function_call_output` 映射为
+  chat 的 user/assistant/tool 轮次，`tools` 用 `{type:function,name,parameters}` 形态；
+  响应输出 `output[]`（`message` + `output_text`，或 `function_call`），流式为
+  `response.created → response.output_item.added → response.output_text.delta → output_item.done →
+  response.completed`（`length` 转 `response.incomplete`）。终态事件在流尾一次性发出，保证 usage 已到齐。
 - **入站也支持 Messages**：`POST /v1/messages` 让 Claude Code 这类客户端直接指向 janus；
   网关把 Messages 转成 chat 调用路由，再把结果转回 Messages。流式按 Anthropic 事件序列
   （`message_start` → `content_block_*` → `message_delta` → `message_stop`）输出，

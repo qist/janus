@@ -19,3 +19,7 @@ JANUS_MASTER_KEY=
 # JANUS_AUDITORS=[{"name":"openai","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-4o-mini"}]
 # /v1 代理暴露的模型（aliases 可选，api_key_envs 支持多 key 失败切换）
 # JANUS_MODELS=[{"name":"openai","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","aliases":["fast"],"api_key_envs":["OPENAI_KEY_1","OPENAI_KEY_2"]}]
+# 登录插件配置（JSON）：缺省全部启用；可关掉某个登录流程或覆盖 client_id 等参数
+# JANUS_PLUGINS=/etc/janus/plugins.json
+# 文件格式：{"preset":"all|essentials","plugins":[{"id":"codex","enabled":true,"config":{"client_id":"..."}}]}
+# 已内置插件：codex（OpenAI Codex）、claude（Claude Code）、copilot（GitHub 设备码）

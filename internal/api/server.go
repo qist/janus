@@ -89,6 +89,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/scores", s.protect(ScopeRead, s.handleScores))
 	mux.HandleFunc("GET /api/v1/providers", s.protect(ScopeRead, s.handleListProviders))
 	mux.HandleFunc("GET /api/v1/channels", s.protect(ScopeRead, s.handleListChannels))
+	mux.HandleFunc("GET /api/v1/plugins", s.protect(ScopeRead, s.handleListPlugins))
 	mux.HandleFunc("POST /api/v1/providers", s.protect(ScopeAdmin, s.handleCreateProvider))
 	mux.HandleFunc("PATCH /api/v1/providers/{id}", s.protect(ScopeAdmin, s.handleUpdateProvider))
 	mux.HandleFunc("DELETE /api/v1/providers/{id}", s.protect(ScopeAdmin, s.handleDeleteProvider))

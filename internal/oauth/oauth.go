@@ -74,6 +74,12 @@ type Registry struct {
 	configs map[string]Config
 }
 
+// NewRegistry returns an empty registry. The plugin runtime fills it; tests use
+// it to point flows at local servers.
+func NewRegistry() *Registry {
+	return &Registry{configs: map[string]Config{}}
+}
+
 // DefaultRegistry returns the clients used by the official CLIs.
 //
 // Two presets only. Other coding subscriptions (Cursor, Kiro, Qoder,

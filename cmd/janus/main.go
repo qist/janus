@@ -24,6 +24,8 @@ import (
 	"janus/internal/gateway"
 	"janus/internal/goals"
 	"janus/internal/mcp"
+	"janus/internal/oauth"
+	"janus/internal/pluginrt"
 	"janus/internal/pool"
 	"janus/internal/provider"
 	"janus/internal/proxy"
@@ -31,9 +33,11 @@ import (
 	"janus/internal/store"
 	"janus/internal/ui"
 	"janus/internal/usage"
+
 	"janus/internal/verify"
 	"janus/internal/work"
 	"janus/internal/worksvc"
+	_ "janus/plugins/all"
 )
 
 var (
@@ -296,7 +300,32 @@ func buildProviders(st *store.Store) (*provider.Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("JANUS_MASTER_KEY: %w", err)
 	}
-	return provider.New(st, box), nil
+	svc := provider.New(st, box)
+	loadProviderPlugins(svc)
+	return svc, nil
+}
+
+// loadProviderPlugins applies the compiled login plugins. JANUS_PLUGINS points
+// at plugins.json; without it every plugin keeps its defaults.
+func loadProviderPlugins(svc *provider.Service) {
+	file, err := pluginrt.Load(strings.TrimSpace(os.Getenv("JANUS_PLUGINS")))
+	if err != nil {
+		log.Printf("plugins: %v (using defaults)", err)
+		file = pluginrt.File{}
+	}
+	registry := oauth.NewRegistry()
+	devices := oauth.NewDeviceRegistry()
+	pluginrt.ApplyManifests(pluginrt.Registered(), file, pluginrt.Targets{
+		OAuth:   registry,
+		Devices: devices,
+	})
+	svc.OAuth = registry
+	svc.Devices = devices
+	for _, status := range pluginrt.LastStatus() {
+		if status.State == pluginrt.StateFailed {
+			log.Printf("plugin %s failed: %s", status.ID, status.Error)
+		}
+	}
 }
 
 // usageRecorder returns the ledger callback shared by every gateway client.

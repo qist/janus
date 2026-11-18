@@ -198,6 +198,43 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
 
 还没做：WorkBuddy 等厂商私有刷新协议、精确的 token 计数。
 
+### 登录插件（插件模式）
+
+登录流程是编译进二进制的插件（`plugins/` 下每个包在 `init()` 里 `pluginrt.Register`，
+由 `plugins/all` 统一引入），运行时读取一份配置决定启用与参数——与 magpie 的做法一致。
+**不加载外部可执行文件**，也不执行任何运营方提供的代码。
+
+已内置：
+
+| id | 渠道 | 类型 |
+|---|---|---|
+| `codex` | `openai-codex` | 授权码 + PKCE |
+| `claude` | `claude-code` | 授权码 + PKCE |
+| `copilot` | `github-copilot` | 设备码 + 短期令牌交换 |
+
+配置（`JANUS_PLUGINS` 指向 JSON，缺省表示全部按默认启用）：
+
+```json
+{
+  "preset": "all",
+  "plugins": [
+    {"id": "codex", "enabled": true, "config": {"client_id": "自己的 client"}},
+    {"id": "claude", "enabled": false}
+  ]
+}
+```
+
+- `preset=essentials` 只开标记为 Essential 的插件；`all`（默认）全开；
+- `enabled=false` 关掉后，该渠道不再有 `oauth_ready` / `device_ready`，控制台显示"需要自带客户端"，
+  而不是点了没反应的按钮；
+- `config` 覆盖插件默认值（`client_id`、`authorize_url`、`token_url`、`redirect_uri`、`scopes`、
+  `device_url` 等），所以自带 client 不必改代码；
+- 单个插件失败（panic 或返回错误）只标记为 failed，其它插件继续；
+- `GET /api/v1/plugins` 返回每个插件的 state（active/off/failed）与错误，不含配置值。
+
+插件只负责"渠道 + 登录能力"：它给已有目录条目打上 `login` 标记并注册 flow，
+不重复定义渠道元数据。
+
 ### 协议适配（chat ↔ Responses / Messages）
 
 调用方永远只说 OpenAI chat completions；上游说什么由 `model_providers.protocol` 决定：

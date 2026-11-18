@@ -1,8 +1,10 @@
 package provider
 
 import (
+	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Channel categories. They only drive grouping in the console; routing never
@@ -30,14 +32,55 @@ type Channel struct {
 	Kind      Kind     `json:"kind"`
 	Protocols []string `json:"protocols"`
 	Auth      []string `json:"auth"`
-	// Login names the one-click sign-in this channel has today: "oauth" for the
-	// built-in authorization-code flows, "device_code" for GitHub. Empty means
-	// the channel supports OAuth in principle but janus needs an operator
-	// supplied client (custom oauth config) before a button can work.
-	Login       string   `json:"login,omitempty"`
+	// Login names the one-click sign-in this channel has right now: "oauth" or
+	// "device_code". It is set by the plugin that registers the flow, never by
+	// the catalogue itself — a channel supporting OAuth in principle has none
+	// until a plugin or a custom client provides one.
+	Login string `json:"login,omitempty"`
+	// Protocol, when set, is what the outbound adapter speaks. Plugin channels
+	// use it so a third-party entry does not need a code change.
+	Protocol    Protocol `json:"protocol,omitempty"`
 	BaseURL     string   `json:"base_url"`
 	AltBaseURLs []string `json:"alt_base_urls,omitempty"`
 	Note        string   `json:"note,omitempty"`
+	// Source is "builtin" for the compiled catalogue and "plugin" for entries
+	// loaded at startup.
+	Source string `json:"source,omitempty"`
+}
+
+// extraChannels holds operator-supplied entries. Built-ins stay immutable, so a
+// plugin cannot silently change a channel it did not define.
+var (
+	extraMu       sync.RWMutex
+	extraChannels = map[string]Channel{}
+)
+
+// RegisterChannel adds a channel or overrides a builtin entry. Only compiled
+// plugins call it, so an operator form cannot shadow a curated entry.
+func RegisterChannel(channel Channel) error {
+	id := strings.ToLower(strings.TrimSpace(channel.ID))
+	if id == "" {
+		return fmt.Errorf("plugin channel requires an id")
+	}
+	channel.ID = id
+	if channel.Source == "" {
+		channel.Source = "plugin"
+	}
+	extraMu.Lock()
+	defer extraMu.Unlock()
+	extraChannels[id] = channel
+	return nil
+}
+
+// ChannelBuiltin reports whether id names a compiled entry.
+func ChannelBuiltin(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	for _, channel := range channelCatalog {
+		if channel.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // channelCatalog is the single source of truth for the upstream list. Entries
@@ -49,14 +92,12 @@ var channelCatalog = []Channel{
 	{
 		ID: "openai-codex", Name: "OpenAI Codex (ChatGPT plan)", Category: ChannelSubscription,
 		Kind: KindOpenAI, Protocols: []string{"responses", "chat"}, Auth: []string{"oauth"},
-		Login:   "oauth",
 		BaseURL: "https://chatgpt.com/backend-api/codex",
 		Note:    "OAuth only; Responses protocol, needs the Codex adapter.",
 	},
 	{
 		ID: "claude-code", Name: "Claude Code (Anthropic plan)", Category: ChannelSubscription,
 		Kind: KindAnthropic, Protocols: []string{"anthropic"}, Auth: []string{"oauth"},
-		Login:   "oauth",
 		BaseURL: "https://api.anthropic.com",
 		Note:    "OAuth token needs the anthropic-beta oauth header.",
 	},
@@ -75,7 +116,6 @@ var channelCatalog = []Channel{
 	{
 		ID: "github-copilot", Name: "GitHub Copilot", Category: ChannelSubscription,
 		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"device_code"},
-		Login:   "device_code",
 		BaseURL: "https://api.githubcopilot.com",
 		Note:    "GitHub device flow, then exchange for a short-lived Copilot token.",
 	},
@@ -351,8 +391,25 @@ var channelCatalog = []Channel{
 // Channels returns the catalogue sorted by category then id. The slice is a
 // copy so callers cannot mutate the registry.
 func Channels() []Channel {
-	out := make([]Channel, len(channelCatalog))
-	copy(out, channelCatalog)
+	// Extras override builtins by id: a plugin may mark a curated channel as
+	// having a working login, and the list must not show the same id twice.
+	extraMu.RLock()
+	merged := make(map[string]Channel, len(channelCatalog)+len(extraChannels))
+	for _, channel := range channelCatalog {
+		merged[channel.ID] = channel
+	}
+	for id, channel := range extraChannels {
+		merged[id] = channel
+	}
+	extraMu.RUnlock()
+
+	out := make([]Channel, 0, len(merged))
+	for _, channel := range merged {
+		if channel.Source == "" {
+			channel.Source = "builtin"
+		}
+		out = append(out, channel)
+	}
 	rank := map[string]int{ChannelVendor: 0, ChannelSubscription: 1, ChannelRelay: 2, ChannelLocal: 3}
 	sort.SliceStable(out, func(i, j int) bool {
 		if rank[out[i].Category] != rank[out[j].Category] {
@@ -367,9 +424,16 @@ func Channels() []Channel {
 // arrive from a form.
 func ChannelByID(id string) (Channel, bool) {
 	id = strings.ToLower(strings.TrimSpace(id))
-	for _, channel := range channelCatalog {
-		if channel.ID == id {
-			return channel, true
+	extraMu.RLock()
+	channel, ok := extraChannels[id]
+	extraMu.RUnlock()
+	if ok {
+		return channel, true
+	}
+	for _, builtin := range channelCatalog {
+		if builtin.ID == id {
+			builtin.Source = "builtin"
+			return builtin, true
 		}
 	}
 	return Channel{}, false

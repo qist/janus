@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"janus/internal/oauth"
+	"janus/internal/pluginrt"
 	"janus/internal/provider"
 )
 
@@ -685,5 +686,20 @@ func TestProxyListingExposesAuthMethods(t *testing.T) {
 	}
 	if len(auths["google"]) == 0 || auths["google"][0] != "oauth" {
 		t.Fatalf("google auth = %v", auths["google"])
+	}
+}
+
+func TestPluginsEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	// The binary applies plugins at startup; the handler only reports the result.
+	pluginrt.ApplyManifests(nil, pluginrt.File{}, pluginrt.Targets{})
+
+	resp := e.expect(t, http.MethodGet, "/api/v1/plugins", readerKey, nil, http.StatusOK)
+	var payload struct {
+		Plugins []pluginrt.Status `json:"plugins"`
+	}
+	decodeBody(t, resp, &payload)
+	if payload.Plugins == nil {
+		t.Fatal("plugins should be an array, not null")
 	}
 }

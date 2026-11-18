@@ -167,6 +167,9 @@ func (p Provider) EffectiveProtocol() Protocol {
 	if p.Protocol != "" {
 		return p.Protocol
 	}
+	if channel, ok := ChannelByID(p.Channel); ok && channel.Protocol != "" {
+		return channel.Protocol
+	}
 	switch p.Channel {
 	case "openai-codex":
 		return ProtocolResponses

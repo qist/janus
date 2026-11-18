@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -496,7 +497,9 @@ func (c *Client) geminiProject(ctx context.Context, credential Credential, mode 
 	// Best effort: a project that cannot be read leaves the field empty and the
 	// generation call reports the real error. It must not be reported to the
 	// pool as an account failure.
-	loadBody := `{"metadata":{"pluginType":"GEMINI_CLI"}}`
+	// pluginType is a closed enum: "GEMINI_CLI" is rejected with 400, "GEMINI"
+	// is what both official clients send.
+	loadBody := `{"metadata":{"pluginType":"GEMINI"}}`
 	if mode.antigravity {
 		loadBody = `{"metadata":{"ideType":"ANTIGRAVITY","pluginType":"GEMINI"}}`
 	}
@@ -505,9 +508,17 @@ func (c *Client) geminiProject(ctx context.Context, credential Credential, mode 
 		return ""
 	}
 	project := parseGeminiProject(raw)
-	if project == "" && mode.antigravity {
-		// A fresh account often has no project until onboarding runs once.
-		project = c.onboardAntigravity(ctx, credential, parseGeminiTier(raw))
+	if project == "" {
+		// Surface why: an empty project turns into a misleading "no license"
+		// from the generation call, and the metadata response is the only clue.
+		log.Printf("gemini: loadCodeAssist without project: %s", excerpt(raw))
+		// A fresh account has no Code Assist project until onboarding runs once.
+		// Both dialects need this: without a project the generation call is
+		// rejected as if the account had no license.
+		project = c.onboardProject(ctx, credential, parseGeminiTier(raw), mode)
+		if project == "" {
+			log.Printf("gemini: onboardUser produced no project")
+		}
 	}
 
 	c.projectMu.Lock()
@@ -548,36 +559,53 @@ func (c *Client) geminiPost(ctx context.Context, credential Credential, method s
 	return raw, true
 }
 
-// onboardAntigravity creates the Code Assist project for an account that has
-// none yet, which is what the official client does on first run.
-func (c *Client) onboardAntigravity(ctx context.Context, credential Credential, tier string) string {
+// onboardProject creates the Code Assist project for an account that has none
+// yet, which is what the official clients do on first run. The operation can
+// come back unfinished; one short retry covers the common case without turning
+// a request into a poller.
+func (c *Client) onboardProject(ctx context.Context, credential Credential, tier string, mode geminiMode) string {
 	if tier == "" {
 		return ""
 	}
-	body, err := json.Marshal(map[string]any{
-		"tierId": tier,
-		"metadata": map[string]any{
+	metadata := map[string]any{"pluginType": "GEMINI"}
+	if mode.antigravity {
+		metadata = map[string]any{
 			"ideType":    "ANTIGRAVITY",
 			"platform":   "PLATFORM_UNSPECIFIED",
 			"pluginType": "GEMINI",
-		},
-	})
+		}
+	}
+	body, err := json.Marshal(map[string]any{"tierId": tier, "metadata": metadata})
 	if err != nil {
 		return ""
 	}
-	raw, ok := c.geminiPost(ctx, credential, "onboardUser", body)
-	if !ok {
-		return ""
+
+	for attempt := 0; attempt < 2; attempt++ {
+		raw, ok := c.geminiPost(ctx, credential, "onboardUser", body)
+		if !ok {
+			return ""
+		}
+		var payload struct {
+			Done     bool           `json:"done"`
+			Response map[string]any `json:"response"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			log.Printf("gemini: onboardUser decode failed: %v (%s)", err, excerpt(raw))
+			return ""
+		}
+		if project := projectFromAny(payload.Response["cloudaicompanionProject"]); project != "" {
+			return project
+		}
+		if payload.Done {
+			return ""
+		}
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(1200 * time.Millisecond):
+		}
 	}
-	// The operation may still be running; a project id is what we need, so an
-	// incomplete answer simply means "try again on the next call".
-	var payload struct {
-		Response map[string]any `json:"response"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return ""
-	}
-	return projectFromAny(payload.Response["cloudaicompanionProject"])
+	return ""
 }
 
 func projectFromAny(value any) string {
@@ -611,6 +639,10 @@ func parseGeminiTier(raw []byte) string {
 		CurrentTier struct {
 			ID string `json:"id"`
 		} `json:"currentTier"`
+		AllowedTiers []struct {
+			ID        string `json:"id"`
+			IsDefault bool   `json:"isDefault"`
+		} `json:"allowedTiers"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return ""
@@ -618,7 +650,18 @@ func parseGeminiTier(raw []byte) string {
 	if payload.PaidTier.ID != "" {
 		return payload.PaidTier.ID
 	}
-	return payload.CurrentTier.ID
+	if payload.CurrentTier.ID != "" {
+		return payload.CurrentTier.ID
+	}
+	for _, tier := range payload.AllowedTiers {
+		if tier.IsDefault && tier.ID != "" {
+			return tier.ID
+		}
+	}
+	if len(payload.AllowedTiers) > 0 {
+		return payload.AllowedTiers[0].ID
+	}
+	return ""
 }
 
 type cachedProject struct {

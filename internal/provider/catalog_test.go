@@ -50,3 +50,32 @@ func TestChannelLookup(t *testing.T) {
 		t.Fatal("unknown channel should be rejected")
 	}
 }
+
+// TestCopilotChannelCarriesIDHeaders guards the header set the Copilot API
+// rejects requests without. They must live on the channel, because a provider
+// created from it is not otherwise told which IDE it is imitating.
+func TestCopilotChannelCarriesIDHeaders(t *testing.T) {
+	channel, ok := ChannelByID("github-copilot")
+	if !ok {
+		t.Fatal("github-copilot channel missing")
+	}
+	for _, name := range []string{"Editor-Version", "Copilot-Integration-Id", "User-Agent"} {
+		if channel.Headers[name] == "" {
+			t.Fatalf("github-copilot is missing %s", name)
+		}
+	}
+
+	provider := Provider{ID: "gh", Channel: "github-copilot", Headers: map[string]string{
+		"Editor-Version": "vscode/9.9.9",
+	}}
+	merged := requestHeaders(provider)
+	if merged["Editor-Version"] != "vscode/9.9.9" {
+		t.Fatalf("provider override ignored: %v", merged)
+	}
+	if merged["Copilot-Integration-Id"] == "" {
+		t.Fatalf("channel headers dropped: %v", merged)
+	}
+	if got := requestHeaders(Provider{Channel: "deepseek"}); got != nil {
+		t.Fatalf("unexpected headers for a plain channel: %v", got)
+	}
+}

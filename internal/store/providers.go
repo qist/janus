@@ -24,9 +24,11 @@ type ProviderModel struct {
 	Protocol string `gorm:"size:16"`
 	// OAuthJSON is the operator-supplied public-client flow, opaque here.
 	OAuthJSON []byte `gorm:"column:oauth_json;type:blob"`
-	Enabled   bool   `gorm:"index"`
-	CreatedAt int64
-	UpdatedAt int64
+	// HeadersJSON holds extra upstream request headers.
+	HeadersJSON []byte `gorm:"column:headers_json;type:blob"`
+	Enabled     bool   `gorm:"index"`
+	CreatedAt   int64
+	UpdatedAt   int64
 }
 
 func (ProviderModel) TableName() string { return "model_providers" }
@@ -87,17 +89,26 @@ func (s *Store) SaveProvider(ctx context.Context, p provider.Provider) error {
 		}
 		oauthJSON = encoded
 	}
+	var headersJSON []byte
+	if len(p.Headers) > 0 {
+		encoded, err := json.Marshal(p.Headers)
+		if err != nil {
+			return fmt.Errorf("encode provider headers: %w", err)
+		}
+		headersJSON = encoded
+	}
 	m := ProviderModel{
-		ID:        p.ID,
-		Name:      p.Name,
-		Kind:      string(p.Kind),
-		BaseURL:   p.BaseURL,
-		Channel:   p.Channel,
-		Protocol:  string(p.Protocol),
-		OAuthJSON: oauthJSON,
-		Enabled:   p.Enabled,
-		CreatedAt: p.CreatedAt,
-		UpdatedAt: p.UpdatedAt,
+		ID:          p.ID,
+		Name:        p.Name,
+		Kind:        string(p.Kind),
+		BaseURL:     p.BaseURL,
+		Channel:     p.Channel,
+		Protocol:    string(p.Protocol),
+		HeadersJSON: headersJSON,
+		OAuthJSON:   oauthJSON,
+		Enabled:     p.Enabled,
+		CreatedAt:   p.CreatedAt,
+		UpdatedAt:   p.UpdatedAt,
 	}
 	if err := s.DB.WithContext(ctx).Save(&m).Error; err != nil {
 		return fmt.Errorf("save provider %q: %w", p.ID, err)
@@ -348,6 +359,12 @@ func providerFromModel(m ProviderModel) provider.Provider {
 		var oauth provider.OAuthConfig
 		if err := json.Unmarshal(m.OAuthJSON, &oauth); err == nil {
 			out.OAuth = &oauth
+		}
+	}
+	if len(m.HeadersJSON) > 0 {
+		var headers map[string]string
+		if err := json.Unmarshal(m.HeadersJSON, &headers); err == nil {
+			out.Headers = headers
 		}
 	}
 	return out

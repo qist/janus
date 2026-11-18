@@ -39,10 +39,13 @@ type Channel struct {
 	Login string `json:"login,omitempty"`
 	// Protocol, when set, is what the outbound adapter speaks. Plugin channels
 	// use it so a third-party entry does not need a code change.
-	Protocol    Protocol `json:"protocol,omitempty"`
-	BaseURL     string   `json:"base_url"`
-	AltBaseURLs []string `json:"alt_base_urls,omitempty"`
-	Note        string   `json:"note,omitempty"`
+	Protocol Protocol `json:"protocol,omitempty"`
+	// Headers are request headers this upstream requires on every call, not
+	// just on the sign-in exchange. An operator can override them per provider.
+	Headers     map[string]string `json:"headers,omitempty"`
+	BaseURL     string            `json:"base_url"`
+	AltBaseURLs []string          `json:"alt_base_urls,omitempty"`
+	Note        string            `json:"note,omitempty"`
 	// Source is "builtin" for the compiled catalogue and "plugin" for entries
 	// loaded at startup.
 	Source string `json:"source,omitempty"`
@@ -119,7 +122,13 @@ var channelCatalog = []Channel{
 		ID: "github-copilot", Name: "GitHub Copilot", Category: ChannelSubscription,
 		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"device_code"},
 		BaseURL: "https://api.githubcopilot.com",
-		Note:    "GitHub device flow, then exchange for a short-lived Copilot token.",
+		Headers: map[string]string{
+			// The Copilot API rejects IDE-auth requests without these.
+			"Editor-Version":         "vscode/1.95.0",
+			"Copilot-Integration-Id": "vscode-chat",
+			"User-Agent":             "GitHubCopilotChat/0.23.2",
+		},
+		Note: "GitHub device flow, then exchange for a short-lived Copilot token.",
 	},
 	{
 		ID: "google-code-assist", Name: "Google Code Assist / Gemini CLI", Category: ChannelSubscription,

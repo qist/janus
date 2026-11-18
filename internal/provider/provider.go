@@ -81,6 +81,24 @@ func (s Status) Valid() bool {
 	return false
 }
 
+// requestHeaders merges the channel's required headers with the provider's
+// overrides. Provider wins, so an operator can pin a different editor build.
+func requestHeaders(p Provider) map[string]string {
+	headers := map[string]string{}
+	if channel, ok := ChannelByID(p.Channel); ok {
+		for name, value := range channel.Headers {
+			headers[name] = value
+		}
+	}
+	for name, value := range p.Headers {
+		headers[name] = value
+	}
+	if len(headers) == 0 {
+		return nil
+	}
+	return headers
+}
+
 // Protocol is the wire format an upstream speaks. Callers always use OpenAI
 // chat completions; janus translates to the upstream protocol.
 type Protocol string
@@ -113,6 +131,9 @@ type Provider struct {
 	// Channel is the catalogue id this provider was modelled on. It is
 	// informational: routing only needs Kind and BaseURL.
 	Channel string `json:"channel,omitempty"`
+	// Headers are extra request headers for this upstream, merged over the
+	// channel defaults. Values are not secret (secrets belong in credentials).
+	Headers map[string]string `json:"headers,omitempty"`
 	// Protocol overrides the protocol implied by Kind and Channel. Empty means
 	// derived: Codex talks Responses, Claude Code and KindAnthropic talk
 	// Messages, everything else talks chat completions.
@@ -406,6 +427,7 @@ type ProviderPatch struct {
 	Name       *string
 	BaseURL    *string
 	Enabled    *bool
+	Headers    map[string]string
 	Protocol   *string
 	OAuth      *OAuthConfig
 	ClearOAuth bool
@@ -433,6 +455,9 @@ func (s *Service) UpdateProvider(ctx context.Context, id string, patch ProviderP
 	}
 	if patch.Enabled != nil {
 		p.Enabled = *patch.Enabled
+	}
+	if patch.Headers != nil {
+		p.Headers = patch.Headers
 	}
 	if patch.Protocol != nil {
 		protocol := Protocol(strings.ToLower(strings.TrimSpace(*patch.Protocol)))
@@ -708,6 +733,7 @@ func (s *Service) Clients(ctx context.Context) (map[string]*gateway.Client, erro
 			BaseURL:  p.BaseURL,
 			Model:    route.UpstreamModel,
 			Protocol: string(p.EffectiveProtocol()),
+			Headers:  requestHeaders(p),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", route.ExposedModel, err)

@@ -16,6 +16,7 @@ type createProviderRequest struct {
 	BaseURL  string                `json:"base_url"`
 	Channel  string                `json:"channel"`
 	Protocol string                `json:"protocol"`
+	Headers  map[string]string     `json:"headers"`
 	OAuth    *provider.OAuthConfig `json:"oauth"`
 }
 
@@ -24,6 +25,7 @@ type updateProviderRequest struct {
 	BaseURL    *string               `json:"base_url"`
 	Enabled    *bool                 `json:"enabled"`
 	Protocol   *string               `json:"protocol"`
+	Headers    map[string]string     `json:"headers"`
 	OAuth      *provider.OAuthConfig `json:"oauth"`
 	ClearOAuth bool                  `json:"clear_oauth"`
 }
@@ -145,6 +147,7 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 		BaseURL:    req.BaseURL,
 		Enabled:    req.Enabled,
 		Protocol:   req.Protocol,
+		Headers:    req.Headers,
 		OAuth:      req.OAuth,
 		ClearOAuth: req.ClearOAuth,
 	})

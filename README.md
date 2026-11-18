@@ -57,6 +57,7 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | POST | `/api/v1/work-items/{id}/verdict` | verify | `{"epoch","verdict","reasons","checks","failure_owner"}`；reject 必须归因 |
 | POST | `/api/v1/work-items/{id}/complete` | integrate | `{"epoch","idempotency_key"}` |
 | POST | `/api/v1/work-items/{id}/authorize` | authorize | 敏感操作授权，allow 时返回单次能力令牌 |
+| POST | `/api/v1/work-items/{id}/cancel` | write | 取消工作项并释放活跃租约（幂等） |
 | GET | `/api/v1/usage` | read | 用量汇总（按 key/group/工作项/provider/model/账号/时间过滤） |
 | GET | `/api/v1/scores` | read | 模型等级与分数（只读） |
 | POST | `/api/v1/goals` | write | 建目标，异步拆项，返回 `202 + goal_id` |
@@ -84,6 +85,18 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/work-items/w1/claim \
   -H "X-API-Key: $JANUS_API_KEY" -H 'Content-Type: application/json' \
   -d '{"role":"worker","plan":"implement","lease_seconds":1200}'
 ```
+
+## 控制台 /ui
+
+`GET /` 302 到 `/ui/`。页面是无构建步骤的原生 HTML/JS，直接 embed 进二进制；静态资源公开且不含数据，
+所有数据由页面带着操作员填写的 API key 调 `/api/v1`，key 只存在当前标签页的 `sessionStorage`。
+
+- **目标**：列表、创建（`202` 异步拆项）、进度条、取消；
+- **工作项**：按状态筛选、查看租约与评审记录、人工建项、强制派工（admin）、取消；
+- 自动刷新可开关，且输入框聚焦时不会打断你正在填的表单。
+
+设计与目录里预留了 Preact/Svelte 构建链（`web/ → internal/ui/dist`），当前手写页面是为了让看板先能用；
+后续接入构建链时只替换静态资源，服务端接口不变。
 
 ## 目标与进度
 

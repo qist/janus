@@ -27,6 +27,7 @@ import (
 	"janus/internal/proxy"
 	"janus/internal/scoring"
 	"janus/internal/store"
+	"janus/internal/ui"
 	"janus/internal/usage"
 	"janus/internal/verify"
 	"janus/internal/work"
@@ -120,6 +121,13 @@ func run() error {
 	server.Register(mux)
 	mcpServer.Register(mux)
 	proxyServer.Register(mux)
+
+	console := ui.Handler()
+	mux.Handle("/ui", console)
+	mux.Handle("/ui/", console)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)

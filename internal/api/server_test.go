@@ -1110,3 +1110,31 @@ func TestCancelGoalEndpoint(t *testing.T) {
 		t.Fatalf("status = %s", cancelled.Status)
 	}
 }
+
+func TestCancelItemEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	createItem(t, e, plainItem("w1"))
+	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/claim", workerKey,
+		claimRequest{Role: work.RoleWorker, Plan: "implement"}, http.StatusOK)
+
+	// Read-only keys cannot cancel.
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/cancel", readerKey, nil, http.StatusForbidden)
+	if code := errCode(t, resp); code != "forbidden" {
+		t.Fatalf("code = %q", code)
+	}
+
+	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/cancel", adminKey, nil, http.StatusNoContent)
+
+	resp = e.expect(t, http.MethodGet, "/api/v1/work-items/w1", readerKey, nil, http.StatusOK)
+	var view worksvc.ItemView
+	decodeBody(t, resp, &view)
+	if view.Item.Status != work.StatusCancelled {
+		t.Fatalf("status = %s", view.Item.Status)
+	}
+	if view.Claim != nil {
+		t.Fatalf("claim = %+v, want none after cancel", view.Claim)
+	}
+
+	// Idempotent.
+	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/cancel", adminKey, nil, http.StatusNoContent)
+}

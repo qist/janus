@@ -91,6 +91,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/work-items/{id}/verdict", s.protect(ScopeVerify, s.handleVerdict))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/complete", s.protect(ScopeIntegrate, s.handleComplete))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/authorize", s.protect(ScopeAuthorize, s.handleAuthorize))
+	mux.HandleFunc("POST /api/v1/work-items/{id}/cancel", s.protect(ScopeWrite, s.handleCancelItem))
 }
 
 // protect authenticates the caller and checks the required scope before the
@@ -632,6 +633,14 @@ type authorizeRequest struct {
 	Reason      string        `json:"reason"`
 	Evidence    []string      `json:"evidence"`
 	WorkerModel string        `json:"worker_model"`
+}
+
+func (s *Server) handleCancelItem(w http.ResponseWriter, r *http.Request, id Identity) {
+	if err := s.Svc.Cancel(r.Context(), r.PathValue("id"), id.AgentID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request, id Identity) {

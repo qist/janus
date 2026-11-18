@@ -745,6 +745,44 @@ func (b *Board) Release(ctx context.Context, itemID string, epoch int64) error {
 	})
 }
 
+// Cancel stops an item permanently. Any live lease is released, so a cancelled
+// item never keeps an agent holding it. Cancelling twice is a no-op; cancelling
+// a finished item is refused.
+func (b *Board) Cancel(ctx context.Context, itemID, actor string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.repo.Transact(ctx, func(ctx context.Context, repo Repository) error {
+		item, err := repo.GetItem(ctx, itemID)
+		if err != nil {
+			return err
+		}
+		if item.Status == StatusCancelled {
+			return nil
+		}
+		if item.Status == StatusDone {
+			return ErrInvalidTransition
+		}
+
+		if claim, ok, err := repo.GetActiveClaim(ctx, itemID); err != nil {
+			return err
+		} else if ok {
+			claim.Status = ClaimReleased
+			if err := repo.SaveClaim(ctx, claim); err != nil {
+				return err
+			}
+		}
+
+		item.Status = StatusCancelled
+		item.LastIdempotencyKey = ""
+		item.UpdatedAt = b.now()
+		if err := repo.UpdateItem(ctx, item, item.Version); err != nil {
+			return err
+		}
+		return b.appendEvent(ctx, repo, itemID, "cancelled", actor)
+	})
+}
+
 // Expire reclaims an expired lease and reports whether it did so.
 func (b *Board) Expire(ctx context.Context, itemID string) (bool, error) {
 	b.mu.Lock()

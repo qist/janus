@@ -109,6 +109,7 @@ janus/
 | `internal/pool` | 账号池：额度状态、冷却、候选排序、失败分类、append-only 账号事件 |
 | `internal/proxy` | `/v1` 模型代理：OpenAI 线格式、别名路由、SSE 透传、上游错误映射 |
 | `internal/goals` | 目标：意图 → 工作项（planner 接口）、进度聚合、SSE 数据源 |
+| `internal/ui` | 人用控制台：embed 的静态页面，调 `/api/v1`；当前无构建步骤 |
 | `internal/usage` | 用量账本：append-only 记账、按 key/group/工作项/账号/时间聚合 |
 | `internal/scoring` | 模型打分：Wilson 下界、质量闸门、probation/active/trusted、硬闸门停权、事件可重算 |
 | `internal/authz` | 授权编排：policy → auditor → 单次能力令牌，绑定租约与动作哈希 |

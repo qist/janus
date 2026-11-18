@@ -169,6 +169,11 @@ func (s *Service) Complete(ctx context.Context, itemID, agentID string, epoch in
 	return nil
 }
 
+// Cancel stops an item and releases any live lease.
+func (s *Service) Cancel(ctx context.Context, itemID, actor string) error {
+	return s.Board.Cancel(ctx, itemID, actor)
+}
+
 // ScoreKey builds the scoring key for a claimant on an item.
 func ScoreKey(who work.Claimant, item work.WorkItem) scoring.Key {
 	taskClass := strings.TrimSpace(who.TaskClass)

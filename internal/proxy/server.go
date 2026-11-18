@@ -76,6 +76,10 @@ func (s *Server) table() map[string]*gateway.Client {
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
+	// Anthropic clients (Claude Code) speak Messages; the translation to chat
+	// happens here so a route works from either wire format.
+	mux.HandleFunc("POST /v1/messages", s.handleMessages)
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
 }
 
 // Handler returns a standalone handler.
@@ -280,25 +284,37 @@ func (s *Server) record(r *http.Request, id auth.Identity, used gateway.Usage, e
 }
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (auth.Identity, bool) {
-	if s.Auth == nil {
-		writeError(w, http.StatusUnauthorized, "unauthenticated", "missing API key")
+	identity, status, code, message := s.checkChatKey(r)
+	if code != "" {
+		writeError(w, status, code, message)
 		return auth.Identity{}, false
+	}
+	return identity, true
+}
+
+// checkChatKey validates the credential and returns the failure details without
+// writing them, so each wire format can render its own error envelope.
+func (s *Server) checkChatKey(r *http.Request) (auth.Identity, int, string, string) {
+	if s.Auth == nil {
+		return auth.Identity{}, http.StatusUnauthorized, "unauthenticated", "missing API key"
 	}
 	key := strings.TrimSpace(r.Header.Get("X-API-Key"))
 	if key == "" {
 		key = strings.TrimSpace(r.Header.Get("Authorization"))
 		key = strings.TrimSpace(strings.TrimPrefix(key, "Bearer "))
 	}
+	if key == "" {
+		// Anthropic clients send the key in x-api-key, not as a bearer token.
+		key = strings.TrimSpace(r.Header.Get("x-api-key"))
+	}
 	identity, err := s.Auth.Authenticate(r.Context(), key)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key")
-		return auth.Identity{}, false
+		return auth.Identity{}, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key"
 	}
 	if !identity.Has(auth.ScopeChat) {
-		writeError(w, http.StatusForbidden, "forbidden", "key lacks scope chat")
-		return auth.Identity{}, false
+		return auth.Identity{}, http.StatusForbidden, "forbidden", "key lacks scope chat"
 	}
-	return identity, true
+	return identity, 0, "", ""
 }
 
 func (s *Server) maxBody() int64 {

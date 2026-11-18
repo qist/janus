@@ -174,8 +174,7 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
 不会长出第二个账号。令牌只在服务端解封，接口返回的仍是 `masked`。
 和 CC Switch 的 Accounts 面板思路一致，但 janus 没有把凭据写回 CLI 的配置。
 
-还没做：设备码流程（Copilot）、WorkBuddy 等厂商私有刷新协议，以及入站 `/v1/messages`
-（Claude Code 客户端直连 janus 时说的是 Messages，不是 chat completions）。
+还没做：设备码流程（Copilot）、WorkBuddy 等厂商私有刷新协议、精确的 token 计数。
 
 ### 协议适配（chat ↔ Responses / Messages）
 
@@ -204,6 +203,11 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
 - **鉴权**：`anthropic` + API key 用 `x-api-key`，OAuth 用 `Authorization` + `anthropic-beta:
   oauth-2025-04-20`；`responses` + OAuth 额外带 `OpenAI-Beta: responses=experimental`、
   `originator: codex_cli_rs` 与从 access token 里解出的 `chatgpt-account-id`。
+- **入站也支持 Messages**：`POST /v1/messages` 让 Claude Code 这类客户端直接指向 janus；
+  网关把 Messages 转成 chat 调用路由，再把结果转回 Messages。流式按 Anthropic 事件序列
+  （`message_start` → `content_block_*` → `message_delta` → `message_stop`）输出，
+  `stop_reason` 与 `tool_use` 一一对应；认证接受 `x-api-key`，错误用 Anthropic 信封。
+  `POST /v1/messages/count_tokens` 返回按字符估算的 `input_tokens`（不调用上游分词器）。
 - 未翻译的字段（音频、文件、reasoning 配置）被丢弃而不是原样透传：上游报 400 比静默忽略更难查。
 
 测试覆盖请求/响应/流式三条路径、OAuth 头、配额失败后的换号，以及 `provider → proxy` 的端到端。

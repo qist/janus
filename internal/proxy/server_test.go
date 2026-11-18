@@ -552,3 +552,201 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5-code
 		t.Fatalf("content = %v", message["content"])
 	}
 }
+
+func messagesPost(t *testing.T, srv *httptest.Server, key, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", key)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	return resp
+}
+
+func TestMessagesInboundConversions(t *testing.T) {
+	var seenBody map[string]any
+	var seenHeaders http.Header
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeaders = r.Header.Clone()
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &seenBody)
+		if stream, _ := seenBody["stream"].(bool); stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			for _, frame := range []string{
+				`data: {"id":"c1","model":"real-model","choices":[{"delta":{"role":"assistant","content":"he"}}]}` + "\n\n",
+				`data: {"id":"c1","model":"real-model","choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}]}` + "\n\n",
+				`data: {"id":"c1","model":"real-model","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}` + "\n\n",
+				"data: [DONE]\n\n",
+			} {
+				io.WriteString(w, frame)
+			}
+			return
+		}
+		io.WriteString(w, `{"id":"c1","model":"real-model","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`)
+	}))
+	t.Cleanup(up.Close)
+
+	client, err := gateway.New(gateway.Config{
+		Name: "test", BaseURL: up.URL + "/v1", APIKey: upstream, Model: "real-model",
+	})
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	keys := auth.NewStaticKeys()
+	keys.Add(chatKey, auth.Identity{AgentID: "agent-chat", Scopes: []auth.Scope{auth.ScopeChat}})
+	ledger := usage.NewMemoryLedger(nil)
+	srv := httptest.NewServer(New(map[string]*gateway.Client{"fast": client}, keys, ledger).Handler())
+	t.Cleanup(srv.Close)
+
+	resp := messagesPost(t, srv, chatKey, `{
+		"model":"fast","max_tokens":128,"system":[{"type":"text","text":"be brief"}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.StatusCode, readAll(t, resp))
+	}
+	var message map[string]any
+	if err := json.Unmarshal([]byte(readAll(t, resp)), &message); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if message["type"] != "message" || message["role"] != "assistant" {
+		t.Fatalf("message = %v", message)
+	}
+	content := message["content"].([]any)
+	if content[0].(map[string]any)["text"] != "hello" {
+		t.Fatalf("content = %v", content)
+	}
+	if message["stop_reason"] != "end_turn" {
+		t.Fatalf("stop_reason = %v", message["stop_reason"])
+	}
+	usageField := message["usage"].(map[string]any)
+	if usageField["input_tokens"] != float64(5) || usageField["output_tokens"] != float64(2) {
+		t.Fatalf("usage = %v", usageField)
+	}
+
+	// The inbound request reached the upstream as a normal chat request.
+	messages := seenBody["messages"].([]any)
+	if messages[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("system not lifted: %v", messages)
+	}
+	if seenBody["max_tokens"] != float64(128) {
+		t.Fatalf("max_tokens = %v", seenBody["max_tokens"])
+	}
+	if seenHeaders.Get("x-api-key") != "" {
+		t.Fatalf("anthropic key forwarded upstream: %q", seenHeaders.Get("x-api-key"))
+	}
+
+	resp = messagesPost(t, srv, chatKey, `{
+		"model":"fast","max_tokens":64,"stream":true,
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d", resp.StatusCode)
+	}
+	stream := readAll(t, resp)
+	for _, want := range []string{
+		"event: message_start", "event: content_block_start", "event: content_block_delta",
+		`"text_delta"`, "event: content_block_stop", "event: message_delta", "event: message_stop",
+	} {
+		if !strings.Contains(stream, want) {
+			t.Fatalf("stream missing %q:\n%s", want, stream)
+		}
+	}
+	if strings.Contains(stream, "[DONE]") {
+		t.Fatalf("openai terminator leaked into anthropic stream:\n%s", stream)
+	}
+	if strings.Index(stream, "message_start") > strings.Index(stream, "content_block_delta") {
+		t.Fatalf("message_start not first:\n%s", stream)
+	}
+	if !strings.Contains(stream, `"stop_reason":"end_turn"`) {
+		t.Fatalf("stop reason missing:\n%s", stream)
+	}
+}
+
+func TestMessagesInboundToolUse(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"c2","model":"real-model","choices":[{"message":{"role":"assistant","tool_calls":[
+			{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}
+		]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":9,"completion_tokens":4}}`)
+	}))
+	t.Cleanup(up.Close)
+
+	client, err := gateway.New(gateway.Config{
+		Name: "test", BaseURL: up.URL + "/v1", APIKey: upstream, Model: "real-model",
+	})
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	keys := auth.NewStaticKeys()
+	keys.Add(chatKey, auth.Identity{AgentID: "agent-chat", Scopes: []auth.Scope{auth.ScopeChat}})
+	srv := httptest.NewServer(New(map[string]*gateway.Client{"fast": client}, keys, usage.NewMemoryLedger(nil)).Handler())
+	t.Cleanup(srv.Close)
+
+	resp := messagesPost(t, srv, chatKey, `{
+		"model":"fast","max_tokens":64,
+		"messages":[{"role":"user","content":"read it"}],
+		"tools":[{"name":"read_file","description":"read","input_schema":{"type":"object"}}]
+	}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.StatusCode, readAll(t, resp))
+	}
+	var message map[string]any
+	if err := json.Unmarshal([]byte(readAll(t, resp)), &message); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if message["stop_reason"] != "tool_use" {
+		t.Fatalf("stop_reason = %v", message["stop_reason"])
+	}
+	block := message["content"].([]any)[0].(map[string]any)
+	if block["type"] != "tool_use" || block["name"] != "read_file" {
+		t.Fatalf("block = %v", block)
+	}
+	if input := block["input"].(map[string]any); input["path"] != "a.go" {
+		t.Fatalf("input = %v", input)
+	}
+}
+
+func TestMessagesCountTokensAndAuth(t *testing.T) {
+	e := newEnv(t)
+
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/v1/messages/count_tokens",
+		strings.NewReader(`{"model":"fast","messages":[{"role":"user","content":"hello world"}]}`))
+	req.Header.Set("x-api-key", chatKey)
+	resp, err := e.srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var counted struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal([]byte(readAll(t, resp)), &counted); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if counted.InputTokens < 1 {
+		t.Fatalf("input_tokens = %d", counted.InputTokens)
+	}
+
+	resp = messagesPost(t, e.srv, "wrong-key", `{"model":"fast","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad key status = %d", resp.StatusCode)
+	}
+	var failure map[string]any
+	_ = json.Unmarshal([]byte(readAll(t, resp)), &failure)
+	if failure["type"] != "error" {
+		t.Fatalf("error envelope = %v", failure)
+	}
+
+	resp = messagesPost(t, e.srv, chatKey, `{"model":"missing","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown model status = %d", resp.StatusCode)
+	}
+	_ = readAll(t, resp)
+}

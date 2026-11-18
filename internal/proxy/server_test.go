@@ -340,3 +340,60 @@ func TestStreamUpstreamErrorRetriesThenFails(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 }
+
+func TestSetRoutesHotSwap(t *testing.T) {
+	upstream := func(text string) *gateway.Client {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"`+text+`"}}]}`)
+		}))
+		t.Cleanup(srv.Close)
+		client, err := gateway.New(gateway.Config{BaseURL: srv.URL, Model: text})
+		if err != nil {
+			t.Fatalf("gateway.New: %v", err)
+		}
+		return client
+	}
+
+	keys := auth.NewStaticKeys()
+	keys.Add(chatKey, auth.Identity{AgentID: "agent", Scopes: []auth.Scope{auth.ScopeChat}})
+
+	server := New(map[string]*gateway.Client{"old": upstream("A")}, keys, nil)
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	if names := server.Models(); len(names) != 1 || names[0] != "old" {
+		t.Fatalf("models = %v", names)
+	}
+
+	// Swap without recreating the HTTP server: the console changes provider
+	// config while requests keep coming.
+	server.SetRoutes(map[string]*gateway.Client{"new": upstream("B")})
+	if names := server.Models(); len(names) != 1 || names[0] != "new" {
+		t.Fatalf("models after swap = %v", names)
+	}
+
+	call := func(model string) (*http.Response, string) {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions",
+			strings.NewReader(`{"model":"`+model+`","messages":[]}`))
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+chatKey)
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, string(raw)
+	}
+
+	if resp, _ := call("new"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("new model status = %d", resp.StatusCode)
+	}
+	resp, body := call("old")
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(body, "model_not_found") {
+		t.Fatalf("old model = %d %s", resp.StatusCode, body)
+	}
+}

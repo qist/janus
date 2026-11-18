@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"janus/internal/auth"
@@ -22,9 +23,12 @@ import (
 )
 
 // Server exposes models over the OpenAI wire format.
+//
+// The route table is swapped atomically so a configuration change takes effect
+// without a restart. A request that already resolved a client keeps it for its
+// whole lifetime; only new requests see the new table.
 type Server struct {
-	// Routes maps an exposed model name (or alias) to its upstream client.
-	Routes map[string]*gateway.Client
+	routes atomic.Pointer[map[string]*gateway.Client]
 	Auth   auth.Authenticator
 	Usage  usage.Ledger
 	// MaxBodyBytes overrides the 2 MiB default.
@@ -34,7 +38,37 @@ type Server struct {
 
 // New returns a server. A nil authenticator rejects every request.
 func New(routes map[string]*gateway.Client, keys auth.Authenticator, ledger usage.Ledger) *Server {
-	return &Server{Routes: routes, Auth: keys, Usage: ledger}
+	s := &Server{Auth: keys, Usage: ledger}
+	s.SetRoutes(routes)
+	return s
+}
+
+// SetRoutes replaces the whole table. The map is copied, so the caller may keep
+// mutating its own copy afterwards.
+func (s *Server) SetRoutes(routes map[string]*gateway.Client) {
+	snapshot := make(map[string]*gateway.Client, len(routes))
+	for name, client := range routes {
+		snapshot[name] = client
+	}
+	s.routes.Store(&snapshot)
+}
+
+// Models returns the exposed names, sorted for stable output.
+func (s *Server) Models() []string {
+	table := s.table()
+	names := make([]string, 0, len(table))
+	for name := range table {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (s *Server) table() map[string]*gateway.Client {
+	if snapshot := s.routes.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return nil
 }
 
 // Register mounts the proxy routes on mux.
@@ -55,11 +89,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	names := make([]string, 0, len(s.Routes))
-	for name := range s.Routes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := s.Models()
 
 	data := make([]map[string]any, 0, len(names))
 	for _, name := range names {
@@ -101,7 +131,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model_required", "model is required")
 		return
 	}
-	client, ok := s.Routes[model]
+	client, ok := s.table()[model]
 	if !ok {
 		writeError(w, http.StatusNotFound, "model_not_found", "unknown model "+model)
 		return

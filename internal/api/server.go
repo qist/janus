@@ -52,6 +52,10 @@ type Server struct {
 	Goals *goals.Service
 	// Providers manages upstream providers and credentials; nil answers 501.
 	Providers *provider.Service
+	// ReloadModels rebuilds the proxy route table after a provider change.
+	// Failures are logged rather than returned: the write already succeeded and
+	// the previous table keeps serving.
+	ReloadModels func(ctx context.Context) error
 }
 
 // New returns a server. A nil authenticator rejects every request.

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -93,24 +94,54 @@ func run() error {
 	keys := api.NewStaticKeys()
 	keys.Add(apiKey, api.Identity{AgentID: *agentID, Scopes: []api.Scope{api.ScopeAdmin}})
 
-	routes, err := buildModelRoutes()
-	if err != nil {
-		return err
-	}
 	providers, err := buildProviders(st)
 	if err != nil {
 		return err
 	}
-	if err := mergeManagedRoutes(routes, providers, ledger); err != nil {
+	envRoutes, err := buildModelRoutes()
+	if err != nil {
 		return err
 	}
-	proxyServer := proxy.New(routes, keys, ledger)
+	proxyServer := proxy.New(nil, keys, ledger)
+
+	// reloadModels rebuilds the proxy table from env routes plus stored ones.
+	// The mutex keeps two concurrent mutations from publishing an older
+	// snapshot after a newer one.
+	var reloadMu sync.Mutex
+	reloadModels := func(ctx context.Context) error {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
+
+		routes := make(map[string]*gateway.Client, len(envRoutes))
+		for name, client := range envRoutes {
+			routes[name] = client
+		}
+		if providers != nil {
+			managed, err := providers.Clients(ctx)
+			if err != nil {
+				return err
+			}
+			for name, client := range managed {
+				if _, exists := routes[name]; exists {
+					log.Printf("model %q is defined by JANUS_MODELS and the provider store; keeping the env one", name)
+					continue
+				}
+				routes[name] = client
+			}
+		}
+		proxyServer.SetRoutes(routes)
+		return nil
+	}
+	if err := reloadModels(context.Background()); err != nil {
+		return fmt.Errorf("load model routes: %w", err)
+	}
 
 	server := api.New(svc, keys)
 	server.Usage = ledger
 	server.Scores = scores
 	server.Goals = goalSvc
 	server.Providers = providers
+	server.ReloadModels = reloadModels
 	mcpServer := mcp.New(svc, keys)
 	mcpServer.Version = version
 
@@ -264,31 +295,6 @@ func buildProviders(st *store.Store) (*provider.Service, error) {
 		return nil, fmt.Errorf("JANUS_MASTER_KEY: %w", err)
 	}
 	return provider.New(st, box), nil
-}
-
-// mergeManagedRoutes adds routes stored in the database to the environment
-// routes. Env definitions win on a name collision: a stored route cannot
-// silently shadow an operator's explicit JANUS_MODELS entry.
-func mergeManagedRoutes(routes map[string]*gateway.Client, svc *provider.Service, ledger usage.Ledger) error {
-	if svc == nil {
-		return nil
-	}
-	managed, err := svc.Clients(context.Background())
-	if err != nil {
-		return fmt.Errorf("load stored model routes: %w", err)
-	}
-	for name, client := range managed {
-		if _, exists := routes[name]; exists {
-			log.Printf("model %q is defined by JANUS_MODELS and the provider store; keeping the env one", name)
-			continue
-		}
-		client.OnUsage = usageRecorder(ledger)
-		routes[name] = client
-	}
-	if len(managed) > 0 {
-		log.Printf("loaded %d stored model route(s)", len(managed))
-	}
-	return nil
 }
 
 // usageRecorder returns the ledger callback shared by every gateway client.

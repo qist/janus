@@ -36,6 +36,16 @@ type createRouteRequest struct {
 	Priority      int      `json:"priority"`
 }
 
+// reloadModels applies a persisted configuration change to the running proxy.
+func (s *Server) reloadModels(ctx context.Context) {
+	if s.ReloadModels == nil {
+		return
+	}
+	if err := s.ReloadModels(ctx); err != nil {
+		s.logf("reload model routes: %v", err)
+	}
+}
+
 func (s *Server) providersUnavailable(w http.ResponseWriter) bool {
 	if s.Providers == nil {
 		writeError(w, http.StatusNotImplemented, "providers_unavailable",
@@ -81,6 +91,7 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request, _ 
 		s.fail(w, r, err)
 		return
 	}
+	s.reloadModels(r.Context())
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -101,6 +112,7 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 		s.fail(w, r, err)
 		return
 	}
+	s.reloadModels(r.Context())
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -112,6 +124,7 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request, _ 
 		s.fail(w, r, err)
 		return
 	}
+	s.reloadModels(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -147,6 +160,7 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request, 
 		s.fail(w, r, err)
 		return
 	}
+	s.reloadModels(r.Context())
 	// The response is the masked form; the secret is accepted once and never
 	// returned, not even to the caller that supplied it.
 	writeJSON(w, http.StatusCreated, created)
@@ -160,6 +174,7 @@ func (s *Server) handleDeleteCredential(w http.ResponseWriter, r *http.Request, 
 		s.fail(w, r, err)
 		return
 	}
+	s.reloadModels(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -197,6 +212,7 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, _ Ide
 		s.fail(w, r, err)
 		return
 	}
+	s.reloadModels(r.Context())
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -208,6 +224,7 @@ func (s *Server) handleDeleteRoute(w http.ResponseWriter, r *http.Request, _ Ide
 		s.fail(w, r, err)
 		return
 	}
+	s.reloadModels(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -280,4 +281,57 @@ func TestProbeWithoutProviderService(t *testing.T) {
 	if code := errCode(t, resp); code != "providers_unavailable" {
 		t.Fatalf("code = %q", code)
 	}
+}
+
+func TestProviderMutationsReloadModels(t *testing.T) {
+	e := newTestEnv(t)
+	e.enableProviders(t)
+
+	calls := 0
+	e.server.ReloadModels = func(context.Context) error {
+		calls++
+		return nil
+	}
+
+	e.expect(t, http.MethodPost, "/api/v1/providers", adminKey, createProviderRequest{
+		ID: "p1", Kind: provider.KindOpenAI, BaseURL: "https://api.example.com/v1",
+	}, http.StatusCreated)
+	if calls != 1 {
+		t.Fatalf("reload calls after provider = %d", calls)
+	}
+
+	e.expect(t, http.MethodPost, "/api/v1/providers/p1/credentials", adminKey, createCredentialRequest{
+		Secret: "sk-live-reload-1234",
+	}, http.StatusCreated)
+	if calls != 2 {
+		t.Fatalf("reload calls after credential = %d", calls)
+	}
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/model-routes", adminKey, createRouteRequest{
+		ExposedModel: "fast", ProviderID: "p1", UpstreamModel: "gpt-4o-mini",
+	}, http.StatusCreated)
+	var route provider.Route
+	decodeBody(t, resp, &route)
+	if calls != 3 {
+		t.Fatalf("reload calls after route = %d", calls)
+	}
+
+	e.expect(t, http.MethodDelete, "/api/v1/model-routes/"+route.ID, adminKey, nil, http.StatusNoContent)
+	if calls != 4 {
+		t.Fatalf("reload calls after delete = %d", calls)
+	}
+}
+
+func TestReloadFailureDoesNotFailMutation(t *testing.T) {
+	e := newTestEnv(t)
+	e.enableProviders(t)
+	e.server.ReloadModels = func(context.Context) error {
+		return errors.New("decrypt failed")
+	}
+
+	// The write is committed; the previous table keeps serving and the failure
+	// is logged. Returning 500 here would invite a retry that conflicts.
+	e.expect(t, http.MethodPost, "/api/v1/providers", adminKey, createProviderRequest{
+		ID: "p1", Kind: provider.KindOpenAI, BaseURL: "https://api.example.com/v1",
+	}, http.StatusCreated)
 }

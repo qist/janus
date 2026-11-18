@@ -33,6 +33,11 @@ type TokenSet struct {
 	Scope        string `json:"scope,omitempty"`
 	ExpiresAt    int64  `json:"expires_at,omitempty"`
 	IDToken      string `json:"id_token,omitempty"`
+	// DerivedToken is a short-lived API token obtained from AccessToken, used
+	// by device flows (GitHub Copilot) whose API rejects the long-lived token.
+	DerivedToken string `json:"derived_token,omitempty"`
+	// DerivedExpiresAt is Unix seconds; zero means "no known expiry".
+	DerivedExpiresAt int64 `json:"derived_expires_at,omitempty"`
 }
 
 // Valid reports whether the set carries something usable.

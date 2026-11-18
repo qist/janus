@@ -348,14 +348,16 @@ func TestOAuthEndpoints(t *testing.T) {
 	t.Cleanup(tokenSrv.Close)
 
 	registry := oauth.DefaultRegistry()
-	config, _ := registry.Get("openai")
+	// The channel id decides the flow; the bare "openai" alias is not consulted.
+	config, _ := registry.Get("openai-codex")
 	config.TokenURL = tokenSrv.URL
 	registry.Set(config)
 	svc.OAuth = registry
 
 	ctx := context.Background()
 	if _, err := svc.CreateProvider(ctx, provider.Provider{
-		ID: "p1", Kind: provider.KindOpenAI, BaseURL: "https://api.example.com/v1",
+		ID: "p1", Kind: provider.KindOpenAI, Channel: "openai-codex",
+		BaseURL: "https://api.example.com/v1",
 	}); err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
@@ -518,4 +520,127 @@ func TestSyncRoutesEndpoint(t *testing.T) {
 
 	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p1/sync-routes", readerKey, nil, http.StatusForbidden)
 	_ = errCode(t, resp)
+}
+
+func TestDeviceFlowEndpoints(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableProviders(t)
+
+	mux := http.NewServeMux()
+	polls := 0
+	mux.HandleFunc("/device", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"device_code":"d1","user_code":"WXYZ-9876","verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}`)
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		polls++
+		if polls < 2 {
+			io.WriteString(w, `{"error":"authorization_pending"}`)
+			return
+		}
+		io.WriteString(w, `{"access_token":"gh-token","token_type":"bearer"}`)
+	})
+	mux.HandleFunc("/exchange", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"token":"copilot-token","expires_at":1700003600}`)
+	})
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"login":"octocat"}`)
+	})
+	fake := httptest.NewServer(mux)
+	t.Cleanup(fake.Close)
+
+	devices := oauth.NewDeviceRegistry()
+	devices.Set(oauth.DeviceConfig{
+		Kind: "github-copilot", ClientID: "cid",
+		DeviceURL: fake.URL + "/device", TokenURL: fake.URL + "/token",
+		ExchangeURL: fake.URL + "/exchange", UserURL: fake.URL + "/user",
+	})
+	svc.Devices = devices
+
+	ctx := context.Background()
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "gh", Kind: provider.KindOpenAI, Channel: "github-copilot",
+		BaseURL: "https://api.githubcopilot.com",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/providers/gh/device/start", adminKey, nil, http.StatusOK)
+	var start provider.DeviceStart
+	decodeBody(t, resp, &start)
+	if start.UserCode != "WXYZ-9876" || start.SessionID == "" {
+		t.Fatalf("start = %+v", start)
+	}
+
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/gh/device/poll", adminKey, map[string]any{
+		"session_id": start.SessionID,
+	}, http.StatusOK)
+	var pending provider.DevicePoll
+	decodeBody(t, resp, &pending)
+	if pending.Status != "pending" {
+		t.Fatalf("pending = %+v", pending)
+	}
+
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/gh/device/poll", adminKey, map[string]any{
+		"session_id": start.SessionID,
+	}, http.StatusOK)
+	var complete provider.DevicePoll
+	decodeBody(t, resp, &complete)
+	if complete.Status != "complete" || complete.Credential == nil {
+		t.Fatalf("complete = %+v", complete)
+	}
+	if complete.Credential.Account != "octocat" || complete.Credential.Kind != provider.CredentialOAuth {
+		t.Fatalf("credential = %+v", complete.Credential)
+	}
+	if complete.Credential.SecretCiphertext != "" {
+		t.Fatal("response leaked the sealed secret")
+	}
+
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/gh/device/start", readerKey, nil, http.StatusForbidden)
+	_ = errCode(t, resp)
+
+	// A channel without a device flow is rejected instead of guessing.
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "ds", Kind: provider.KindOpenAI, Channel: "deepseek",
+		BaseURL: "https://api.deepseek.com/v1",
+	}); err != nil {
+		t.Fatalf("CreateProvider ds: %v", err)
+	}
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/ds/device/start", adminKey, nil, http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "oauth_unsupported" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestProxyListingExposesAuthMethods(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableProviders(t)
+	ctx := context.Background()
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "gh", Kind: provider.KindOpenAI, Channel: "github-copilot",
+		BaseURL: "https://api.githubcopilot.com",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "ds", Kind: provider.KindOpenAI, Channel: "deepseek",
+		BaseURL: "https://api.deepseek.com/v1",
+	}); err != nil {
+		t.Fatalf("CreateProvider ds: %v", err)
+	}
+
+	resp := e.expect(t, http.MethodGet, "/api/v1/providers", readerKey, nil, http.StatusOK)
+	var list struct {
+		Providers []provider.Provider `json:"providers"`
+	}
+	decodeBody(t, resp, &list)
+	auths := map[string][]string{}
+	for _, item := range list.Providers {
+		auths[item.ID] = item.Auth
+	}
+	if len(auths["gh"]) == 0 || auths["gh"][0] != "device_code" {
+		t.Fatalf("gh auth = %v", auths["gh"])
+	}
+	if len(auths["ds"]) == 0 || auths["ds"][0] != "api_key" {
+		t.Fatalf("ds auth = %v", auths["ds"])
+	}
 }

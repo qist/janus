@@ -3,6 +3,8 @@ import type {
   Channel,
   Credential,
   CredentialKind,
+  DevicePoll,
+  DeviceStart,
   OAuthConfig,
   OAuthStart,
   ProbeResult,
@@ -166,6 +168,22 @@ export function completeOAuth(
   return api<Credential>(`/api/v1/providers/${encodeURIComponent(providerID)}/oauth/complete`, {
     method: "POST",
     body: { session_id: sessionID, code, label },
+  });
+}
+
+/** Starts a device-code sign-in (GitHub Copilot). */
+export function startDevice(providerID: string, label?: string) {
+  return api<DeviceStart>(`/api/v1/providers/${encodeURIComponent(providerID)}/device/start`, {
+    method: "POST",
+    body: { label },
+  });
+}
+
+/** Polls a device sign-in once; status stays "pending" until the user approves. */
+export function pollDevice(providerID: string, sessionID: string) {
+  return api<DevicePoll>(`/api/v1/providers/${encodeURIComponent(providerID)}/device/poll`, {
+    method: "POST",
+    body: { session_id: sessionID },
   });
 }
 

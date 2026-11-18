@@ -231,6 +231,8 @@ export type Provider = {
   channel?: string;
   protocol?: "chat" | "responses" | "anthropic";
   oauth?: OAuthConfig;
+  /** How this channel can authenticate: api_key | oauth | device_code | none. */
+  auth?: string[];
   enabled: boolean;
   created_at: number;
   updated_at: number;
@@ -246,6 +248,20 @@ export type Channel = {
   base_url: string;
   alt_base_urls?: string[];
   note?: string;
+};
+
+export type DeviceStart = {
+  session_id: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+};
+
+export type DevicePoll = {
+  status: "pending" | "complete";
+  interval?: number;
+  credential?: Credential;
 };
 
 export type SyncResult = {

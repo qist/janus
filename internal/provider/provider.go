@@ -116,10 +116,39 @@ type Provider struct {
 	// OAuth, when set, overrides the built-in flow. It lets an operator bring
 	// their own public client (PKCE) for a vendor janus has no preset for,
 	// instead of janus shipping somebody else's client id.
-	OAuth     *OAuthConfig `json:"oauth,omitempty"`
-	Enabled   bool         `json:"enabled"`
-	CreatedAt int64        `json:"created_at"`
-	UpdatedAt int64        `json:"updated_at"`
+	OAuth *OAuthConfig `json:"oauth,omitempty"`
+	// Auth lists how this provider can be authenticated, derived from its
+	// channel. It is computed for the console and never stored.
+	Auth      []string `json:"auth,omitempty"`
+	Enabled   bool     `json:"enabled"`
+	CreatedAt int64    `json:"created_at"`
+	UpdatedAt int64    `json:"updated_at"`
+}
+
+// AuthMethods reports how an operator can sign in. The catalogue decides:
+// a channel that only documents API keys must not offer an OAuth button, and a
+// device-code channel must not be sent to an authorization-code page.
+func (p Provider) AuthMethods() []string {
+	if p.OAuth != nil {
+		// An operator-supplied PKCE flow replaces whatever the channel says.
+		return []string{"oauth"}
+	}
+	if channel, ok := ChannelByID(p.Channel); ok {
+		return channel.Auth
+	}
+	switch p.Kind {
+	case KindOpenAI, KindAnthropic:
+		return []string{"api_key"}
+	case KindCustom:
+		return []string{"api_key", "none"}
+	}
+	return []string{"api_key"}
+}
+
+// WithAuth fills the computed field for API responses.
+func (p Provider) WithAuth() Provider {
+	p.Auth = p.AuthMethods()
+	return p
 }
 
 // EffectiveProtocol is what the gateway should speak to this provider.
@@ -280,8 +309,12 @@ type Service struct {
 	QuotaTimeout time.Duration
 	// OAuth overrides the built-in flows; tests point it at a fake token server.
 	OAuth *oauth.Registry
+	// Devices overrides the built-in device flows (GitHub Copilot).
+	Devices *oauth.DeviceRegistry
 	// oauth holds sign-ins started from the console, in memory only.
 	oauth oauthSessions
+	// devices holds device-code sign-ins, also in memory only.
+	devices deviceSessions
 	// credMu serialises credential writes: a token refresh and a health update
 	// can concern the same row.
 	credMu sync.Mutex

@@ -114,13 +114,27 @@ web/
 参考 sub2api 与 magpie 的做法，采用**授权码 + PKCE + 粘回授权码**，而不是在本机起回调监听：
 
 - `openai-codex` 走 Codex CLI 的客户端（`auth.openai.com`，回调固定 `localhost:1455`，
-  janus 部署在远端时浏览器无法回连，所以必须粘贴）；未选渠道的老上游按 `kind=openai` 命中同一流程；
+  janus 部署在远端时浏览器无法回连，所以必须粘贴）；
 - `claude-code` 走 Claude Code 的客户端（`claude.com/cai/oauth/authorize`），授权后官方回调页
   直接显示 `code#state`，粘贴即可；
 - 会话在内存里、10 分钟有效、一次性；state 不匹配直接拒绝；
 - 令牌以 JSON 密文存储（access / refresh / expires_at），**距到期 2 分钟内自动刷新**并写回，
   刷新失败保留旧令牌，由上游 401 暴露问题；
 - 控制台拿不到任何令牌，只能看到 `masked`。
+
+**按渠道决定登录方式**。`GET /api/v1/providers` 的每条记录带 `auth`（`api_key` / `oauth` /
+`device_code` / `none`），取自渠道目录：DeepSeek、Qwen 等只显示 API Key 输入；`openai-codex`、
+`claude-code` 显示 OAuth；`github-copilot` 显示设备码。**不再按 `kind` 回落到 OpenAI 登录页**——
+这正是之前"选任何渠道都弹 OpenAI 授权"的原因。手动粘贴密钥的入口保留：Copilot 渠道粘贴
+GitHub token 也能用（会先换取短期 token）。
+
+### GitHub Copilot 设备码
+
+`POST /providers/{id}/device/start` 返回 `user_code` 与 `verification_uri`，控制台打开该页并每
+`interval` 秒调 `POST /providers/{id}/device/poll`；`status=pending` 继续等，`complete` 时返回新凭据。
+获得 GitHub token 后立即调用 `api.github.com/copilot_internal/v2/token` 换取短期 token（30 分钟级），
+换不到就算登录失败，不会留下一个用不了的凭据。短期 token 与到期时间以 `derived_token` /
+`derived_expires_at` 存在同一份密文里，`credentialKey` 在到期前 2 分钟自动续换并写回。
 
 **同一个渠道可以有多个账号**。每个 `provider_credentials` 行就是一个账号，`label / account /
 plan / priority / disabled` 是运营字段，令牌仍是密文。`POST .../oauth/complete` 每次都新增一行；
@@ -174,7 +188,7 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
 不会长出第二个账号。令牌只在服务端解封，接口返回的仍是 `masked`。
 和 CC Switch 的 Accounts 面板思路一致，但 janus 没有把凭据写回 CLI 的配置。
 
-还没做：设备码流程（Copilot）、WorkBuddy 等厂商私有刷新协议、精确的 token 计数。
+还没做：WorkBuddy 等厂商私有刷新协议、设备码账号的「原地重授权」、精确的 token 计数。
 
 ### 协议适配（chat ↔ Responses / Messages）
 

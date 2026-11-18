@@ -92,7 +92,7 @@ func TestReauthorizeUpdatesExistingAccount(t *testing.T) {
 	svc := testService(t)
 	srv := tokenServer(t, nil)
 	withOAuth(t, svc, srv.URL)
-	addProvider(t, svc, "https://api.example.com/v1")
+	addOAuthProvider(t, svc, "https://api.example.com/v1")
 
 	first, err := svc.storeTokens(ctx, "p1", "work", "work@example.com", "pro", oauth.TokenSet{
 		AccessToken: "at-old", RefreshToken: "rt-old", ExpiresAt: svc.now() + 3600,

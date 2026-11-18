@@ -100,6 +100,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/quotas", s.protect(ScopeRead, s.handleListQuotas))
 	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/start", s.protect(ScopeAdmin, s.handleStartProviderOAuth))
 	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/complete", s.protect(ScopeAdmin, s.handleCompleteProviderOAuth))
+	mux.HandleFunc("POST /api/v1/providers/{id}/device/start", s.protect(ScopeAdmin, s.handleStartDevice))
+	mux.HandleFunc("POST /api/v1/providers/{id}/device/poll", s.protect(ScopeAdmin, s.handlePollDevice))
 	mux.HandleFunc("POST /api/v1/providers/{id}/import", s.protect(ScopeAdmin, s.handleImportLocal))
 	mux.HandleFunc("PATCH /api/v1/credentials/{id}", s.protect(ScopeAdmin, s.handleUpdateCredential))
 	mux.HandleFunc("POST /api/v1/credentials/{id}/reset", s.protect(ScopeAdmin, s.handleResetCredential))
@@ -759,6 +761,10 @@ func classify(err error) (int, string) {
 		return http.StatusConflict, "oauth_session_invalid"
 	case errors.Is(err, provider.ErrOAuthState):
 		return http.StatusBadRequest, "oauth_state_mismatch"
+	case errors.Is(err, provider.ErrDeviceDenied):
+		return http.StatusUnprocessableEntity, "device_denied"
+	case errors.Is(err, provider.ErrDeviceExpired):
+		return http.StatusConflict, "device_expired"
 	case errors.Is(err, oauth.ErrExchange):
 		return http.StatusBadGateway, "oauth_exchange_failed"
 	case errors.Is(err, work.ErrAlreadyExists):

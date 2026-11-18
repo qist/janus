@@ -39,12 +39,25 @@ func tokenServer(t *testing.T, seen *map[string]string) *httptest.Server {
 func withOAuth(t *testing.T, svc *Service, tokenURL string) *oauth.Registry {
 	t.Helper()
 	registry := oauth.DefaultRegistry()
-	config, _ := registry.Get("openai")
+	config, _ := registry.Get("openai-codex")
 	config.AuthorizeURL = "https://auth.example.com/authorize"
 	config.TokenURL = tokenURL
 	registry.Set(config)
 	svc.OAuth = registry
 	return registry
+}
+
+// addOAuthProvider creates the provider shape the built-in Codex flow applies
+// to. OAuth is chosen by channel, so a bare kind=openai provider is plain API key.
+func addOAuthProvider(t *testing.T, svc *Service, baseURL string) Provider {
+	t.Helper()
+	created, err := svc.CreateProvider(context.Background(), Provider{
+		ID: "p1", Kind: KindOpenAI, Channel: "openai-codex", BaseURL: baseURL,
+	})
+	if err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	return created
 }
 
 func TestOAuthStartAndComplete(t *testing.T) {
@@ -54,7 +67,7 @@ func TestOAuthStartAndComplete(t *testing.T) {
 	srv := tokenServer(t, &seen)
 	withOAuth(t, svc, srv.URL)
 
-	addProvider(t, svc, "https://api.example.com/v1")
+	addOAuthProvider(t, svc, "https://api.example.com/v1")
 
 	start, err := svc.StartOAuth(ctx, "p1", "")
 	if err != nil {
@@ -111,7 +124,7 @@ func TestOAuthRejectsBadStateAndReusedSession(t *testing.T) {
 	svc := testService(t)
 	srv := tokenServer(t, nil)
 	withOAuth(t, svc, srv.URL)
-	addProvider(t, svc, "https://api.example.com/v1")
+	addOAuthProvider(t, svc, "https://api.example.com/v1")
 
 	start, err := svc.StartOAuth(ctx, "p1", "")
 	if err != nil {
@@ -145,7 +158,7 @@ func TestOAuthUnsupportedKind(t *testing.T) {
 func TestOAuthSessionUnknown(t *testing.T) {
 	svc := testService(t)
 	withOAuth(t, svc, "https://example.com/token")
-	addProvider(t, svc, "https://api.example.com/v1")
+	addOAuthProvider(t, svc, "https://api.example.com/v1")
 
 	if _, err := svc.CompleteOAuth(context.Background(), "p1", "oauth_missing", "code", ""); !errors.Is(err, ErrOAuthSession) {
 		t.Fatalf("err = %v, want ErrOAuthSession", err)
@@ -159,7 +172,7 @@ func TestOAuthRefreshBeforeUse(t *testing.T) {
 	srv := tokenServer(t, &seen)
 	withOAuth(t, svc, srv.URL)
 
-	addProvider(t, svc, "https://api.example.com/v1")
+	addOAuthProvider(t, svc, "https://api.example.com/v1")
 	// Seed an already-expired token set, as if it had been stored days ago.
 	if _, err := svc.storeTokens(ctx, "p1", "oauth", "", "", oauth.TokenSet{
 		AccessToken: "at-stale", RefreshToken: "rt-1", ExpiresAt: 1,

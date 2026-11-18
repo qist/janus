@@ -320,7 +320,34 @@ func (s *Service) credentialKey(ctx context.Context, p Provider, credential Cred
 
 	var tokens oauth.TokenSet
 	if err := json.Unmarshal([]byte(plain), &tokens); err != nil || tokens.AccessToken == "" {
+		// A plain key on a device-flow channel is the long-lived token. Exchange
+		// it once and persist the result so later calls skip the round trip.
+		if cfg, ok := s.deviceConfig(p); ok && strings.TrimSpace(plain) != "" {
+			if token, expiresAt, exchangeErr := cfg.Exchange(ctx, plain); exchangeErr == nil && token != "" {
+				credential.Kind = CredentialOAuth
+				credential.UpdatedAt = s.now()
+				s.persistTokens(ctx, credential, oauth.TokenSet{
+					AccessToken:      plain,
+					DerivedToken:     token,
+					DerivedExpiresAt: expiresAt,
+				})
+				return token, nil
+			}
+		}
 		return plain, nil
+	}
+
+	if cfg, ok := s.deviceConfig(p); ok {
+		if tokens.DerivedToken == "" || (tokens.DerivedExpiresAt > 0 && tokens.DerivedExpiresAt-120 <= s.now()) {
+			if token, expiresAt, exchangeErr := cfg.Exchange(ctx, tokens.AccessToken); exchangeErr == nil && token != "" {
+				tokens.DerivedToken = token
+				tokens.DerivedExpiresAt = expiresAt
+				s.persistTokens(ctx, credential, tokens)
+			}
+		}
+		if tokens.DerivedToken != "" {
+			return tokens.DerivedToken, nil
+		}
 	}
 
 	if tokens.RefreshToken != "" && tokens.Expired(s.now(), 120) {
@@ -361,11 +388,10 @@ func (s *Service) oauthConfig(p Provider) (oauth.Config, bool) {
 	if p.OAuth != nil {
 		return configFromOAuth(*p.OAuth), true
 	}
+	// Only the channel decides. Falling back to the kind would send every
+	// OpenAI-compatible provider (DeepSeek, Qwen, …) to the Codex login page.
 	registry := s.oauthRegistry()
-	if cfg, ok := registry.Get(p.Channel); ok {
-		return cfg, true
-	}
-	return registry.Get(string(p.Kind))
+	return registry.Get(p.Channel)
 }
 
 func configFromOAuth(c OAuthConfig) oauth.Config {

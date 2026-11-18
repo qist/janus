@@ -27,11 +27,13 @@ import {
   listCredentials,
   listProviders,
   listRoutes,
+  pollDevice,
   probeProvider,
   refreshQuota,
   resetCredential,
-  syncRoutes,
+  startDevice,
   startOAuth,
+  syncRoutes,
   updateCredential,
   updateProvider,
 } from "@/api/providers";
@@ -138,6 +140,13 @@ export default function Models() {
   } | null>(null);
   const [oauthCode, setOauthCode] = useState("");
   const [oauthLabel, setOauthLabel] = useState("");
+  const [device, setDevice] = useState<{
+    providerID: string;
+    sessionID: string;
+    userCode: string;
+    verificationURI: string;
+    interval: number;
+  } | null>(null);
   const [importForm, setImportForm] = useState({
     source: "codex" as ImportSource,
     entry: "",
@@ -169,10 +178,12 @@ export default function Models() {
 
   const canAdmin = Boolean(me?.scopes.includes("admin"));
   const credentialProvider = providers?.find((p) => p.id === credentialForm.provider_id);
-  const supportsOAuth =
-    Boolean(credentialProvider?.oauth) ||
-    credentialProvider?.kind === "openai" ||
-    credentialProvider?.kind === "anthropic";
+  // The backend derives these from the channel: an API-key-only upstream must
+  // not offer an OAuth button, and a device-code channel must not be sent to an
+  // authorization-code page.
+  const authMethods = credentialProvider?.auth ?? [];
+  const supportsOAuth = authMethods.includes("oauth");
+  const supportsDevice = authMethods.includes("device_code");
 
   const load = useCallback(async () => {
     setError(null);
@@ -234,6 +245,32 @@ export default function Models() {
     setCredentialForm((form) => (form.provider_id ? form : { ...form, provider_id: first }));
     setRouteForm((form) => (form.provider_id ? form : { ...form, provider_id: first }));
   }, [providers]);
+
+  // A device sign-in is approved out of band, so the page polls until the
+  // backend reports the credential instead of asking for a paste.
+  useEffect(() => {
+    if (!device) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const result = await pollDevice(device.providerID, device.sessionID);
+        if (cancelled) return;
+        if (result.status === "complete") {
+          setDevice(null);
+          await load();
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setDevice(null);
+        setError(err);
+      }
+    };
+    const timer = window.setInterval(tick, Math.max(2, device.interval) * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [device, load]);
 
   async function run(key: string, action: () => Promise<unknown>) {
     setBusy(key);
@@ -308,6 +345,28 @@ export default function Models() {
       setOauthCode("");
       setOauthLabel("");
       window.open(start.auth_url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onStartDevice(providerID?: string, label?: string) {
+    const target = providerID ?? credentialForm.provider_id;
+    if (!target) return;
+    setBusy("device:start");
+    setError(null);
+    try {
+      const start = await startDevice(target, label);
+      setDevice({
+        providerID: target,
+        sessionID: start.session_id,
+        userCode: start.user_code,
+        verificationURI: start.verification_uri,
+        interval: start.interval,
+      });
+      window.open(start.verification_uri, "_blank", "noopener,noreferrer");
     } catch (err) {
       setError(err);
     } finally {
@@ -785,6 +844,45 @@ export default function Models() {
               </div>
             ) : null}
 
+            {canAdmin && supportsDevice ? (
+              <div className="mb-3 rounded-lg border p-3">
+                {!device || device.providerID !== credentialForm.provider_id ? (
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-xs text-muted-foreground">{t("models.deviceHint")}</p>
+                    <Button
+                      variant="ghost"
+                      disabled={busy === "device:start"}
+                      onClick={() => void onStartDevice()}
+                    >
+                      <KeyRound className="h-4 w-4" />
+                      {busy === "device:start" ? t("models.deviceStarting") : t("models.deviceLogin")}
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{t("models.deviceCodeHint")}</p>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <code className="rounded bg-muted px-3 py-1.5 font-mono text-lg tracking-widest">
+                        {device.userCode}
+                      </code>
+                      <a
+                        href={device.verificationURI}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs underline"
+                      >
+                        {t("models.deviceOpen")}
+                      </a>
+                      <span className="text-xs text-muted-foreground">{t("models.deviceWaiting")}</span>
+                      <Button variant="ghost" onClick={() => setDevice(null)}>
+                        {t("models.oauthCancel")}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
             {canAdmin ? (
               <div className="mb-3 flex flex-wrap items-end gap-2 rounded-lg border border-dashed p-3">
                 <Field label={t("models.importSource")} className="w-40">
@@ -968,12 +1066,12 @@ export default function Models() {
                     }
                   />
                 </Field>
-                <Field label={t("models.secret")}>
+                <Field label={t("models.apiKey")}>
                   <Input
                     required
                     type="password"
                     autoComplete="off"
-                    placeholder={t("models.secretPlaceholder")}
+                    placeholder={t("models.apiKeyPlaceholder")}
                     value={credentialForm.secret}
                     onChange={(event) =>
                       setCredentialForm({ ...credentialForm, secret: event.target.value })

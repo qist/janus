@@ -92,6 +92,9 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request, _ I
 	if list == nil {
 		list = []provider.Provider{}
 	}
+	for index := range list {
+		list[index] = list[index].WithAuth()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": list})
 }
 
@@ -126,7 +129,7 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 	s.reloadModels(r.Context())
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, created.WithAuth())
 }
 
 func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ Identity) {
@@ -150,7 +153,7 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 	s.reloadModels(r.Context())
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, updated.WithAuth())
 }
 
 func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request, _ Identity) {
@@ -352,6 +355,52 @@ func (s *Server) handleListQuotas(w http.ResponseWriter, r *http.Request, _ Iden
 		results = []provider.QuotaResult{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"quotas": results})
+}
+
+// handleStartDevice begins a device-code sign-in (GitHub Copilot). The console
+// shows the user code and polls until the operator finishes.
+func (s *Server) handleStartDevice(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	var req deviceRequest
+	if r.ContentLength != 0 {
+		if !decode(w, r, s.maxBody(), &req) {
+			return
+		}
+	}
+	start, err := s.Providers.StartDevice(r.Context(), r.PathValue("id"), req.Label)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, start)
+}
+
+// handlePollDevice checks once. A pending answer is a 200 carrying status, not
+// an error: the console keeps polling at the returned interval.
+func (s *Server) handlePollDevice(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	var req deviceRequest
+	if !decode(w, r, s.maxBody(), &req) {
+		return
+	}
+	result, err := s.Providers.PollDevice(r.Context(), r.PathValue("id"), req.SessionID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if result.Status == "complete" {
+		s.reloadModels(r.Context())
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+type deviceRequest struct {
+	SessionID string `json:"session_id"`
+	Label     string `json:"label"`
 }
 
 // handleStartProviderOAuth begins a PKCE sign-in and returns the vendor URL.

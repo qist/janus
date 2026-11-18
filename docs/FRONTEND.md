@@ -125,6 +125,50 @@ web/
 还没做：设备码流程（magpie 对 Copilot 等用）、OAuth 凭据的「重新授权」入口、以及
 厂商没有 `/models` 时的专用探测。
 
+### 渠道目录
+
+`GET /api/v1/channels` 返回静态渠道表（`internal/provider/catalog.go`），分四类：
+`vendor`（厂商直连）、`subscription`（OAuth 订阅套餐）、`relay`（聚合/中转）、`local`（自建网关）。
+每条包含 `kind / protocols / auth / base_url / alt_base_urls / note`，覆盖 OpenAI、Anthropic、
+Google、DeepSeek、Kimi、GLM、MiniMax、Qwen、火山、混元、千帆、SiliconFlow、OpenRouter、
+Vercel、OpenCode、xAI、Groq、Together、Fireworks、Cerebras、Ollama、LiteLLM 等约 50 个入口；
+`protocols` 如实标注上游原生协议，`kind` 只表示 janus 当前能直接说的协议，避免把
+"上游支持 Responses" 误渲染成"网关已支持 Responses"。
+
+新增上游时选渠道会自动填 `id / name / kind / base_url` 并可继续改；`channel` 只存 id，
+路由与鉴权仍只看 `kind + base_url`。目录是静态数据，双方不共享代码，仅对齐了端点与认证方式。
+
+### 余量（quota）
+
+`POST /api/v1/providers/{id}/quota` 逐个凭据读取厂商额度并落库（`provider_credentials.quota`）：
+
+| 渠道 | 读取方式 |
+|---|---|
+| DeepSeek | `GET /user/balance` |
+| Moonshot / Kimi | `GET /v1/users/me/balance` |
+| OpenRouter | `GET /api/v1/credits`（总额 - 已用） |
+| Claude Code（OAuth） | `GET api.anthropic.com/api/oauth/usage` + `anthropic-beta` |
+| Codex（OAuth） | `GET chatgpt.com/backend-api/wham/usage` |
+
+`Quota` 用统一结构承载：`balance/currency`、`windows[]`（`used_percent / used / limit / unit /
+resets_at / text`）、`plan`、`checked_at`、`error`。厂商只给百分比就只存百分比，**不推算 token 数**；
+读失败保留旧快照并记 `error`，控制台显示"读取失败"而不是 0。没有额度接口的渠道返回说明文字，
+不伪装成成功。`GET /api/v1/quotas?provider=` 返回已存快照，不触发厂商请求。
+
+### 用量统计
+
+每次模型调用（成功与失败）都写入 SQLite `usage_entries`：模型、上游模型、provider、凭据、
+prompt/completion/cached tokens、耗时、HTTP 状态、错误码、是否流式。旧的进程内账本已被替换，
+重启不再丢历史。
+
+- `GET /api/v1/usage`：区间汇总（兼容旧接口）；
+- `GET /api/v1/usage/stats?period=24h|7d|30d&provider=&model=&key=&bucket=hour|day`：
+  一次返回 `totals + by_model + by_provider + by_key + trend`，趋势在 SQL 里分桶；
+- `GET /api/v1/usage/logs?limit=50`：最近调用流水，用于定位某个 key/model 的尖峰。
+
+`/ui/usage` 用这些接口渲染：周期切换、失败数、token/成本卡片、趋势条、按模型/上游拆分、最近调用表。
+失败调用同样计入行数，`failed` 单独计数，错误率不需要另外一套监控表。
+
 ## 8. 远端工作与输出
 
 工作项详情已经能看：

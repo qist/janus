@@ -10,20 +10,24 @@ import {
   deleteCredential,
   deleteProvider,
   deleteRoute,
+  listChannels,
   listCredentials,
   listProviders,
   listRoutes,
   probeProvider,
+  refreshQuota,
   startOAuth,
   updateProvider,
 } from "@/api/providers";
 import type {
+  Channel,
   Credential,
   Me,
   ModelInfo,
   ProbeResult,
   Provider,
   ProviderKind,
+  Quota,
   Route,
 } from "@/api/types";
 import { useI18n } from "@/i18n";
@@ -63,6 +67,37 @@ function ProbeCell({ result }: { result?: ProbeResult }) {
   );
 }
 
+function QuotaCell({ quota }: { quota?: Quota }) {
+  const { t } = useI18n();
+  if (!quota) {
+    return <span className="text-xs text-muted-foreground">{t("models.quotaUnknown")}</span>;
+  }
+  if (quota.error) {
+    return (
+      <span className="text-xs text-danger" title={quota.error}>
+        {t("models.quotaFailed")}
+      </span>
+    );
+  }
+  const parts: string[] = [];
+  if (quota.balance) {
+    parts.push(`${quota.balance} ${quota.currency ?? ""}`.trim());
+  }
+  for (const window of quota.windows ?? []) {
+    if (window.used_percent !== undefined) {
+      parts.push(`${window.name} ${window.used_percent.toFixed(0)}%`);
+    } else if (window.text) {
+      parts.push(`${window.name} ${window.text}`);
+    }
+  }
+  if (quota.plan) parts.unshift(quota.plan);
+  return (
+    <span className="text-xs" title={quota.source}>
+      {parts.join(" · ") || t("models.quotaEmpty")}
+    </span>
+  );
+}
+
 export default function Models() {
   const { t } = useI18n();
 
@@ -74,6 +109,7 @@ export default function Models() {
   const [error, setError] = useState<unknown>(null);
   const [unavailable, setUnavailable] = useState<string | null>(null);
   const [probes, setProbes] = useState<Record<string, ProbeResult>>({});
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [oauth, setOauth] = useState<{ providerID: string; sessionID: string; authURL: string } | null>(null);
   const [oauthCode, setOauthCode] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -83,6 +119,7 @@ export default function Models() {
     name: "",
     kind: "openai" as ProviderKind,
     base_url: "",
+    channel: "",
   });
   const [credentialForm, setCredentialForm] = useState({
     provider_id: "",
@@ -106,6 +143,11 @@ export default function Models() {
     setError(null);
     try {
       setMe(await getMe());
+
+      // The catalogue is static; a failure only costs the prefill helper.
+      listChannels()
+        .then((data) => setChannels(data.channels))
+        .catch(() => setChannels([]));
 
       // Exposed names come from the proxy; a key without chat scope cannot ask,
       // which must not break the management view.
@@ -179,8 +221,9 @@ export default function Models() {
         name: providerForm.name.trim() || undefined,
         kind: providerForm.kind,
         base_url: providerForm.base_url.trim(),
+        channel: providerForm.channel || undefined,
       });
-      setProviderForm({ id: "", name: "", kind: "openai", base_url: "" });
+      setProviderForm({ id: "", name: "", kind: "openai", base_url: "", channel: "" });
     });
   }
 
@@ -392,6 +435,33 @@ export default function Models() {
 
         {canAdmin ? (
           <form onSubmit={onCreateProvider} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label={t("models.channel")}>
+              <Select
+                value={providerForm.channel}
+                onChange={(event) => {
+                  const id = event.target.value;
+                  const channel = channels.find((item) => item.id === id);
+                  if (!channel) {
+                    setProviderForm({ ...providerForm, channel: "" });
+                    return;
+                  }
+                  setProviderForm({
+                    id: providerForm.id || channel.id,
+                    name: providerForm.name || channel.name,
+                    kind: channel.kind,
+                    base_url: channel.base_url || providerForm.base_url,
+                    channel: channel.id,
+                  });
+                }}
+              >
+                <option value="">{t("models.channelCustom")}</option>
+                {channels.map((channel) => (
+                  <option key={channel.id} value={channel.id}>
+                    {channel.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
             <Field label={t("models.providerId")}>
               <Input
                 required
@@ -462,6 +532,20 @@ export default function Models() {
                   ))}
                 </Select>
               </Field>
+              <Button
+                variant="ghost"
+                disabled={!canAdmin || busy === `quota:${credentialForm.provider_id}`}
+                onClick={() =>
+                  run(`quota:${credentialForm.provider_id}`, () =>
+                    refreshQuota(credentialForm.provider_id)
+                  )
+                }
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                {busy === `quota:${credentialForm.provider_id}`
+                  ? t("models.quotaRefreshing")
+                  : t("models.quotaRefresh")}
+              </Button>
             </div>
 
             {canAdmin && supportsOAuth ? (
@@ -532,6 +616,7 @@ export default function Models() {
                       <th className="py-2">{t("models.credentialLabel")}</th>
                       <th>{t("models.masked")}</th>
                       <th>{t("common.status")}</th>
+                      <th>{t("models.quota")}</th>
                       <th className="text-right">{t("common.none")}</th>
                     </tr>
                   </thead>
@@ -547,6 +632,9 @@ export default function Models() {
                         <td className="font-mono text-xs">{credential.masked || "—"}</td>
                         <td>
                           <StatusBadge status={credential.status} />
+                        </td>
+                        <td>
+                          <QuotaCell quota={credential.quota} />
                         </td>
                         <td className="py-2 text-right">
                           <Button

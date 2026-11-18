@@ -83,10 +83,13 @@ func (s Status) Valid() bool {
 
 // Provider is one upstream endpoint.
 type Provider struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Kind      Kind   `json:"kind"`
-	BaseURL   string `json:"base_url"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Kind    Kind   `json:"kind"`
+	BaseURL string `json:"base_url"`
+	// Channel is the catalogue id this provider was modelled on. It is
+	// informational: routing only needs Kind and BaseURL.
+	Channel   string `json:"channel,omitempty"`
 	Enabled   bool   `json:"enabled"`
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
@@ -111,8 +114,11 @@ type Credential struct {
 	Remaining int64 `json:"remaining,omitempty"`
 	Total     int64 `json:"total,omitempty"`
 	ExpiresAt int64 `json:"expires_at,omitempty"`
-	CreatedAt int64 `json:"created_at"`
-	UpdatedAt int64 `json:"updated_at"`
+	// Quota is the last allowance snapshot read from the vendor; nil means it
+	// has never been read. A failed read keeps the previous snapshot.
+	Quota     *Quota `json:"quota,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
 
 	SecretCiphertext string `json:"-"`
 }
@@ -163,6 +169,8 @@ type Service struct {
 	Now   func() int64
 	// ProbeTimeout bounds one connectivity probe; zero uses DefaultProbeTimeout.
 	ProbeTimeout time.Duration
+	// QuotaTimeout bounds one allowance read; zero uses DefaultQuotaTimeout.
+	QuotaTimeout time.Duration
 	// OAuth overrides the built-in flows; tests point it at a fake token server.
 	OAuth *oauth.Registry
 	// oauth holds sign-ins started from the console, in memory only.
@@ -186,6 +194,10 @@ func (s *Service) CreateProvider(ctx context.Context, p Provider) (Provider, err
 	if !p.Kind.Valid() {
 		return Provider{}, fmt.Errorf("%w: unknown kind %q", ErrInvalidInput, p.Kind)
 	}
+	if !KnownChannel(p.Channel) {
+		return Provider{}, fmt.Errorf("%w: unknown channel %q", ErrInvalidInput, p.Channel)
+	}
+	p.Channel = strings.ToLower(strings.TrimSpace(p.Channel))
 	if err := validateBaseURL(p.BaseURL); err != nil {
 		return Provider{}, err
 	}

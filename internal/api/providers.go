@@ -14,6 +14,7 @@ type createProviderRequest struct {
 	Name    string        `json:"name"`
 	Kind    provider.Kind `json:"kind"`
 	BaseURL string        `json:"base_url"`
+	Channel string        `json:"channel"`
 }
 
 type updateProviderRequest struct {
@@ -75,6 +76,12 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request, _ I
 	writeJSON(w, http.StatusOK, map[string]any{"providers": list})
 }
 
+// handleListChannels returns the static upstream catalogue. It needs no
+// provider store, so it stays available even when JANUS_MASTER_KEY is unset.
+func (s *Server) handleListChannels(w http.ResponseWriter, _ *http.Request, _ Identity) {
+	writeJSON(w, http.StatusOK, map[string]any{"channels": provider.Channels()})
+}
+
 func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request, _ Identity) {
 	if s.providersUnavailable(w) {
 		return
@@ -91,6 +98,7 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request, _ 
 		Name:    req.Name,
 		Kind:    req.Kind,
 		BaseURL: req.BaseURL,
+		Channel: req.Channel,
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -251,6 +259,44 @@ func (s *Server) handleProbeProvider(w http.ResponseWriter, r *http.Request, _ I
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleRefreshQuota reads the allowance/balance of every credential of one
+// provider. The vendor call happens server-side; the secret never leaves.
+func (s *Server) handleRefreshQuota(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	// Several credentials can be read in sequence; cap the whole call so a dead
+	// vendor cannot pin a console request.
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+
+	results, err := s.Providers.RefreshQuota(ctx, r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if results == nil {
+		results = []provider.QuotaResult{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"quotas": results})
+}
+
+// handleListQuotas returns the stored snapshots without contacting vendors.
+func (s *Server) handleListQuotas(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	results, err := s.Providers.ListQuotas(r.Context(), r.URL.Query().Get("provider"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if results == nil {
+		results = []provider.QuotaResult{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"quotas": results})
 }
 
 // handleStartProviderOAuth begins a PKCE sign-in and returns the vendor URL.

@@ -19,6 +19,7 @@ type ProviderModel struct {
 	Name      string `gorm:"size:128"`
 	Kind      string `gorm:"size:16"`
 	BaseURL   string `gorm:"size:512"`
+	Channel   string `gorm:"size:64"`
 	Enabled   bool   `gorm:"index"`
 	CreatedAt int64
 	UpdatedAt int64
@@ -40,8 +41,10 @@ type ProviderCredentialModel struct {
 	Remaining  int64
 	Total      int64
 	ExpiresAt  int64
-	CreatedAt  int64
-	UpdatedAt  int64
+	// QuotaJSON is the last vendor allowance snapshot, opaque to the store.
+	QuotaJSON []byte `gorm:"type:blob"`
+	CreatedAt int64
+	UpdatedAt int64
 }
 
 func (ProviderCredentialModel) TableName() string { return "provider_credentials" }
@@ -68,6 +71,7 @@ func (s *Store) SaveProvider(ctx context.Context, p provider.Provider) error {
 		Name:      p.Name,
 		Kind:      string(p.Kind),
 		BaseURL:   p.BaseURL,
+		Channel:   p.Channel,
 		Enabled:   p.Enabled,
 		CreatedAt: p.CreatedAt,
 		UpdatedAt: p.UpdatedAt,
@@ -118,6 +122,14 @@ func (s *Store) DeleteProvider(ctx context.Context, id string) error {
 
 // SaveCredential upserts a credential including its sealed secret.
 func (s *Store) SaveCredential(ctx context.Context, c provider.Credential) error {
+	var quotaJSON []byte
+	if c.Quota != nil {
+		encoded, err := json.Marshal(c.Quota)
+		if err != nil {
+			return fmt.Errorf("encode credential quota: %w", err)
+		}
+		quotaJSON = encoded
+	}
 	m := ProviderCredentialModel{
 		ID:         c.ID,
 		ProviderID: c.ProviderID,
@@ -130,6 +142,7 @@ func (s *Store) SaveCredential(ctx context.Context, c provider.Credential) error
 		Remaining:  c.Remaining,
 		Total:      c.Total,
 		ExpiresAt:  c.ExpiresAt,
+		QuotaJSON:  quotaJSON,
 		CreatedAt:  c.CreatedAt,
 		UpdatedAt:  c.UpdatedAt,
 	}
@@ -152,7 +165,7 @@ func (s *Store) ListCredentials(ctx context.Context, providerID string) ([]provi
 	}
 	out := make([]provider.Credential, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, provider.Credential{
+		credential := provider.Credential{
 			ID:               m.ID,
 			ProviderID:       m.ProviderID,
 			Label:            m.Label,
@@ -167,7 +180,15 @@ func (s *Store) ListCredentials(ctx context.Context, providerID string) ([]provi
 			CreatedAt:        m.CreatedAt,
 			UpdatedAt:        m.UpdatedAt,
 			SecretCiphertext: m.Secret,
-		})
+		}
+		if len(m.QuotaJSON) > 0 {
+			var quota provider.Quota
+			if err := json.Unmarshal(m.QuotaJSON, &quota); err != nil {
+				return nil, fmt.Errorf("decode credential quota: %w", err)
+			}
+			credential.Quota = &quota
+		}
+		out = append(out, credential)
 	}
 	return out, nil
 }
@@ -253,6 +274,7 @@ func providerFromModel(m ProviderModel) provider.Provider {
 		Name:      m.Name,
 		Kind:      provider.Kind(m.Kind),
 		BaseURL:   m.BaseURL,
+		Channel:   m.Channel,
 		Enabled:   m.Enabled,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,

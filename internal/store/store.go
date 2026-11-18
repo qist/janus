@@ -70,6 +70,7 @@ func Open(path string) (*Store, error) {
 		&ProviderModel{},
 		&ProviderCredentialModel{},
 		&ModelRouteModel{},
+		&UsageEntryModel{},
 	); err != nil {
 		return nil, fmt.Errorf("migrate work tables: %w", err)
 	}

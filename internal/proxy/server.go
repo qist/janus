@@ -5,6 +5,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -146,42 +147,60 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if stream {
-		s.stream(w, r, identity, client, rewritten)
+		s.stream(w, r, identity, client, model, rewritten)
 		return
 	}
-	s.forward(w, r, identity, client, rewritten)
+	s.forward(w, r, identity, client, model, rewritten)
 }
 
-func (s *Server) forward(w http.ResponseWriter, r *http.Request, id auth.Identity, client *gateway.Client, body []byte) {
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, id auth.Identity, client *gateway.Client, exposed string, body []byte) {
+	started := time.Now()
 	raw, used, err := client.Chat(r.Context(), client.Model, body)
 	if err != nil {
+		status, code := failureOf(err)
+		s.record(r, id, gateway.Usage{}, exposed, client.Model, false, status, code, started)
 		s.upstreamError(w, err)
 		return
 	}
-	s.record(r, id, used, client.Model)
+	s.record(r, id, used, exposed, client.Model, false, http.StatusOK, "", started)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
 }
 
-func (s *Server) stream(w http.ResponseWriter, r *http.Request, id auth.Identity, client *gateway.Client, body []byte) {
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, id auth.Identity, client *gateway.Client, exposed string, body []byte) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	started := time.Now()
 	counter := &countingWriter{target: flushWriter{w: w}}
 	used, err := client.ChatStream(r.Context(), client.Model, body, counter)
-	s.record(r, id, used, client.Model)
 	if err != nil {
 		if counter.written == 0 {
+			status, code := failureOf(err)
+			s.record(r, id, used, exposed, client.Model, true, status, code, started)
 			s.upstreamError(w, err)
 			return
 		}
-		// The stream already started; all we can do is stop writing.
+		// The stream already started; the caller keeps the 200 it received.
+		s.record(r, id, used, exposed, client.Model, true, http.StatusOK, "stream_interrupted", started)
 		s.logf("stream for %s failed mid-flight: %v", client.Model, err)
+		return
 	}
+	s.record(r, id, used, exposed, client.Model, true, http.StatusOK, "", started)
+}
+
+// failureOf classifies an upstream failure for both the wire response and the
+// usage row, so the dashboard error code matches what the caller received.
+func failureOf(err error) (int, string) {
+	var exhausted *pool.AllExhaustedError
+	if errors.As(err, &exhausted) {
+		return http.StatusServiceUnavailable, "all_accounts_exhausted"
+	}
+	return http.StatusBadGateway, "upstream_error"
 }
 
 func (s *Server) upstreamError(w http.ResponseWriter, err error) {
@@ -194,28 +213,39 @@ func (s *Server) upstreamError(w http.ResponseWriter, err error) {
 			}
 			w.Header().Set("Retry-After", strconv.FormatInt(wait, 10))
 		}
-		writeError(w, http.StatusServiceUnavailable, "all_accounts_exhausted", err.Error())
-		return
 	}
-	writeError(w, http.StatusBadGateway, "upstream_error", err.Error())
+	status, code := failureOf(err)
+	writeError(w, status, code, err.Error())
 }
 
-func (s *Server) record(r *http.Request, id auth.Identity, used gateway.Usage, requested string) {
+func (s *Server) record(r *http.Request, id auth.Identity, used gateway.Usage, exposed, upstream string, stream bool, status int, errorCode string, started time.Time) {
 	if s.Usage == nil {
 		return
 	}
-	model := used.Model
-	if model == "" {
-		model = requested
+	upstreamModel := used.Model
+	if upstreamModel == "" {
+		upstreamModel = upstream
 	}
-	if err := s.Usage.Append(r.Context(), usage.Entry{
+	model := exposed
+	if model == "" {
+		model = upstreamModel
+	}
+	entry := usage.Entry{
 		KeyID:            id.AgentID,
 		ProviderID:       used.ProviderID,
 		CredentialID:     used.CredentialID,
 		Model:            model,
+		UpstreamModel:    upstreamModel,
 		PromptTokens:     used.PromptTokens,
 		CompletionTokens: used.CompletionTokens,
-	}); err != nil {
+		Status:           status,
+		ErrorCode:        errorCode,
+		Stream:           stream,
+		DurationMS:       time.Since(started).Milliseconds(),
+	}
+	// A client that disconnects mid-request must not make the spend disappear:
+	// the row is written with a context detached from the request's cancellation.
+	if err := s.Usage.Append(context.WithoutCancel(r.Context()), entry); err != nil {
 		s.logf("record usage: %v", err)
 	}
 }

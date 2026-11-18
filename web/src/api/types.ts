@@ -118,10 +118,60 @@ export type GoalProgress = {
 
 export type UsageTotals = {
   entries: number;
+  failed?: number;
   prompt_tokens: number;
   completion_tokens: number;
   cached_tokens: number;
   cost_usd: number;
+  duration_ms?: number;
+};
+
+export type UsageGroup = {
+  name: string;
+  entries: number;
+  failed: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  cost_usd: number;
+  duration_ms?: number;
+};
+
+export type UsageBucket = {
+  start: number;
+  entries: number;
+  failed: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  cost_usd: number;
+};
+
+export type UsageEntry = {
+  id: string;
+  key_id?: string;
+  provider_id: string;
+  credential_id?: string;
+  model: string;
+  upstream_model?: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens?: number;
+  cost_usd?: number;
+  status?: number;
+  error_code?: string;
+  stream?: boolean;
+  duration_ms?: number;
+  created_at: number;
+};
+
+export type UsageStats = {
+  totals: UsageTotals;
+  by_model: UsageGroup[];
+  by_provider: UsageGroup[];
+  by_key: UsageGroup[];
+  trend: UsageBucket[];
+  bucket: "hour" | "day" | string;
 };
 
 export type Score = {
@@ -166,9 +216,49 @@ export type Provider = {
   name: string;
   kind: ProviderKind;
   base_url: string;
+  channel?: string;
   enabled: boolean;
   created_at: number;
   updated_at: number;
+};
+
+export type Channel = {
+  id: string;
+  name: string;
+  category: string;
+  kind: ProviderKind;
+  protocols: string[];
+  auth: string[];
+  base_url: string;
+  alt_base_urls?: string[];
+  note?: string;
+};
+
+export type QuotaWindow = {
+  name: string;
+  used_percent?: number;
+  used?: number;
+  limit?: number;
+  unit?: string;
+  resets_at?: number;
+  text?: string;
+};
+
+export type Quota = {
+  balance?: string;
+  currency?: string;
+  plan?: string;
+  windows?: QuotaWindow[];
+  source?: string;
+  checked_at: number;
+  error?: string;
+};
+
+export type QuotaResult = {
+  provider_id: string;
+  credential_id: string;
+  masked?: string;
+  quota: Quota;
 };
 
 export type Credential = {
@@ -182,6 +272,7 @@ export type Credential = {
   remaining?: number;
   total?: number;
   expires_at?: number;
+  quota?: Quota;
   created_at: number;
   updated_at: number;
 };

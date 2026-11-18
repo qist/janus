@@ -81,7 +81,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ledger := usage.NewMemoryLedger(nil)
+	// Usage rows live in SQLite: restarting the process must not erase spend
+	// history, and the same table backs the console's statistics page.
+	var ledger usage.Ledger = st
 
 	gate, err := buildGate(ledger)
 	if err != nil {

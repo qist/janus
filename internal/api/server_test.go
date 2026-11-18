@@ -16,6 +16,7 @@ import (
 	"janus/internal/authz"
 	"janus/internal/goals"
 	"janus/internal/policy"
+	"janus/internal/provider"
 	"janus/internal/scoring"
 	"janus/internal/usage"
 	"janus/internal/work"
@@ -739,6 +740,74 @@ func TestUsageEndpoint(t *testing.T) {
 	resp = e.expect(t, http.MethodGet, "/api/v1/usage?since=nope", readerKey, nil, http.StatusBadRequest)
 	if code := errCode(t, resp); code != "invalid_time" {
 		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestUsageStatsAndLogsEndpoints(t *testing.T) {
+	e := newTestEnv(t)
+	ledger := usage.NewMemoryLedger(func() int64 { return 1000 })
+	for _, entry := range []usage.Entry{
+		{Model: "m1", ProviderID: "p1", PromptTokens: 10, CompletionTokens: 5, Status: 200, DurationMS: 100, CreatedAt: 100},
+		{Model: "m1", ProviderID: "p1", PromptTokens: 20, CompletionTokens: 10, Status: 200, DurationMS: 300, CreatedAt: 200},
+		{Model: "m2", ProviderID: "p2", Status: 502, ErrorCode: "upstream_error", CreatedAt: 300},
+	} {
+		if err := ledger.Append(context.Background(), entry); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	e.server.Usage = ledger
+
+	resp := e.expect(t, http.MethodGet,
+		"/api/v1/usage/stats?since=1&until=1000&bucket=day", readerKey, nil, http.StatusOK)
+	var stats usage.Stats
+	decodeBody(t, resp, &stats)
+	if stats.Totals.Entries != 3 || stats.Totals.Failed != 1 {
+		t.Fatalf("totals = %+v", stats.Totals)
+	}
+	if stats.Bucket != usage.BucketDay || len(stats.Trend) != 1 {
+		t.Fatalf("stats = %+v", stats)
+	}
+	if len(stats.ByModel) != 2 || stats.ByModel[0].Name != "m1" {
+		t.Fatalf("by model = %+v", stats.ByModel)
+	}
+
+	resp = e.expect(t, http.MethodGet,
+		"/api/v1/usage/logs?since=1&until=1000&limit=2", readerKey, nil, http.StatusOK)
+	var logs struct {
+		Entries []usage.Entry `json:"entries"`
+	}
+	decodeBody(t, resp, &logs)
+	if len(logs.Entries) != 2 || logs.Entries[0].Model != "m2" {
+		t.Fatalf("logs = %+v", logs.Entries)
+	}
+
+	resp = e.expect(t, http.MethodGet, "/api/v1/usage/logs?limit=0", readerKey, nil, http.StatusBadRequest)
+	if code := errCode(t, resp); code != "invalid_limit" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestChannelsEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	resp := e.expect(t, http.MethodGet, "/api/v1/channels", readerKey, nil, http.StatusOK)
+	var payload struct {
+		Channels []provider.Channel `json:"channels"`
+	}
+	decodeBody(t, resp, &payload)
+	if len(payload.Channels) < 30 {
+		t.Fatalf("channel catalogue too small: %d", len(payload.Channels))
+	}
+	found := false
+	for _, channel := range payload.Channels {
+		if channel.ID == "deepseek" {
+			found = true
+			if channel.BaseURL == "" {
+				t.Fatal("deepseek channel has no base url")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("catalogue is missing deepseek")
 	}
 }
 

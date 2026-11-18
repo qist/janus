@@ -1,11 +1,13 @@
 import { api } from "@/lib/api";
 import type {
+  Channel,
   Credential,
   CredentialKind,
   OAuthStart,
   ProbeResult,
   Provider,
   ProviderKind,
+  QuotaResult,
   Route,
 } from "@/api/types";
 
@@ -13,11 +15,16 @@ export function listProviders() {
   return api<{ providers: Provider[] }>("/api/v1/providers");
 }
 
+export function listChannels() {
+  return api<{ channels: Channel[] }>("/api/v1/channels");
+}
+
 export type CreateProviderBody = {
   id: string;
   name?: string;
   kind: ProviderKind;
   base_url: string;
+  channel?: string;
 };
 
 export function createProvider(body: CreateProviderBody) {
@@ -104,4 +111,18 @@ export function completeOAuth(providerID: string, sessionID: string, code: strin
     method: "POST",
     body: { session_id: sessionID, code },
   });
+}
+
+/** Reads the vendor's allowance/balance for every credential of one provider. */
+export function refreshQuota(providerID: string) {
+  return api<{ quotas: QuotaResult[] }>(
+    `/api/v1/providers/${encodeURIComponent(providerID)}/quota`,
+    { method: "POST" }
+  );
+}
+
+/** Returns the stored quota snapshots without contacting any vendor. */
+export function listQuotas(providerID?: string) {
+  const suffix = providerID ? `?provider=${encodeURIComponent(providerID)}` : "";
+  return api<{ quotas: QuotaResult[] }>(`/api/v1/quotas${suffix}`);
 }

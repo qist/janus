@@ -1,6 +1,37 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/*
+ * Tailwind 4：一条 @import 引入 preflight 与全部工具类；
+ * 主题写在 CSS 里，不再有 tailwind.config.js。
+ *
+ * source(none) 关闭自动探测：仓库里还有 Go 与文档，扫描它们只会生成无用 CSS。
+ */
+@import "tailwindcss" source(none);
+
+@source "../index.html";
+@source "./";
+
+/* v4 的 dark 变体默认跟随媒体查询；控制台用 class 切换，必须显式声明。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * inline 让工具类直接内联 `hsl(var(--background))`，
+ * 这样 :root / .dark 的运行时覆盖依然生效（否则会烘焙成构建期常量）。
+ */
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-border: hsl(var(--border));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-danger: hsl(var(--danger));
+
+  --font-sans:
+    Inter, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui,
+    sans-serif;
+  --font-mono: SFMono-Regular, "Cascadia Code", "Roboto Mono", ui-monospace, monospace;
+}
 
 @layer base {
   :root {
@@ -27,7 +58,14 @@
     --danger: 0 74% 62%;
   }
 
-  * {
+  /*
+   * v4 把 border 的默认色改成 currentColor。这里保留 v3 的语义，
+   * 否则所有只写 `border` 的卡片都会跟着文字颜色走。
+   */
+  *,
+  ::after,
+  ::before,
+  ::backdrop {
     border-color: hsl(var(--border));
   }
 
@@ -35,6 +73,15 @@
   body,
   #root {
     height: 100%;
+  }
+
+  /*
+   * v4 的 preflight 去掉了 v3 里的 `button { cursor: pointer }`，
+   * 不补回来所有按钮都会变成箭头光标。禁用态由 `disabled:cursor-not-allowed` 覆盖。
+   */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
   }
 
   body {
@@ -48,11 +95,11 @@
 
 @layer components {
   .card {
-    @apply rounded-xl border bg-card p-5 shadow-sm;
+    @apply rounded-xl border bg-card p-5 shadow-xs;
   }
 
   .input {
-    @apply w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none;
+    @apply w-full rounded-lg border bg-background px-3 py-2 text-sm outline-hidden;
     @apply focus:ring-2 focus:ring-primary/30;
   }
 

@@ -17,7 +17,7 @@ export function LanguageSwitcher({ compact = false }: { compact?: boolean }) {
         onChange={(event) => setLocale(event.target.value as Locale)}
         className={
           compact
-            ? "rounded-lg border bg-background px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-primary/30"
+            ? "rounded-lg border bg-background px-2 py-1 text-xs outline-hidden focus:ring-2 focus:ring-primary/30"
             : "input h-8 w-24 py-0 text-xs"
         }
       >

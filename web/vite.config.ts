@@ -1,12 +1,14 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 
 // 前端产物直接写进 Go 的 embed 目录，`go build` 不依赖 Node。
 // 开发时把 /api 与 /v1 代理到本机 janus。
 export default defineConfig({
   base: "/ui/",
-  plugins: [react()],
+  // Tailwind 4 走 Vite 插件，不再需要 postcss.config.js 与 autoprefixer。
+  plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

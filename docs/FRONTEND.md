@@ -20,7 +20,7 @@
 |---|---|---|
 | 框架 | React 19 + TypeScript 5.7 | 与参考项目一致，生态最稳 |
 | 构建 | Vite 6 | 产物直接写进 Go embed 目录，Go 构建不需要 Node |
-| 样式 | Tailwind CSS 3 | 语义色用 CSS 变量（light/dark 一套 token） |
+| 样式 | Tailwind CSS 4 + `@tailwindcss/vite` | 主题写在 CSS 的 `@theme`；无 PostCSS / autoprefixer 配置 |
 | 路由 | react-router-dom 7，`createHashRouter` | 静态托管无需服务端 rewrite；路由级 lazy chunk |
 | 状态 | Zustand 5 | 只放认证与主题；服务端数据留在页面内，避免过早引入全局缓存 |
 | 图标 | lucide-react | 与参考项目一致 |
@@ -35,7 +35,6 @@
 web/
 ├── index.html              # 主题预置脚本（避免刷新闪白）
 ├── package.json / tsconfig.json / vite.config.ts
-├── tailwind.config.js / postcss.config.js
 └── src/
     ├── main.tsx / App.tsx
     ├── router/index.tsx    # hash 路由 + lazy
@@ -117,7 +116,8 @@ web/
 make ui    # cd web && npm ci && npm run build
 ```
 
-Vite 配置 `base: "/ui/"`、`outDir: "../internal/ui/dist"`；
+Vite 配置 `base: "/ui/"`、`outDir: "../internal/ui/dist"`，Tailwind 走
+`@tailwindcss/vite`（不再有 `postcss.config.js`，也不再装 autoprefixer：v4 用 Lightning CSS 处理前缀）。
 `internal/ui` 用 `//go:embed all:dist` 打包，因此：
 
 - `go build` / `go test` **不需要 Node**（dist 已提交）；
@@ -130,7 +130,32 @@ Vite 配置 `base: "/ui/"`、`outDir: "../internal/ui/dist"`；
 make ui-dev        # cd web && npm run dev  （/api、/v1 代理到 127.0.0.1:8080）
 ```
 
-## 10. 多语言（i18n）
+## 10. Tailwind 4 迁移说明
+
+v4 与 v3 **不兼容**，这次是有意升级并逐项处理，不是改个版本号：
+
+| v3 | v4 | 这里的处理 |
+|---|---|---|
+| `tailwind.config.js` + `content` 数组 | CSS 优先，`@theme` / `@source` | 删除 JS 配置，主题与扫描范围写进 `src/index.css` |
+| `@tailwind base/components/utilities` | `@import "tailwindcss"` | 一条 import 引入 preflight 与工具类 |
+| `darkMode: "class"` | 默认跟随 `prefers-color-scheme` | `@custom-variant dark (&:where(.dark, .dark *))` 保留 class 切换 |
+| PostCSS + autoprefixer | `@tailwindcss/vite`（Lightning CSS） | 删除 `postcss.config.js` 与两个依赖 |
+| 自定义色写 `theme.extend.colors` | `@theme { --color-* }` | `@theme inline` + `hsl(var(--token))`，`:root/.dark` 覆盖仍生效 |
+| `shadow-sm` / `outline-none` | 语义改名 `shadow-xs` / `outline-hidden` | `.card`、`.input` 与语言选择器同步改名 |
+| `border` 默认色 gray-200 | 默认 `currentColor` | 基础层显式 `* { border-color: hsl(var(--border)) }`，保持 v3 观感 |
+| preflight 给按钮 `cursor: pointer` | 移除，按钮回默认光标 | 基础层补回 `button:not(:disabled)` 的 pointer，禁用态仍由工具类覆盖 |
+
+两个容易踩的点：
+
+- **必须用 `@theme inline`**。不加 `inline`，工具类会把 `hsl(var(--background))` 求值成构建期常量，
+  深色主题切换直接失效。
+- **`source(none)` + 显式 `@source`**。仓库根是 Git 仓库，自动探测会一路扫到 Go 与文档；
+  关掉后只扫 `web/index.html` 与 `web/src`，产物稳定、构建更快。
+
+升级后首屏 CSS 从 15 kB 增至 24 kB（gzip 5.4 kB）：增量主要来自 v4 的 `@property` 声明与
+color-mix 支持，换取的是不再需要 PostCSS 链路与 JS 配置。
+
+## 11. 多语言（i18n）
 
 界面文案不写死在组件里，全部走 `useI18n()`：
 
@@ -155,7 +180,7 @@ t.raw(`status.${status}`, status);                 // 动态键，缺失回落�
 加一门语言只要两步：复制 `zh.ts` 翻译成目标语言；在 `i18n/index.tsx` 的 `DICTIONARIES`
 与 `LANGUAGES` 各加一项。页面代码不动。
 
-## 11. 约定
+## 12. 约定
 
 - 界面文案只通过 `t()` 输出；代码、类型、日志、API 字段用英文。
 - 新增文案必须同时补 `zh.ts` 与 `en.ts`，否则类型检查失败。

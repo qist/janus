@@ -228,6 +228,7 @@ export const en: Record<MessageKey, string> = {
   "status.approve": "approve",
   "status.reject": "reject",
   "status.needs_human": "needs human",
+  "status.unknown": "unknown",
   "status.ok": "ok",
   "status.exhausted": "out of quota",
   "status.rate_limited": "rate limited",

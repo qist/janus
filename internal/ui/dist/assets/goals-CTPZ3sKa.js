@@ -1,1 +1,0 @@
-import{g as a}from"./index-DKHBn1Ve.js";function e(o=100){return a(`/api/v1/goals?limit=${o}`)}function t(o){return a(`/api/v1/goals/${encodeURIComponent(o)}`)}function i(o){return a("/api/v1/goals",{method:"POST",body:o})}function l(o){return a(`/api/v1/goals/${encodeURIComponent(o)}/cancel`,{method:"POST"})}export{l as a,i as c,t as g,e as l};

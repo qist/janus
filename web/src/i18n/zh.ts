@@ -223,6 +223,7 @@ export const zh = {
   "status.approve": "通过",
   "status.reject": "拒绝",
   "status.needs_human": "需人工",
+  "status.unknown": "未知",
   "status.ok": "正常",
   "status.exhausted": "额度耗尽",
   "status.rate_limited": "限流中",

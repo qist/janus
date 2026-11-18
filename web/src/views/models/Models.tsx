@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, Play, Plus, RefreshCw, Square, Trash2 } from "lucide-react";
+import { Activity, KeyRound, Play, Plus, RefreshCw, Square, Trash2 } from "lucide-react";
 import { getMe } from "@/api/account";
 import { listModels } from "@/api/insight";
 import {
@@ -12,12 +12,14 @@ import {
   listCredentials,
   listProviders,
   listRoutes,
+  probeProvider,
   updateProvider,
 } from "@/api/providers";
 import type {
   Credential,
   Me,
   ModelInfo,
+  ProbeResult,
   Provider,
   ProviderKind,
   Route,
@@ -40,6 +42,25 @@ import {
 
 const KINDS: ProviderKind[] = ["openai", "anthropic", "custom"];
 
+function ProbeCell({ result }: { result?: ProbeResult }) {
+  const { t } = useI18n();
+  if (!result) {
+    return <span className="text-xs text-muted-foreground">{t("common.none")}</span>;
+  }
+  if (result.ok) {
+    return (
+      <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
+        {t("models.probeOk", { latency: result.latency_ms, count: result.model_count })}
+      </Badge>
+    );
+  }
+  return (
+    <span className="text-xs text-danger" title={result.error}>
+      {t("models.probeFailed")}
+    </span>
+  );
+}
+
 export default function Models() {
   const { t } = useI18n();
 
@@ -50,6 +71,7 @@ export default function Models() {
   const [exposed, setExposed] = useState<ModelInfo[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [unavailable, setUnavailable] = useState<string | null>(null);
+  const [probes, setProbes] = useState<Record<string, ProbeResult>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
   const [providerForm, setProviderForm] = useState({
@@ -248,6 +270,7 @@ export default function Models() {
                   <th>{t("models.providerKind")}</th>
                   <th>{t("models.baseUrl")}</th>
                   <th>{t("common.status")}</th>
+                  <th>{t("models.probe")}</th>
                   <th className="text-right">{t("common.none")}</th>
                 </tr>
               </thead>
@@ -273,8 +296,24 @@ export default function Models() {
                         {provider.enabled ? t("models.on") : t("models.off")}
                       </Badge>
                     </td>
+                    <td>
+                      <ProbeCell result={probes[provider.id]} />
+                    </td>
                     <td className="py-2 text-right">
                       <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          disabled={!canAdmin || busy === `probe:${provider.id}`}
+                          onClick={() =>
+                            run(`probe:${provider.id}`, async () => {
+                              const result = await probeProvider(provider.id);
+                              setProbes((current) => ({ ...current, [provider.id]: result }));
+                            })
+                          }
+                        >
+                          <Activity className="h-3.5 w-3.5" />
+                          {busy === `probe:${provider.id}` ? t("models.probing") : t("models.probe")}
+                        </Button>
                         <Button
                           variant="ghost"
                           disabled={!canAdmin || busy === `provider:${provider.id}`}

@@ -102,7 +102,11 @@ type Credential struct {
 	// Masked is a short hint such as "…a1b2"; the real secret is not returned.
 	Masked string `json:"masked,omitempty"`
 	// HasSecret tells the console whether something is stored.
-	HasSecret bool  `json:"has_secret"`
+	HasSecret bool `json:"has_secret"`
+	// Priority orders credentials for probing and for pool selection; lower
+	// comes first. It is assigned at creation so the order cannot drift with
+	// random ids.
+	Priority  int   `json:"priority"`
 	Remaining int64 `json:"remaining,omitempty"`
 	Total     int64 `json:"total,omitempty"`
 	ExpiresAt int64 `json:"expires_at,omitempty"`
@@ -156,6 +160,8 @@ type Service struct {
 	Store Store
 	Box   *SecretBox
 	Now   func() int64
+	// ProbeTimeout bounds one connectivity probe; zero uses DefaultProbeTimeout.
+	ProbeTimeout time.Duration
 }
 
 // New returns a service. box may be nil only for read-only deployments, in
@@ -297,9 +303,21 @@ func (s *Service) CreateCredential(ctx context.Context, providerID, label string
 		return Credential{}, fmt.Errorf("seal credential: %w", err)
 	}
 
+	existing, err := s.Store.ListCredentials(ctx, providerID)
+	if err != nil {
+		return Credential{}, err
+	}
+	priority := 0
+	for _, item := range existing {
+		if item.Priority >= priority {
+			priority = item.Priority + 1
+		}
+	}
+
 	now := s.now()
 	credential := Credential{
 		ID:               newResourceID("cred"),
+		Priority:         priority,
 		ProviderID:       providerID,
 		Label:            strings.TrimSpace(label),
 		Kind:             kind,
@@ -329,6 +347,16 @@ func (s *Service) ListCredentials(ctx context.Context, providerID string) ([]Cre
 	if err != nil {
 		return nil, err
 	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].Priority != list[j].Priority {
+			return list[i].Priority < list[j].Priority
+		}
+		if list[i].CreatedAt != list[j].CreatedAt {
+			return list[i].CreatedAt < list[j].CreatedAt
+		}
+		return list[i].ID < list[j].ID
+	})
+
 	out := make([]Credential, 0, len(list))
 	for _, credential := range list {
 		out = append(out, publicCredential(credential))
@@ -627,7 +655,15 @@ func (m *MemoryStore) ListCredentials(_ context.Context, providerID string) ([]C
 		}
 		out = append(out, c)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt < out[j].CreatedAt
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 

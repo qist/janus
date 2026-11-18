@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"janus/internal/provider"
 )
@@ -207,4 +209,24 @@ func (s *Server) handleDeleteRoute(w http.ResponseWriter, r *http.Request, _ Ide
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleProbeProvider checks the endpoint and every stored credential with a
+// GET /models. An unhealthy upstream is a 200 with ok=false: the probe itself
+// succeeded, and the console needs the detail to show it.
+func (s *Server) handleProbeProvider(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	// Several credentials can be tried in sequence; cap the whole call so a
+	// dead endpoint cannot pin a request for a minute.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	result, err := s.Providers.Probe(ctx, r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }

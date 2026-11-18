@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -226,5 +227,57 @@ func TestCredentialResponseShape(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("response contains %q: %s", forbidden, text)
 		}
+	}
+}
+
+func TestProbeProviderEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableProviders(t)
+	ctx := context.Background()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		io.WriteString(w, `{"data":[{"id":"opencode-go/deepseek-v4.1-flash"},{"id":"opencode-go/glm-5.3"}]}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "p1", Kind: provider.KindOpenAI, BaseURL: upstream.URL + "/v1",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	if _, err := svc.CreateCredential(ctx, "p1", "primary", provider.CredentialAPIKey, "sk-live-probe-1234"); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/providers/p1/probe", adminKey, nil, http.StatusOK)
+	var result provider.ProbeResult
+	decodeBody(t, resp, &result)
+	if !result.OK || result.ModelCount != 2 {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.Masked != "…1234" {
+		t.Fatalf("masked = %q", result.Masked)
+	}
+
+	// Probing is an admin action: a read key must not trigger upstream traffic.
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p1/probe", readerKey, nil, http.StatusForbidden)
+	if code := errCode(t, resp); code != "forbidden" {
+		t.Fatalf("code = %q", code)
+	}
+
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/missing/probe", adminKey, nil, http.StatusNotFound)
+	if code := errCode(t, resp); code != "provider_not_found" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestProbeWithoutProviderService(t *testing.T) {
+	e := newTestEnv(t)
+	resp := e.expect(t, http.MethodPost, "/api/v1/providers/p1/probe", adminKey, nil, http.StatusNotImplemented)
+	if code := errCode(t, resp); code != "providers_unavailable" {
+		t.Fatalf("code = %q", code)
 	}
 }

@@ -34,6 +34,7 @@ type ProviderCredentialModel struct {
 	Label      string `gorm:"size:128"`
 	Kind       string `gorm:"size:16"`
 	Status     string `gorm:"index;size:16"`
+	Priority   int    `gorm:"index"`
 	Masked     string `gorm:"size:32"`
 	Secret     string `gorm:"type:blob"`
 	Remaining  int64
@@ -123,6 +124,7 @@ func (s *Store) SaveCredential(ctx context.Context, c provider.Credential) error
 		Label:      c.Label,
 		Kind:       string(c.Kind),
 		Status:     string(c.Status),
+		Priority:   c.Priority,
 		Masked:     c.Masked,
 		Secret:     c.SecretCiphertext,
 		Remaining:  c.Remaining,
@@ -139,7 +141,7 @@ func (s *Store) SaveCredential(ctx context.Context, c provider.Credential) error
 
 // ListCredentials returns credentials, optionally filtered by provider.
 func (s *Store) ListCredentials(ctx context.Context, providerID string) ([]provider.Credential, error) {
-	query := s.DB.WithContext(ctx).Order("id ASC")
+	query := s.DB.WithContext(ctx).Order("priority ASC, created_at ASC, id ASC")
 	if providerID != "" {
 		query = query.Where("provider_id = ?", providerID)
 	}
@@ -156,6 +158,7 @@ func (s *Store) ListCredentials(ctx context.Context, providerID string) ([]provi
 			Label:            m.Label,
 			Kind:             provider.CredentialKind(m.Kind),
 			Status:           provider.Status(m.Status),
+			Priority:         m.Priority,
 			Masked:           m.Masked,
 			HasSecret:        m.Secret != "",
 			Remaining:        m.Remaining,

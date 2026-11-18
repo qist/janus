@@ -197,3 +197,16 @@ export type Route = {
   created_at: number;
   updated_at: number;
 };
+
+export type ProbeResult = {
+  ok: boolean;
+  provider_id: string;
+  base_url: string;
+  credential_id?: string;
+  masked?: string;
+  latency_ms: number;
+  model_count: number;
+  models?: string[];
+  status: CredentialStatus | "";
+  error?: string;
+};

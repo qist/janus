@@ -169,6 +169,7 @@ curl -s -X POST "http://127.0.0.1:8080/mcp/$JANUS_API_KEY" \
 | DELETE | `/api/v1/providers/{id}` | admin | 仍被路由或凭据引用时返回 `409 provider_in_use` |
 | GET | `/api/v1/providers/{id}/credentials` | admin | 只返回 `masked` 与状态 |
 | POST | `/api/v1/providers/{id}/credentials` | admin | `{"label","kind(api_key|oauth)","secret"}` |
+| POST | `/api/v1/providers/{id}/probe` | admin | `GET {base_url}/models` 验证端点与密钥，不消耗 token |
 | DELETE | `/api/v1/credentials/{id}` | admin | 删除凭据 |
 | GET | `/api/v1/model-routes` | read | 暴露模型 → 上游模型 |
 | POST | `/api/v1/model-routes` | admin | `{"exposed_model","provider_id","upstream_model","aliases"}` |
@@ -183,6 +184,11 @@ curl -s -X POST "http://127.0.0.1:8080/mcp/$JANUS_API_KEY" \
 - 启动时把库中路由并入 `/v1`：**`JANUS_MODELS` 优先**，同名时记日志并保留环境变量那份，
   避免库里的配置悄悄覆盖运维显式声明。改动后需要重启生效（运行时热加载是下一步）。
 - 未设置 `JANUS_MASTER_KEY` 时所有写接口返回 `501 providers_unavailable`，不会退化成明文存储。
+- **探测**：`POST .../probe` 逐个凭据请求 `GET {base_url}/models`，返回 `ok / latency_ms / model_count / masked`；
+  上游不可用是 `200 + ok:false`（探测本身成功），并顺带更新凭据状态：
+  `401/403 → invalid`、`402 → exhausted`、`429 → rate_limited`、`2xx → ok`；
+  网络错误与 5xx 不归咎凭据，保持原状态。响应最多带 50 个模型名，错误信息里的密钥会被替换成 `***`。
+- 凭据按创建顺序（`priority` 递增）依次尝试，探测与账号池用同一顺序，不随随机 ID 漂移。
 
 ```bash
 export JANUS_MASTER_KEY=$(openssl rand -hex 32)

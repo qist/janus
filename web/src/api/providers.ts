@@ -1,5 +1,12 @@
 import { api } from "@/lib/api";
-import type { Credential, CredentialKind, Provider, ProviderKind, Route } from "@/api/types";
+import type {
+  Credential,
+  CredentialKind,
+  ProbeResult,
+  Provider,
+  ProviderKind,
+  Route,
+} from "@/api/types";
 
 export function listProviders() {
   return api<{ providers: Provider[] }>("/api/v1/providers");
@@ -74,4 +81,11 @@ export function createRoute(body: CreateRouteBody) {
 
 export function deleteRoute(id: string) {
   return api<void>(`/api/v1/model-routes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Checks GET {base}/models with each stored credential; no tokens are spent. */
+export function probeProvider(id: string) {
+  return api<ProbeResult>(`/api/v1/providers/${encodeURIComponent(id)}/probe`, {
+    method: "POST",
+  });
 }

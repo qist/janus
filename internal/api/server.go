@@ -96,6 +96,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/providers/{id}/credentials", s.protect(ScopeAdmin, s.handleCreateCredential))
 	mux.HandleFunc("POST /api/v1/providers/{id}/probe", s.protect(ScopeAdmin, s.handleProbeProvider))
 	mux.HandleFunc("POST /api/v1/providers/{id}/quota", s.protect(ScopeAdmin, s.handleRefreshQuota))
+	mux.HandleFunc("POST /api/v1/providers/{id}/sync-routes", s.protect(ScopeAdmin, s.handleSyncRoutes))
 	mux.HandleFunc("GET /api/v1/quotas", s.protect(ScopeRead, s.handleListQuotas))
 	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/start", s.protect(ScopeAdmin, s.handleStartProviderOAuth))
 	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/complete", s.protect(ScopeAdmin, s.handleCompleteProviderOAuth))

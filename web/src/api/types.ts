@@ -248,6 +248,20 @@ export type Channel = {
   note?: string;
 };
 
+export type SyncResult = {
+  provider_id: string;
+  credential_id?: string;
+  masked?: string;
+  total: number;
+  created: string[];
+  existing: string[];
+  conflicts: string[];
+  skipped: string[];
+  stale: string[];
+  pruned: string[];
+  error?: string;
+};
+
 export type QuotaWindow = {
   name: string;
   used_percent?: number;

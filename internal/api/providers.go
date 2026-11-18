@@ -285,6 +285,37 @@ func (s *Server) handleProbeProvider(w http.ResponseWriter, r *http.Request, _ I
 	writeJSON(w, http.StatusOK, result)
 }
 
+type syncRoutesRequest struct {
+	Prune bool     `json:"prune"`
+	Skip  []string `json:"skip"`
+}
+
+// handleSyncRoutes compares the provider's /models with the stored routes and
+// creates the missing ones. It never touches another provider's exposed names.
+func (s *Server) handleSyncRoutes(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	var req syncRoutesRequest
+	if r.ContentLength != 0 {
+		if !decode(w, r, s.maxBody(), &req) {
+			return
+		}
+	}
+	// Each model insert reads the route table; keep the whole sweep under one
+	// budget so a large catalogue cannot hold the console forever.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	result, err := s.Providers.SyncRoutes(ctx, r.PathValue("id"), provider.SyncOptions{Prune: req.Prune, Skip: req.Skip})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.reloadModels(r.Context())
+	writeJSON(w, http.StatusOK, result)
+}
+
 // handleRefreshQuota reads the allowance/balance of every credential of one
 // provider. The vendor call happens server-side; the secret never leaves.
 func (s *Server) handleRefreshQuota(w http.ResponseWriter, r *http.Request, _ Identity) {

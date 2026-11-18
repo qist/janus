@@ -467,3 +467,55 @@ func TestProviderCustomOAuthValidation(t *testing.T) {
 		t.Fatalf("code = %q", code)
 	}
 }
+
+func TestSyncRoutesEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableProviders(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, `{"data":[{"id":"m1"},{"id":"m2"}]}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx := context.Background()
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "p1", Kind: provider.KindOpenAI, BaseURL: upstream.URL + "/v1",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	if _, err := svc.CreateCredential(ctx, "p1", "", provider.CredentialAPIKey, "sk-live"); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	reloaded := 0
+	e.server.ReloadModels = func(context.Context) error {
+		reloaded++
+		return nil
+	}
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/providers/p1/sync-routes", adminKey, nil, http.StatusOK)
+	var result provider.SyncResult
+	decodeBody(t, resp, &result)
+	if result.Total != 2 || len(result.Created) != 2 {
+		t.Fatalf("result = %+v", result)
+	}
+	if reloaded != 1 {
+		t.Fatalf("reloads = %d", reloaded)
+	}
+
+	resp = e.expect(t, http.MethodGet, "/api/v1/model-routes", readerKey, nil, http.StatusOK)
+	var routes struct {
+		Routes []provider.Route `json:"routes"`
+	}
+	decodeBody(t, resp, &routes)
+	if len(routes.Routes) != 2 {
+		t.Fatalf("routes = %+v", routes.Routes)
+	}
+
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p1/sync-routes", readerKey, nil, http.StatusForbidden)
+	_ = errCode(t, resp)
+}

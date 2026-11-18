@@ -243,6 +243,19 @@ resets_at / text`）、`plan`、`checked_at`、`error`。厂商只给百分比�
 读失败保留旧快照并记 `error`，控制台显示"读取失败"而不是 0。没有额度接口的渠道返回说明文字，
 不伪装成成功。`GET /api/v1/quotas?provider=` 返回已存快照，不触发厂商请求。
 
+### 路由同步
+
+`POST /api/v1/providers/{id}/sync-routes` 用第一个可用凭据读上游 `/models`，补齐缺失路由：
+
+- 已有同一 upstream 的 provider 路由 → 计入 `existing`，不重复建；
+- 暴露名已被**其它**上游占用 → 计入 `conflicts`，绝不抢占；
+- 上游不再提供的模型 → 计入 `stale`；只有请求带 `{"prune": true}` 才删除；
+- `{"skip": ["janus","default"]}` 用于忽略上游网关自带的别名；
+- 响应 `{total, created, existing, conflicts, skipped, stale, pruned, credential_id, masked}`。
+
+控制台的「同步模型」按钮使用该接口（默认不删），有 `stale` 时才出现「清理过期」。
+探测与同步共用同一次 `/models` 请求格式；`model_count` 只统计非空、去重后的 id。
+
 ### 用量统计
 
 每次模型调用（成功与失败）都写入 SQLite `usage_entries`：模型、上游模型、provider、凭据、

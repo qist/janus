@@ -87,7 +87,7 @@ func (s *Service) Probe(ctx context.Context, providerID string) (ProbeResult, er
 		if outcome.err == "" {
 			result.OK = true
 			result.Status = StatusOK
-			result.Models = outcome.models
+			result.Models = truncateModels(outcome.models, maxProbeModels)
 			result.ModelCount = outcome.count
 			s.markCredential(ctx, credential, StatusOK)
 			return result, nil
@@ -186,16 +186,22 @@ func probeModels(ctx context.Context, baseURL, secret string, timeout time.Durat
 		return probeOutcome{status: resp.StatusCode, err: "decode /models: " + err.Error()}
 	}
 
-	out := probeOutcome{status: resp.StatusCode, count: len(parsed.Data)}
+	ids := make([]string, 0, len(parsed.Data))
 	for _, model := range parsed.Data {
-		if len(out.models) >= maxProbeModels {
-			break
-		}
-		if id := strings.TrimSpace(model.ID); id != "" {
-			out.models = append(out.models, id)
-		}
+		ids = append(ids, model.ID)
 	}
-	return out
+	// The full list is returned: route sync needs it. Probe truncates only for
+	// display, so both paths share one request format.
+	ids = dedupeModels(ids)
+	return probeOutcome{status: resp.StatusCode, count: len(ids), models: ids}
+}
+
+// truncateModels keeps a probe response small without changing the count.
+func truncateModels(models []string, limit int) []string {
+	if limit <= 0 || len(models) <= limit {
+		return models
+	}
+	return models[:limit]
 }
 
 // sanitizeProbeError strips the key from transport errors. http.Client errors

@@ -58,7 +58,9 @@ func TestProbeSuccessMarksCredentialOK(t *testing.T) {
 	if !result.OK || result.Status != StatusOK {
 		t.Fatalf("result = %+v", result)
 	}
-	if result.ModelCount != 3 || len(result.Models) != 2 {
+	// The upstream advertises three entries but one id is empty; only routable
+	// ids count.
+	if result.ModelCount != 2 || len(result.Models) != 2 {
 		t.Fatalf("models = %d/%v", result.ModelCount, result.Models)
 	}
 	if result.Masked != "…1234" || result.CredentialID == "" {

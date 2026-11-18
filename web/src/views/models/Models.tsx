@@ -30,6 +30,7 @@ import {
   probeProvider,
   refreshQuota,
   resetCredential,
+  syncRoutes,
   startOAuth,
   updateCredential,
   updateProvider,
@@ -45,6 +46,7 @@ import type {
   ProviderKind,
   Quota,
   Route,
+  SyncResult,
 } from "@/api/types";
 import type { ImportSource } from "@/api/providers";
 import { useI18n } from "@/i18n";
@@ -127,6 +129,7 @@ export default function Models() {
   const [unavailable, setUnavailable] = useState<string | null>(null);
   const [probes, setProbes] = useState<Record<string, ProbeResult>>({});
   const [channels, setChannels] = useState<Channel[]>([]);
+  const [syncs, setSyncs] = useState<Record<string, SyncResult>>({});
   const [oauth, setOauth] = useState<{
     providerID: string;
     sessionID: string;
@@ -449,6 +452,18 @@ export default function Models() {
                     <td className="py-2">
                       <div className="font-medium">{provider.name || provider.id}</div>
                       <div className="font-mono text-xs text-muted-foreground">{provider.id}</div>
+                      {syncs[provider.id] ? (
+                        <div className="text-xs text-muted-foreground">
+                          {syncs[provider.id].error
+                            ? t("models.syncFailed")
+                            : t("models.syncSummary", {
+                                created: syncs[provider.id].created.length,
+                                existing: syncs[provider.id].existing.length,
+                                conflicts: syncs[provider.id].conflicts.length,
+                                stale: syncs[provider.id].stale.length,
+                              })}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="text-xs">{provider.kind}</td>
                     <td className="max-w-[260px] truncate font-mono text-xs text-muted-foreground">
@@ -483,6 +498,37 @@ export default function Models() {
                           <Activity className="h-3.5 w-3.5" />
                           {busy === `probe:${provider.id}` ? t("models.probing") : t("models.probe")}
                         </Button>
+                        <Button
+                          variant="ghost"
+                          title={t("models.syncRoutesHint")}
+                          disabled={!canAdmin || busy === `sync:${provider.id}`}
+                          onClick={() =>
+                            run(`sync:${provider.id}`, async () => {
+                              const result = await syncRoutes(provider.id);
+                              setSyncs((current) => ({ ...current, [provider.id]: result }));
+                            })
+                          }
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          {busy === `sync:${provider.id}`
+                            ? t("models.syncing")
+                            : t("models.syncRoutes")}
+                        </Button>
+                        {syncs[provider.id]?.stale.length ? (
+                          <Button
+                            variant="ghost"
+                            disabled={!canAdmin || busy === `sync:${provider.id}`}
+                            onClick={() =>
+                              run(`sync:${provider.id}`, async () => {
+                                const result = await syncRoutes(provider.id, true);
+                                setSyncs((current) => ({ ...current, [provider.id]: result }));
+                              })
+                            }
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            {t("models.pruneStale")}
+                          </Button>
+                        ) : null}
                         <Button
                           variant="ghost"
                           disabled={!canAdmin || busy === `provider:${provider.id}`}

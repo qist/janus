@@ -10,6 +10,7 @@ import type {
   ProviderKind,
   QuotaResult,
   Route,
+  SyncResult,
 } from "@/api/types";
 
 export function listProviders() {
@@ -165,6 +166,15 @@ export function completeOAuth(
   return api<Credential>(`/api/v1/providers/${encodeURIComponent(providerID)}/oauth/complete`, {
     method: "POST",
     body: { session_id: sessionID, code, label },
+  });
+}
+
+/** Compares the upstream /models with stored routes and creates what is missing.
+ * prune=true also deletes this provider's routes whose model disappeared. */
+export function syncRoutes(providerID: string, prune = false) {
+  return api<SyncResult>(`/api/v1/providers/${encodeURIComponent(providerID)}/sync-routes`, {
+    method: "POST",
+    body: { prune },
   });
 }
 

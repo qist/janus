@@ -210,3 +210,10 @@ export type ProbeResult = {
   status: CredentialStatus | "";
   error?: string;
 };
+
+export type OAuthStart = {
+  session_id: string;
+  auth_url: string;
+  redirect_uri: string;
+  expires_in: number;
+};

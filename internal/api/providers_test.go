@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
+	"janus/internal/oauth"
 	"janus/internal/provider"
 )
 
@@ -334,4 +336,72 @@ func TestReloadFailureDoesNotFailMutation(t *testing.T) {
 	e.expect(t, http.MethodPost, "/api/v1/providers", adminKey, createProviderRequest{
 		ID: "p1", Kind: provider.KindOpenAI, BaseURL: "https://api.example.com/v1",
 	}, http.StatusCreated)
+}
+
+func TestOAuthEndpoints(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableProviders(t)
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600}`)
+	}))
+	t.Cleanup(tokenSrv.Close)
+
+	registry := oauth.DefaultRegistry()
+	config, _ := registry.Get("openai")
+	config.TokenURL = tokenSrv.URL
+	registry.Set(config)
+	svc.OAuth = registry
+
+	ctx := context.Background()
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "p1", Kind: provider.KindOpenAI, BaseURL: "https://api.example.com/v1",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "p2", Kind: provider.KindCustom, BaseURL: "https://api.example.com/v1",
+	}); err != nil {
+		t.Fatalf("CreateProvider custom: %v", err)
+	}
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/providers/p1/oauth/start", adminKey, nil, http.StatusOK)
+	var start provider.OAuthStart
+	decodeBody(t, resp, &start)
+	if start.SessionID == "" || !strings.Contains(start.AuthURL, "state=") {
+		t.Fatalf("start = %+v", start)
+	}
+	state, _ := url.Parse(start.AuthURL)
+	wantState := state.Query().Get("state")
+
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p1/oauth/complete", adminKey, map[string]any{
+		"session_id": start.SessionID,
+		"code":       "oauth-code#" + wantState,
+	}, http.StatusCreated)
+	var credential provider.Credential
+	decodeBody(t, resp, &credential)
+	if credential.Kind != provider.CredentialOAuth || credential.Masked == "" {
+		t.Fatalf("credential = %+v", credential)
+	}
+	if credential.SecretCiphertext != "" {
+		t.Fatal("response leaked the sealed secret")
+	}
+
+	// Unsupported kind and an unknown session are distinct failures.
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p2/oauth/start", adminKey, nil, http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "oauth_unsupported" {
+		t.Fatalf("code = %q", code)
+	}
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p1/oauth/complete", adminKey, map[string]any{
+		"session_id": "oauth_missing", "code": "x",
+	}, http.StatusConflict)
+	if code := errCode(t, resp); code != "oauth_session_invalid" {
+		t.Fatalf("code = %q", code)
+	}
+
+	// Starting a sign-in is admin work.
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p1/oauth/start", readerKey, nil, http.StatusForbidden)
+	if code := errCode(t, resp); code != "forbidden" {
+		t.Fatalf("code = %q", code)
+	}
 }

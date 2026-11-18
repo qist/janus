@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"janus/internal/goals"
+	"janus/internal/oauth"
 	"janus/internal/policy"
 	"janus/internal/provider"
 	"janus/internal/scoring"
@@ -91,6 +92,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/providers/{id}/credentials", s.protect(ScopeAdmin, s.handleListCredentials))
 	mux.HandleFunc("POST /api/v1/providers/{id}/credentials", s.protect(ScopeAdmin, s.handleCreateCredential))
 	mux.HandleFunc("POST /api/v1/providers/{id}/probe", s.protect(ScopeAdmin, s.handleProbeProvider))
+	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/start", s.protect(ScopeAdmin, s.handleStartProviderOAuth))
+	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/complete", s.protect(ScopeAdmin, s.handleCompleteProviderOAuth))
 	mux.HandleFunc("DELETE /api/v1/credentials/{id}", s.protect(ScopeAdmin, s.handleDeleteCredential))
 	mux.HandleFunc("GET /api/v1/model-routes", s.protect(ScopeRead, s.handleListRoutes))
 	mux.HandleFunc("POST /api/v1/model-routes", s.protect(ScopeAdmin, s.handleCreateRoute))
@@ -739,6 +742,14 @@ func classify(err error) (int, string) {
 		return http.StatusUnprocessableEntity, "invalid_request"
 	case errors.Is(err, provider.ErrSecretBox):
 		return http.StatusNotImplemented, "secrets_unavailable"
+	case errors.Is(err, provider.ErrOAuthUnsupported):
+		return http.StatusUnprocessableEntity, "oauth_unsupported"
+	case errors.Is(err, provider.ErrOAuthSession):
+		return http.StatusConflict, "oauth_session_invalid"
+	case errors.Is(err, provider.ErrOAuthState):
+		return http.StatusBadRequest, "oauth_state_mismatch"
+	case errors.Is(err, oauth.ErrExchange):
+		return http.StatusBadGateway, "oauth_exchange_failed"
 	case errors.Is(err, work.ErrAlreadyExists):
 		return http.StatusConflict, "already_exists"
 	case errors.Is(err, work.ErrAlreadyClaimed):

@@ -170,6 +170,8 @@ curl -s -X POST "http://127.0.0.1:8080/mcp/$JANUS_API_KEY" \
 | GET | `/api/v1/providers/{id}/credentials` | admin | 只返回 `masked` 与状态 |
 | POST | `/api/v1/providers/{id}/credentials` | admin | `{"label","kind(api_key|oauth)","secret"}` |
 | POST | `/api/v1/providers/{id}/probe` | admin | `GET {base_url}/models` 验证端点与密钥，不消耗 token |
+| POST | `/api/v1/providers/{id}/oauth/start` | admin | 发起订阅账号 OAuth（PKCE），返回 `session_id + auth_url` |
+| POST | `/api/v1/providers/{id}/oauth/complete` | admin | `{"session_id","code"}` 换令牌并写入 `kind=oauth` 凭据 |
 | DELETE | `/api/v1/credentials/{id}` | admin | 删除凭据 |
 | GET | `/api/v1/model-routes` | read | 暴露模型 → 上游模型 |
 | POST | `/api/v1/model-routes` | admin | `{"exposed_model","provider_id","upstream_model","aliases"}` |
@@ -192,6 +194,11 @@ curl -s -X POST "http://127.0.0.1:8080/mcp/$JANUS_API_KEY" \
   `401/403 → invalid`、`402 → exhausted`、`429 → rate_limited`、`2xx → ok`；
   网络错误与 5xx 不归咎凭据，保持原状态。响应最多带 50 个模型名，错误信息里的密钥会被替换成 `***`。
 - 凭据按创建顺序（`priority` 递增）依次尝试，探测与账号池用同一顺序，不随随机 ID 漂移。
+- **OAuth 登录**（订阅账号，不用 API key）：`kind=openai` 用 Codex CLI 的客户端，
+  `kind=anthropic` 用 Claude Code 的客户端，PKCE + state，会话 10 分钟、一次性。
+  授权页完成后把 `code`（或完整回调 URL，Claude 的 `code#state` 也行）粘回控制台；
+  令牌以 JSON 密文入库，`expires_in` 记录到期时间，**距到期 2 分钟内自动刷新并把新令牌写回**，
+  刷新失败沿用旧令牌由上游返回 401。密钥与 refresh token 都不会出现在 API 响应里。
 
 ```bash
 export JANUS_MASTER_KEY=$(openssl rand -hex 32)

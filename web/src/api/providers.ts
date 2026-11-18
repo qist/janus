@@ -2,6 +2,7 @@ import { api } from "@/lib/api";
 import type {
   Credential,
   CredentialKind,
+  OAuthStart,
   ProbeResult,
   Provider,
   ProviderKind,
@@ -87,5 +88,20 @@ export function deleteRoute(id: string) {
 export function probeProvider(id: string) {
   return api<ProbeResult>(`/api/v1/providers/${encodeURIComponent(id)}/probe`, {
     method: "POST",
+  });
+}
+
+/** Starts a PKCE sign-in and returns the vendor page to open. */
+export function startOAuth(providerID: string) {
+  return api<OAuthStart>(`/api/v1/providers/${encodeURIComponent(providerID)}/oauth/start`, {
+    method: "POST",
+  });
+}
+
+/** Finishes a sign-in with the code (or full callback URL) the vendor showed. */
+export function completeOAuth(providerID: string, sessionID: string, code: string) {
+  return api<Credential>(`/api/v1/providers/${encodeURIComponent(providerID)}/oauth/complete`, {
+    method: "POST",
+    body: { session_id: sessionID, code },
   });
 }

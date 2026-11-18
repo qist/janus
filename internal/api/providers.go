@@ -28,6 +28,11 @@ type createCredentialRequest struct {
 	Secret string                  `json:"secret"`
 }
 
+type oauthCompleteRequest struct {
+	SessionID string `json:"session_id"`
+	Code      string `json:"code"`
+}
+
 type createRouteRequest struct {
 	ExposedModel  string   `json:"exposed_model"`
 	ProviderID    string   `json:"provider_id"`
@@ -246,4 +251,37 @@ func (s *Server) handleProbeProvider(w http.ResponseWriter, r *http.Request, _ I
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleStartProviderOAuth begins a PKCE sign-in and returns the vendor URL.
+// The operator opens it, authorizes, and pastes the code back.
+func (s *Server) handleStartProviderOAuth(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	start, err := s.Providers.StartOAuth(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, start)
+}
+
+// handleCompleteProviderOAuth exchanges the pasted code and stores the tokens
+// as an oauth credential. The secret never travels back to the browser.
+func (s *Server) handleCompleteProviderOAuth(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	var req oauthCompleteRequest
+	if !decode(w, r, s.maxBody(), &req) {
+		return
+	}
+	credential, err := s.Providers.CompleteOAuth(r.Context(), r.PathValue("id"), req.SessionID, req.Code)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.reloadModels(r.Context())
+	writeJSON(w, http.StatusCreated, credential)
 }

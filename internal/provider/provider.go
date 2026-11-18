@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"janus/internal/gateway"
+	"janus/internal/oauth"
 	"janus/internal/pool"
 )
 
@@ -162,6 +163,10 @@ type Service struct {
 	Now   func() int64
 	// ProbeTimeout bounds one connectivity probe; zero uses DefaultProbeTimeout.
 	ProbeTimeout time.Duration
+	// OAuth overrides the built-in flows; tests point it at a fake token server.
+	OAuth *oauth.Registry
+	// oauth holds sign-ins started from the console, in memory only.
+	oauth oauthSessions
 }
 
 // New returns a service. box may be nil only for read-only deployments, in
@@ -497,10 +502,7 @@ func (s *Service) Clients(ctx context.Context) (map[string]*gateway.Client, erro
 			if credential.Status == StatusInvalid {
 				continue
 			}
-			if s.Box == nil {
-				return nil, ErrSecretBox
-			}
-			secret, err := s.Box.Open(credential.SecretCiphertext)
+			secret, err := s.credentialKey(ctx, string(p.Kind), credential)
 			if err != nil {
 				return nil, fmt.Errorf("credential %q: %w", credential.ID, err)
 			}

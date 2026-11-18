@@ -163,6 +163,15 @@ export const zh = {
   "models.secret": "密钥",
   "models.secretPlaceholder": "sk-...",
   "models.addCredential": "添加凭据",
+  "models.oauthLogin": "OAuth 登录",
+  "models.oauthStarting": "发起中…",
+  "models.oauthHint": "用订阅账号授权，不必生成 API key；令牌加密存放，过期自动刷新。",
+  "models.oauthPasteHint": "在打开的页面完成授权，把显示的授权码（或回调地址）粘贴回来。",
+  "models.oauthCode": "授权码",
+  "models.oauthCodePlaceholder": "code，或完整回调 URL",
+  "models.oauthComplete": "完成登录",
+  "models.oauthCancel": "取消",
+  "models.oauthReopen": "重新打开授权页",
   "models.credentialEmpty": "该上游还没有凭据。",
   "models.masked": "掩码",
   "models.routes": "路由",
@@ -281,6 +290,10 @@ export const zh = {
   "error.provider_not_found": "上游不存在",
   "error.provider_in_use": "上游仍被凭据或路由引用",
   "error.secrets_unavailable": "服务端未配置密钥加密",
+  "error.oauth_unsupported": "该上游类型不支持 OAuth 登录",
+  "error.oauth_session_invalid": "登录会话已失效，请重新发起",
+  "error.oauth_state_mismatch": "授权回调的 state 不匹配",
+  "error.oauth_exchange_failed": "授权码换取令牌失败",
 } as const;
 
 export type MessageKey = keyof typeof zh;

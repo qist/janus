@@ -3,6 +3,7 @@ import { Activity, KeyRound, Play, Plus, RefreshCw, Square, Trash2 } from "lucid
 import { getMe } from "@/api/account";
 import { listModels } from "@/api/insight";
 import {
+  completeOAuth,
   createCredential,
   createProvider,
   createRoute,
@@ -13,6 +14,7 @@ import {
   listProviders,
   listRoutes,
   probeProvider,
+  startOAuth,
   updateProvider,
 } from "@/api/providers";
 import type {
@@ -72,6 +74,8 @@ export default function Models() {
   const [error, setError] = useState<unknown>(null);
   const [unavailable, setUnavailable] = useState<string | null>(null);
   const [probes, setProbes] = useState<Record<string, ProbeResult>>({});
+  const [oauth, setOauth] = useState<{ providerID: string; sessionID: string; authURL: string } | null>(null);
+  const [oauthCode, setOauthCode] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
 
   const [providerForm, setProviderForm] = useState({
@@ -94,6 +98,9 @@ export default function Models() {
   });
 
   const canAdmin = Boolean(me?.scopes.includes("admin"));
+  const credentialProvider = providers?.find((p) => p.id === credentialForm.provider_id);
+  const supportsOAuth =
+    credentialProvider?.kind === "openai" || credentialProvider?.kind === "anthropic";
 
   const load = useCallback(async () => {
     setError(null);
@@ -186,6 +193,39 @@ export default function Models() {
       });
       setCredentialForm({ ...credentialForm, label: "", secret: "" });
     });
+  }
+
+  async function onStartOAuth() {
+    const target = providers?.find((p) => p.id === credentialForm.provider_id);
+    if (!target) return;
+    setBusy("oauth:start");
+    setError(null);
+    try {
+      const start = await startOAuth(target.id);
+      setOauth({ providerID: target.id, sessionID: start.session_id, authURL: start.auth_url });
+      setOauthCode("");
+      window.open(start.auth_url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onCompleteOAuth() {
+    if (!oauth) return;
+    setBusy("oauth:complete");
+    setError(null);
+    try {
+      await completeOAuth(oauth.providerID, oauth.sessionID, oauthCode.trim());
+      setOauth(null);
+      setOauthCode("");
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function onCreateRoute(event: React.FormEvent) {
@@ -423,6 +463,64 @@ export default function Models() {
                 </Select>
               </Field>
             </div>
+
+            {canAdmin && supportsOAuth ? (
+              <div className="mb-3 rounded-lg border p-3">
+                {!oauth || oauth.providerID !== credentialForm.provider_id ? (
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-xs text-muted-foreground">{t("models.oauthHint")}</p>
+                    <Button
+                      variant="ghost"
+                      disabled={busy === "oauth:start"}
+                      onClick={onStartOAuth}
+                    >
+                      <KeyRound className="h-4 w-4" />
+                      {busy === "oauth:start" ? t("models.oauthStarting") : t("models.oauthLogin")}
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{t("models.oauthPasteHint")}</p>
+                    <div className="flex flex-wrap items-end gap-2">
+                      <Field label={t("models.oauthCode")} className="min-w-[280px] flex-1">
+                        <Input
+                          value={oauthCode}
+                          placeholder={t("models.oauthCodePlaceholder")}
+                          onChange={(event) => setOauthCode(event.target.value)}
+                        />
+                      </Field>
+                      <Button
+                        disabled={!oauthCode.trim() || busy === "oauth:complete"}
+                        onClick={onCompleteOAuth}
+                      >
+                        {busy === "oauth:complete"
+                          ? t("models.saving")
+                          : t("models.oauthComplete")}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          setOauth(null);
+                          setOauthCode("");
+                        }}
+                      >
+                        {t("models.oauthCancel")}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      <a
+                        href={oauth.authURL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline"
+                      >
+                        {t("models.oauthReopen")}
+                      </a>
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : null}
 
             {(credentials[credentialForm.provider_id] || []).length === 0 ? (
               <Empty text={t("models.credentialEmpty")} />

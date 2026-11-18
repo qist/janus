@@ -27,6 +27,8 @@ const (
 	ProtocolResponses Protocol = "responses"
 	// ProtocolAnthropic is the Messages API used by Claude Code.
 	ProtocolAnthropic Protocol = "anthropic"
+	// ProtocolGemini is the Code Assist generateContent envelope.
+	ProtocolGemini Protocol = "gemini"
 )
 
 // ParseProtocol validates a configured protocol name. Empty means chat, because
@@ -39,6 +41,8 @@ func ParseProtocol(value string) (Protocol, bool) {
 		return ProtocolResponses, true
 	case ProtocolAnthropic:
 		return ProtocolAnthropic, true
+	case ProtocolGemini:
+		return ProtocolGemini, true
 	}
 	return "", false
 }

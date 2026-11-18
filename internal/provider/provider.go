@@ -89,12 +89,13 @@ const (
 	ProtocolChat      Protocol = "chat"
 	ProtocolResponses Protocol = "responses"
 	ProtocolAnthropic Protocol = "anthropic"
+	ProtocolGemini    Protocol = "gemini"
 )
 
 // Valid reports whether p is a protocol janus can translate.
 func (p Protocol) Valid() bool {
 	switch p {
-	case ProtocolChat, ProtocolResponses, ProtocolAnthropic:
+	case ProtocolChat, ProtocolResponses, ProtocolAnthropic, ProtocolGemini:
 		return true
 	}
 	return false
@@ -178,6 +179,8 @@ func (p Provider) EffectiveProtocol() Protocol {
 		return ProtocolResponses
 	case "claude-code":
 		return ProtocolAnthropic
+	case "google-code-assist":
+		return ProtocolGemini
 	}
 	if p.Kind == KindAnthropic {
 		return ProtocolAnthropic

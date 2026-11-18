@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -116,6 +117,10 @@ type Client struct {
 	Credentials CredentialSource
 	// OnUsage receives every successful call for the usage ledger.
 	OnUsage func(Usage)
+
+	// projects caches the Code Assist project id per credential.
+	projectMu sync.Mutex
+	projects  map[string]cachedProject
 }
 
 // New validates cfg and returns a client.
@@ -251,6 +256,8 @@ func (c *Client) Chat(ctx context.Context, model string, body []byte) ([]byte, U
 		return c.chatResponses(ctx, model, body)
 	case ProtocolAnthropic:
 		return c.chatAnthropic(ctx, model, body)
+	case ProtocolGemini:
+		return c.chatGemini(ctx, model, body)
 	}
 	attempts := 1
 	if c.Credentials != nil {
@@ -306,6 +313,8 @@ func (c *Client) ChatStream(ctx context.Context, model string, body []byte, dst 
 		return c.streamResponses(ctx, model, body, dst)
 	case ProtocolAnthropic:
 		return c.streamAnthropic(ctx, model, body, dst)
+	case ProtocolGemini:
+		return c.streamGemini(ctx, model, body, dst)
 	}
 	attempts := 1
 	if c.Credentials != nil {
@@ -375,6 +384,13 @@ func (c *Client) pick(ctx context.Context, model string) (Credential, error) {
 // send performs one upstream call with account failover. Adapters use it so the
 // retry and reporting policy is identical for every protocol.
 func (c *Client) send(ctx context.Context, model, endpoint string, body []byte, stream bool) (*http.Response, string, error) {
+	return c.sendBuild(ctx, model, endpoint, stream, func(Credential) ([]byte, error) { return body, nil })
+}
+
+// sendBuild is send with a body that depends on the chosen account. Code Assist
+// needs the account's project id inside the payload, and it must come from the
+// same account that answers the request.
+func (c *Client) sendBuild(ctx context.Context, model, endpoint string, stream bool, build func(Credential) ([]byte, error)) (*http.Response, string, error) {
 	attempts := 1
 	if c.Credentials != nil {
 		attempts = maxCredentialAttempts
@@ -390,6 +406,10 @@ func (c *Client) send(ctx context.Context, model, endpoint string, body []byte, 
 			return nil, "", fmt.Errorf("gateway %s: %w", c.Name, err)
 		}
 
+		body, err := build(credential)
+		if err != nil {
+			return nil, "", fmt.Errorf("gateway %s: %w", c.Name, err)
+		}
 		httpReq, err := c.protoRequest(ctx, endpoint, body, credential, stream)
 		if err != nil {
 			return nil, "", fmt.Errorf("gateway %s: %w", c.Name, err)

@@ -256,8 +256,10 @@ Google Code Assist / Antigravity 是标准的授权码流程，janus 没有内�
 `client_secret`：在 plugins.json 里给 `gemini` / `antigravity` 填 `client_secret`
 （可同时覆盖 `client_id`、`redirect_uri`），插件即从 `needs_config` 变为 `active`。
 自定义 OAuth 也支持 `client_secret`，适合一次性试某个 client。
-注意 Code Assist / Antigravity 的推理走 Gemini 私有协议，登录成功之后仍需要对应适配器
-（`antigravity` 还需要它的网关）才能真正发请求；`grok`、`workbuddy` 则是 OpenAI 协议，登录即可调用。
+Code Assist 走 `gemini` 适配器：`google-code-assist` 渠道自动使用它——`loadCodeAssist` 解析并缓存
+project（30 分钟），`generateContent` / `streamGenerateContent?alt=sse` 与 chat 互转，工具调用映射为
+`functionCall` / `functionResponse`，用量取 `usageMetadata`。Antigravity 的请求结构不同，仍需单独网关。
+`grok`、`workbuddy` 是 OpenAI 协议，登录即可调用。
 
 插件只负责"渠道 + 登录能力"：它给已有目录条目打上 `login` 标记并注册 flow，
 不重复定义渠道元数据。
@@ -271,6 +273,7 @@ Google Code Assist / Antigravity 是标准的授权码流程，janus 没有内�
 | `chat`（默认） | 任何 OpenAI 兼容端点 | `{base}/chat/completions` |
 | `responses` | OpenAI Responses / Codex 后端 | `{base}/responses`（`/backend-api/*` 不加 `/v1`） |
 | `anthropic` | Anthropic Messages / Claude Code | `{base}/v1/messages` |
+| `gemini` | Google Code Assist（Gemini CLI 套餐） | `{base}/v1internal:generateContent` |
 
 `protocol` 为空时按渠道推断：`openai-codex` → `responses`，`claude-code` 或 `kind=anthropic` →
 `anthropic`，其余 `chat`。控制台新建上游时可显式覆盖。

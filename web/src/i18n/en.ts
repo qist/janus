@@ -194,6 +194,8 @@ export const en: Record<MessageKey, string> = {
   "models.deleteProviderConfirm": "Delete this upstream? It is refused while it still has credentials or routes.",
   "models.deleteCredentialConfirm": "Delete this credential? Calls using it will fail immediately.",
   "models.deleteRouteConfirm": "Delete this route?",
+  "models.showAdvanced": "Add upstream manually (advanced)",
+  "models.hideAdvanced": "Hide advanced options",
   "models.quickTitle": "Connect a channel",
   "models.quickHint": "Pick a channel: the upstream is created on first use, so there is no separate add-upstream step.",
   "models.quickPick": "Choose a channel…",

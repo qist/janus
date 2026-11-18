@@ -161,7 +161,7 @@ export default function Models() {
     kind: "openai" as ProviderKind,
     base_url: "",
     channel: "",
-    protocol: "" as "" | "chat" | "responses" | "anthropic",
+    protocol: "" as "" | "chat" | "responses" | "anthropic" | "gemini",
     oauthJson: "",
   });
   const [credentialForm, setCredentialForm] = useState({
@@ -183,6 +183,9 @@ export default function Models() {
     secret: "",
   });
   const [oauthConfigDraft, setOauthConfigDraft] = useState("");
+  // The quick-connect card above covers the common case; the detailed form is
+  // for pre-creating an empty upstream and stays collapsed.
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const canAdmin = Boolean(me?.scopes.includes("admin"));
   const credentialProvider = providers?.find((p) => p.id === credentialForm.provider_id);
@@ -849,7 +852,13 @@ export default function Models() {
         )}
 
         {canAdmin ? (
-          <form onSubmit={onCreateProvider} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-4 border-t pt-3">
+            <Button variant="ghost" onClick={() => setShowAdvanced((visible) => !visible)}>
+              <Plus className="h-4 w-4" />
+              {showAdvanced ? t("models.hideAdvanced") : t("models.showAdvanced")}
+            </Button>
+            {showAdvanced ? (
+              <form onSubmit={onCreateProvider} className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Field label={t("models.channel")}>
               <Select
                 value={providerForm.channel}
@@ -900,7 +909,7 @@ export default function Models() {
                 onChange={(event) =>
                   setProviderForm({
                     ...providerForm,
-                    protocol: event.target.value as "" | "chat" | "responses" | "anthropic",
+                    protocol: event.target.value as "" | "chat" | "responses" | "anthropic" | "gemini",
                   })
                 }
               >
@@ -908,6 +917,7 @@ export default function Models() {
                 <option value="chat">chat</option>
                 <option value="responses">responses</option>
                 <option value="anthropic">anthropic</option>
+                <option value="gemini">gemini</option>
               </Select>
             </Field>
             <Field label={t("models.providerKind")}>
@@ -953,7 +963,9 @@ export default function Models() {
                 {busy === "provider:create" ? t("models.saving") : t("models.addProvider")}
               </Button>
             </div>
-          </form>
+              </form>
+            ) : null}
+          </div>
         ) : null}
       </Card>
 

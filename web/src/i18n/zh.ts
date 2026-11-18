@@ -190,6 +190,8 @@ export const zh = {
   "models.deleteProviderConfirm": "删除该上游？它还有凭据或路由时会被拒绝。",
   "models.deleteCredentialConfirm": "删除该凭据？使用它的调用会立即失败。",
   "models.deleteRouteConfirm": "删除该路由？",
+  "models.showAdvanced": "手动添加上游（高级）",
+  "models.hideAdvanced": "收起高级选项",
   "models.quickTitle": "接入渠道",
   "models.quickHint": "选渠道即可：首次使用会自动创建上游，不需要先添加上游。",
   "models.quickPick": "选择一个渠道…",

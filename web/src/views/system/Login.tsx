@@ -1,13 +1,16 @@
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "@/stores/auth";
+import { useI18n } from "@/i18n";
 import { listItems } from "@/api/work";
 import { Button, Card, ErrorBox, Field, Input } from "@/components/ui";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 
 export default function Login() {
   const key = useAuth((state) => state.key);
   const setKey = useAuth((state) => state.setKey);
   const clear = useAuth((state) => state.clear);
+  const { t } = useI18n();
   const navigate = useNavigate();
 
   const [value, setValue] = useState("");
@@ -20,7 +23,7 @@ export default function Login() {
     event.preventDefault();
     const trimmed = value.trim();
     if (!trimmed) {
-      setError(new Error("请输入 API key"));
+      setError(new Error(t("login.required")));
       return;
     }
     setBusy(true);
@@ -43,32 +46,31 @@ export default function Login() {
       <Card className="w-full max-w-md">
         <div className="mb-5 flex items-center gap-2">
           <span className="h-2.5 w-2.5 rounded-full bg-primary" />
-          <h1 className="text-lg font-semibold">Janus</h1>
-          <span className="text-xs text-muted-foreground">控制台登录</span>
+          <h1 className="text-lg font-semibold">{t("app.name")}</h1>
+          <span className="text-xs text-muted-foreground">{t("login.title")}</span>
+          <div className="ml-auto">
+            <LanguageSwitcher compact />
+          </div>
         </div>
 
         <form onSubmit={submit} className="space-y-3">
-          <Field label="API key">
+          <Field label={t("login.apiKey")}>
             <Input
               type="password"
               autoFocus
               autoComplete="off"
-              placeholder="JANUS_API_KEY"
+              placeholder={t("login.placeholder")}
               value={value}
               onChange={(event) => setValue(event.target.value)}
             />
           </Field>
           {error ? <ErrorBox error={error} /> : null}
           <Button type="submit" className="w-full" disabled={busy}>
-            {busy ? "验证中…" : "进入控制台"}
+            {busy ? t("login.verifying") : t("login.enter")}
           </Button>
         </form>
 
-        <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
-          key 只保存在本机浏览器（localStorage），服务端没有会话。不同权限的 key 看到的操作不同：
-          建项/取消需要 <span className="font-mono">write</span>，
-          强制派工需要 <span className="font-mono">admin</span>。
-        </p>
+        <p className="mt-4 text-xs leading-relaxed text-muted-foreground">{t("login.hint")}</p>
       </Card>
     </div>
   );

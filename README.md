@@ -88,7 +88,8 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/work-items/w1/claim \
 
 ## 控制台 /ui
 
-React 19 + TypeScript + Vite + Tailwind 的 SPA（hash 路由），构建产物 embed 在二进制里；
+React 19 + TypeScript + Vite + Tailwind 的 SPA（hash 路由），构建产物 embed 在二进制里；界面中英双语，
+语言选择存在本机，新增语言只需加字典（见 `docs/FRONTEND.md` §10）；
 `GET /` 302 到 `/ui/`。架构与取舍见 [前端架构](docs/FRONTEND.md)。
 
 - 概览、目标（创建 / 进度 / 取消）、工作项（筛选 / 租约 / 证据输出 / 评审 / 强制派工 / 取消）、

@@ -124,9 +124,35 @@ Vite 配置 `base: "/ui/"`、`outDir: "../internal/ui/dist"`；
 make ui-dev        # cd web && npm run dev  （/api、/v1 代理到 127.0.0.1:8080）
 ```
 
-## 10. 约定
+## 10. 多语言（i18n）
 
-- 所有面向人的文案用中文；代码、类型、日志用英文。
+界面文案不写死在组件里，全部走 `useI18n()`：
+
+```tsx
+const { t, locale, setLocale } = useI18n();
+t("goals.title");                                  // 基准语言中文
+t("goal.doneOf", { done: 3, total: 8 });           // 插值
+t.raw(`status.${status}`, status);                 // 动态键，缺失回落到原值
+```
+
+- **基准是 `src/i18n/zh.ts`**：键集合由它定义，`en.ts` 用 `Record<MessageKey, string>` 约束，
+  少一条或多一条都是编译错误，不会出现「英文页少一句」的静默降级。
+- 语言状态在 `stores/locale.ts`（Zustand + localStorage）。首次访问跟随浏览器，
+  之后记住选择；切换时同步更新 `<html lang>`，`formatTime` / `Intl.RelativeTimeFormat`
+  直接读取它，日期与相对时间自动本地化。
+- 后端错误码也本地化：`ApiError.code` → `error.<code>`，字典缺失时回落到服务端原文，
+  所以新增错误码不会导致页面显示空白。
+- 状态、角色等枚举用 `status.<value>` / `role.<value>` 动态键，新增状态只需补字典。
+- 文案里的技术标识符用反引号包住（例如 `` `JANUS_MODELS` ``），由 `CodeText` 渲染成等宽样式，
+  不需要为每种语言拆成多段。
+
+加一门语言只要两步：复制 `zh.ts` 翻译成目标语言；在 `i18n/index.tsx` 的 `DICTIONARIES`
+与 `LANGUAGES` 各加一项。页面代码不动。
+
+## 11. 约定
+
+- 界面文案只通过 `t()` 输出；代码、类型、日志、API 字段用英文。
+- 新增文案必须同时补 `zh.ts` 与 `en.ts`，否则类型检查失败。
 - 不在前端渲染未转义的用户数据；React 默认转义，禁用 `dangerouslySetInnerHTML`。
 - 密钥永远不进入前端：配置页只显示 masked 值与状态。
 - 新增页面：`views/<domain>/<Page>.tsx` + 路由 + `api/<domain>.ts` 类型化请求，不直接写 `fetch`。

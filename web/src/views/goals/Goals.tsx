@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { createGoal, listGoals } from "@/api/goals";
 import type { Goal } from "@/api/types";
+import { useI18n } from "@/i18n";
 import {
   Button,
   Card,
@@ -18,6 +19,7 @@ import {
 import { formatTime } from "@/lib/format";
 
 export default function Goals() {
+  const { t } = useI18n();
   const [goals, setGoals] = useState<Goal[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -60,35 +62,35 @@ export default function Goals() {
 
   return (
     <>
-      <PageHeader title="目标" description="一段意图 → 后台拆项 → 工作板执行。" />
+      <PageHeader title={t("goals.title")} description={t("goals.description")} />
 
       <Card>
-        <h2 className="mb-3 text-sm font-semibold">新建目标</h2>
+        <h2 className="mb-3 text-sm font-semibold">{t("goals.new")}</h2>
         <form onSubmit={submit} className="grid gap-3 sm:grid-cols-2">
-          <Field label="标题">
+          <Field label={t("goals.titleField")}>
             <Input
               required
-              placeholder="fix claim race"
+              placeholder={t("goals.titlePlaceholder")}
               value={form.title}
               onChange={(event) => setForm({ ...form, title: event.target.value })}
             />
           </Field>
-          <Field label="工作区">
+          <Field label={t("goals.workspace")}>
             <Input
               required
               value={form.workspace_id}
               onChange={(event) => setForm({ ...form, workspace_id: event.target.value })}
             />
           </Field>
-          <Field label="意图" className="sm:col-span-2">
+          <Field label={t("goals.brief")} className="sm:col-span-2">
             <Textarea
               rows={3}
-              placeholder="一段话说明要达成什么，planner 会据此拆项"
+              placeholder={t("goals.briefPlaceholder")}
               value={form.brief}
               onChange={(event) => setForm({ ...form, brief: event.target.value })}
             />
           </Field>
-          <Field label="风险">
+          <Field label={t("goals.risk")}>
             <Select
               value={form.risk}
               onChange={(event) => setForm({ ...form, risk: event.target.value })}
@@ -99,7 +101,7 @@ export default function Goals() {
               <option value="critical">critical</option>
             </Select>
           </Field>
-          <Field label="预算 token（可选）">
+          <Field label={t("goals.budget")}>
             <Input
               type="number"
               min={0}
@@ -109,28 +111,32 @@ export default function Goals() {
           </Field>
           <div className="sm:col-span-2">
             <Button type="submit" disabled={busy}>
-              {busy ? "提交中…" : "提交（202 异步拆项）"}
+              {busy ? t("goals.submitting") : t("goals.submit")}
             </Button>
           </div>
         </form>
-        {error ? <div className="mt-3"><ErrorBox error={error} /></div> : null}
+        {error ? (
+          <div className="mt-3">
+            <ErrorBox error={error} />
+          </div>
+        ) : null}
       </Card>
 
       <Card>
-        <h2 className="mb-3 text-sm font-semibold">全部目标</h2>
+        <h2 className="mb-3 text-sm font-semibold">{t("goals.all")}</h2>
         {goals === null ? (
           <Loading />
         ) : goals.length === 0 ? (
-          <Empty text="还没有目标。" />
+          <Empty text={t("goals.empty")} />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-xs text-muted-foreground">
                 <tr>
-                  <th className="py-2">目标</th>
-                  <th>状态</th>
-                  <th>工作项</th>
-                  <th>创建时间</th>
+                  <th className="py-2">{t("goals.title")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("goals.items")}</th>
+                  <th>{t("goals.createdAt")}</th>
                 </tr>
               </thead>
               <tbody>

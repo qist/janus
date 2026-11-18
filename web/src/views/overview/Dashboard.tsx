@@ -4,6 +4,7 @@ import { listGoals } from "@/api/goals";
 import { listItems } from "@/api/work";
 import { getUsage, listScores } from "@/api/insight";
 import type { Goal, Score, UsageTotals, WorkItem } from "@/api/types";
+import { useI18n } from "@/i18n";
 import { Card, ErrorBox, Loading, PageHeader, StatusBadge } from "@/components/ui";
 import { formatTime, pct } from "@/lib/format";
 
@@ -15,6 +16,7 @@ type Data = {
 };
 
 export default function Dashboard() {
+  const { t } = useI18n();
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState<unknown>(null);
 
@@ -43,45 +45,51 @@ export default function Dashboard() {
   }, {});
   const active = (counts.running || 0) + (counts.review || 0) + (counts.integrating || 0);
   const tokens = data.usage.prompt_tokens + data.usage.completion_tokens;
-  const openGoals = data.goals.filter((goal) => goal.status !== "done" && goal.status !== "cancelled").length;
+  const openGoals = data.goals.filter(
+    (goal) => goal.status !== "done" && goal.status !== "cancelled"
+  ).length;
 
   return (
     <>
-      <PageHeader title="概览" description="工作板、目标与模型侧的当前状态。" />
+      <PageHeader title={t("dashboard.title")} description={t("dashboard.description")} />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
-          <p className="label">未完成目标</p>
+          <p className="label">{t("dashboard.openGoals")}</p>
           <p className="mt-1 text-2xl font-semibold">{openGoals}</p>
-          <p className="mt-1 text-xs text-muted-foreground">最近 {data.goals.length} 个目标</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t("dashboard.recentGoals", { count: data.goals.length })}
+          </p>
         </Card>
         <Card>
-          <p className="label">进行中工作项</p>
+          <p className="label">{t("dashboard.activeItems")}</p>
           <p className="mt-1 text-2xl font-semibold">{active}</p>
-          <p className="mt-1 text-xs text-muted-foreground">running / review / integrating</p>
+          <p className="mt-1 text-xs text-muted-foreground">{t("dashboard.activeHint")}</p>
         </Card>
         <Card>
-          <p className="label">阻塞</p>
+          <p className="label">{t("dashboard.blocked")}</p>
           <p className="mt-1 text-2xl font-semibold text-danger">{counts.blocked || 0}</p>
-          <p className="mt-1 text-xs text-muted-foreground">需要人或强制派工</p>
+          <p className="mt-1 text-xs text-muted-foreground">{t("dashboard.blockedHint")}</p>
         </Card>
         <Card>
-          <p className="label">累计 token</p>
+          <p className="label">{t("dashboard.tokens")}</p>
           <p className="mt-1 text-2xl font-semibold">{tokens.toLocaleString()}</p>
-          <p className="mt-1 text-xs text-muted-foreground">{data.usage.entries} 次调用</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t("dashboard.calls", { count: data.usage.entries })}
+          </p>
         </Card>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold">最近目标</h2>
+            <h2 className="text-sm font-semibold">{t("dashboard.recent")}</h2>
             <Link to="/goals" className="text-xs">
-              全部
+              {t("common.all")}
             </Link>
           </div>
           {data.goals.length === 0 ? (
-            <p className="text-sm text-muted-foreground">还没有目标。</p>
+            <p className="text-sm text-muted-foreground">{t("dashboard.noGoals")}</p>
           ) : (
             <ul className="divide-y">
               {data.goals.map((goal) => (
@@ -100,9 +108,9 @@ export default function Dashboard() {
         </Card>
 
         <Card>
-          <h2 className="mb-3 text-sm font-semibold">工作项状态</h2>
+          <h2 className="mb-3 text-sm font-semibold">{t("dashboard.itemStatus")}</h2>
           {Object.keys(counts).length === 0 ? (
-            <p className="text-sm text-muted-foreground">工作板为空。</p>
+            <p className="text-sm text-muted-foreground">{t("dashboard.boardEmpty")}</p>
           ) : (
             <ul className="space-y-2">
               {Object.entries(counts).map(([status, count]) => (
@@ -126,21 +134,21 @@ export default function Dashboard() {
 
       <Card>
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold">模型评分</h2>
+          <h2 className="text-sm font-semibold">{t("dashboard.modelScores")}</h2>
           <Link to="/scores" className="text-xs">
-            全部
+            {t("common.all")}
           </Link>
         </div>
         {data.scores.length === 0 ? (
-          <p className="text-sm text-muted-foreground">还没有评分记录。</p>
+          <p className="text-sm text-muted-foreground">{t("dashboard.noScores")}</p>
         ) : (
           <table className="w-full text-sm">
             <thead className="text-left text-xs text-muted-foreground">
               <tr>
-                <th className="py-2">模型</th>
-                <th>等级</th>
-                <th className="text-right">分数</th>
-                <th className="text-right">样本</th>
+                <th className="py-2">{t("dashboard.model")}</th>
+                <th>{t("dashboard.tier")}</th>
+                <th className="text-right">{t("dashboard.score")}</th>
+                <th className="text-right">{t("dashboard.samples")}</th>
               </tr>
             </thead>
             <tbody>

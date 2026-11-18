@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { createItem, listItems } from "@/api/work";
 import type { WorkItem } from "@/api/types";
+import { useI18n } from "@/i18n";
 import {
   Button,
   Card,
@@ -29,6 +30,7 @@ const STATUSES = [
 ];
 
 export default function Items() {
+  const { t } = useI18n();
   const [status, setStatus] = useState("");
   const [items, setItems] = useState<WorkItem[] | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -91,13 +93,18 @@ export default function Items() {
   return (
     <>
       <PageHeader
-        title="工作项"
-        description="工作板上的可认领单元；点进去看租约、证据与评审。"
+        title={t("items.title")}
+        description={t("items.description")}
         actions={
-          <Select value={status} onChange={(event) => setStatus(event.target.value)} className="w-36">
+          <Select
+            value={status}
+            onChange={(event) => setStatus(event.target.value)}
+            className="w-36"
+            aria-label={t("common.status")}
+          >
             {STATUSES.map((value) => (
               <option key={value} value={value}>
-                {value || "全部状态"}
+                {value ? t.raw(`status.${value}`, value) : t("items.allStatuses")}
               </option>
             ))}
           </Select>
@@ -110,18 +117,18 @@ export default function Items() {
         {items === null ? (
           <Loading />
         ) : items.length === 0 ? (
-          <Empty text="该过滤条件下没有工作项。" />
+          <Empty text={t("items.empty")} />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-xs text-muted-foreground">
                 <tr>
-                  <th className="py-2">ID</th>
-                  <th>标题</th>
-                  <th>状态</th>
-                  <th>风险</th>
-                  <th className="text-right">优先级</th>
-                  <th className="text-right">尝试</th>
+                  <th className="py-2">{t("common.id")}</th>
+                  <th>{t("common.title")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("common.risk")}</th>
+                  <th className="text-right">{t("common.priority")}</th>
+                  <th className="text-right">{t("common.attempts")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -146,9 +153,9 @@ export default function Items() {
       </Card>
 
       <Card>
-        <h2 className="mb-3 text-sm font-semibold">新建工作项</h2>
+        <h2 className="mb-3 text-sm font-semibold">{t("items.new")}</h2>
         <form onSubmit={submit} className="grid gap-3 sm:grid-cols-2">
-          <Field label="ID">
+          <Field label={t("common.id")}>
             <Input
               required
               placeholder="w1"
@@ -156,28 +163,28 @@ export default function Items() {
               onChange={(event) => setForm({ ...form, id: event.target.value })}
             />
           </Field>
-          <Field label="工作区">
+          <Field label={t("common.workspace")}>
             <Input
               required
               value={form.workspace_id}
               onChange={(event) => setForm({ ...form, workspace_id: event.target.value })}
             />
           </Field>
-          <Field label="标题" className="sm:col-span-2">
+          <Field label={t("common.title")} className="sm:col-span-2">
             <Input
               required
               value={form.title}
               onChange={(event) => setForm({ ...form, title: event.target.value })}
             />
           </Field>
-          <Field label="路径（逗号分隔）">
+          <Field label={t("items.paths")}>
             <Input
-              placeholder="internal/work"
+              placeholder={t("items.pathsPlaceholder")}
               value={form.paths}
               onChange={(event) => setForm({ ...form, paths: event.target.value })}
             />
           </Field>
-          <Field label="风险">
+          <Field label={t("common.risk")}>
             <Select
               value={form.risk}
               onChange={(event) => setForm({ ...form, risk: event.target.value })}
@@ -188,14 +195,14 @@ export default function Items() {
               <option value="critical">critical</option>
             </Select>
           </Field>
-          <Field label="优先级">
+          <Field label={t("common.priority")}>
             <Input
               type="number"
               value={form.priority}
               onChange={(event) => setForm({ ...form, priority: event.target.value })}
             />
           </Field>
-          <Field label="目标" className="sm:col-span-2">
+          <Field label={t("items.goal")} className="sm:col-span-2">
             <Textarea
               rows={2}
               value={form.goal}
@@ -204,7 +211,7 @@ export default function Items() {
           </Field>
           <div className="sm:col-span-2">
             <Button type="submit" disabled={busy}>
-              {busy ? "创建中…" : "创建工作项"}
+              {busy ? t("items.creating") : t("items.create")}
             </Button>
           </div>
         </form>

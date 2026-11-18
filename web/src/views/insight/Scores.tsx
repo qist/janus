@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listScores } from "@/api/insight";
 import type { Score } from "@/api/types";
+import { useI18n } from "@/i18n";
 import { Card, Empty, ErrorBox, Loading, PageHeader, StatusBadge } from "@/components/ui";
 
 function rate(part: number, total: number): string {
@@ -9,6 +10,7 @@ function rate(part: number, total: number): string {
 }
 
 export default function Scores() {
+  const { t } = useI18n();
   const [scores, setScores] = useState<Score[] | null>(null);
   const [error, setError] = useState<unknown>(null);
 
@@ -20,10 +22,7 @@ export default function Scores() {
 
   return (
     <>
-      <PageHeader
-        title="模型评分"
-        description="按 (agent, model, task_class, tool_mode, model_version) 分开计分，只用于准入。"
-      />
+      <PageHeader title={t("scores.title")} description={t("scores.description")} />
 
       {error ? <ErrorBox error={error} /> : null}
 
@@ -31,21 +30,21 @@ export default function Scores() {
         {scores === null ? (
           <Loading />
         ) : scores.length === 0 ? (
-          <Empty text="还没有评分记录：需要先有评审结果。" />
+          <Empty text={t("scores.empty")} />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-xs text-muted-foreground">
                 <tr>
-                  <th className="py-2">Agent / 模型</th>
-                  <th>任务类</th>
-                  <th>模式</th>
-                  <th>等级</th>
-                  <th className="text-right">分数</th>
-                  <th className="text-right">样本</th>
-                  <th className="text-right">验收</th>
-                  <th className="text-right">一次通过</th>
-                  <th className="text-right">连续 reject</th>
+                  <th className="py-2">{t("scores.agentModel")}</th>
+                  <th>{t("scores.taskClass")}</th>
+                  <th>{t("scores.mode")}</th>
+                  <th>{t("scores.tier")}</th>
+                  <th className="text-right">{t("scores.score")}</th>
+                  <th className="text-right">{t("scores.samples")}</th>
+                  <th className="text-right">{t("scores.approval")}</th>
+                  <th className="text-right">{t("scores.firstPass")}</th>
+                  <th className="text-right">{t("scores.rejectStreak")}</th>
                 </tr>
               </thead>
               <tbody>

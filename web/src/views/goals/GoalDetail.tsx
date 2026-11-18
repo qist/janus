@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { cancelGoal, getGoal } from "@/api/goals";
 import { listItems } from "@/api/work";
 import type { Goal, GoalProgress, WorkItem } from "@/api/types";
+import { useI18n } from "@/i18n";
 import {
   Button,
   Card,
@@ -20,6 +21,7 @@ const ACTIVE = new Set(["planning", "active", "blocked"]);
 
 export default function GoalDetail() {
   const { id = "" } = useParams();
+  const { t } = useI18n();
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -58,7 +60,9 @@ export default function GoalDetail() {
     try {
       await cancelGoal(id);
       const detail = await getGoal(id);
-      setData((current) => (current ? { ...current, goal: detail.goal, progress: detail.progress } : current));
+      setData((current) =>
+        current ? { ...current, goal: detail.goal, progress: detail.progress } : current
+      );
     } catch (err) {
       setError(err);
     } finally {
@@ -80,10 +84,10 @@ export default function GoalDetail() {
         actions={
           <>
             <Link to="/goals" className="text-sm">
-              返回
+              {t("goal.back")}
             </Link>
             <Button variant="danger" disabled={terminal || busy} onClick={cancel}>
-              {busy ? "取消中…" : "取消目标"}
+              {busy ? t("goal.cancelling") : t("goal.cancel")}
             </Button>
           </>
         }
@@ -94,13 +98,16 @@ export default function GoalDetail() {
           <div className="flex items-center gap-2">
             <StatusBadge status={progress.status} />
             <span className="text-muted-foreground">
-              完成 {progress.done}/{progress.total}
+              {t("goal.doneOf", { done: progress.done, total: progress.total })}
             </span>
           </div>
           <span className="font-medium">{pct(progress.percent)}%</span>
         </div>
         <div className="h-2 overflow-hidden rounded-full bg-muted">
-          <div className="h-full bg-primary transition-all" style={{ width: `${pct(progress.percent)}%` }} />
+          <div
+            className="h-full bg-primary transition-all"
+            style={{ width: `${pct(progress.percent)}%` }}
+          />
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
           {Object.entries(progress.counts || {}).map(([status, count]) => (
@@ -112,24 +119,28 @@ export default function GoalDetail() {
         </div>
         {goal.error ? <p className="mt-3 text-sm text-danger">{goal.error}</p> : null}
         <p className="mt-3 text-xs text-muted-foreground">
-          工作区 {goal.workspace_id} · 风险 {goal.risk || "medium"} · 创建 {formatTime(goal.created_at)}
+          {t("goal.meta", {
+            workspace: goal.workspace_id,
+            risk: goal.risk || "medium",
+            created: formatTime(goal.created_at),
+          })}
         </p>
       </Card>
 
       <Card>
-        <h2 className="mb-3 text-sm font-semibold">工作项</h2>
+        <h2 className="mb-3 text-sm font-semibold">{t("goal.items")}</h2>
         {items.length === 0 ? (
-          <Empty text={goal.status === "planning" ? "规划中…" : "没有工作项。"} />
+          <Empty text={goal.status === "planning" ? t("goal.planning") : t("goal.noItems")} />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-xs text-muted-foreground">
                 <tr>
-                  <th className="py-2">ID</th>
-                  <th>标题</th>
-                  <th>状态</th>
-                  <th>尝试</th>
-                  <th>租约过期</th>
+                  <th className="py-2">{t("common.id")}</th>
+                  <th>{t("common.title")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("goal.attempts")}</th>
+                  <th>{t("goal.expired")}</th>
                 </tr>
               </thead>
               <tbody>

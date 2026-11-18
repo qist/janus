@@ -1,15 +1,25 @@
+// <html lang> 由 locale store 维护，格式化直接跟随它，
+// 这样页面不必把 locale 一路传进每个单元格。
+function currentLocale(): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  const lang = document.documentElement.lang;
+  return lang || undefined;
+}
+
 export function formatTime(unix?: number): string {
   if (!unix) return "—";
-  return new Date(unix * 1000).toLocaleString();
+  return new Date(unix * 1000).toLocaleString(currentLocale());
 }
 
 export function relativeTime(unix?: number): string {
   if (!unix) return "—";
   const diff = Math.floor(Date.now() / 1000) - unix;
-  if (diff < 60) return `${Math.max(diff, 0)} 秒前`;
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
-  return `${Math.floor(diff / 86400)} 天前`;
+  const formatter = new Intl.RelativeTimeFormat(currentLocale(), { numeric: "auto" });
+  const abs = Math.abs(diff);
+  if (abs < 60) return formatter.format(-diff, "second");
+  if (abs < 3600) return formatter.format(-Math.floor(diff / 60), "minute");
+  if (abs < 86400) return formatter.format(-Math.floor(diff / 3600), "hour");
+  return formatter.format(-Math.floor(diff / 86400), "day");
 }
 
 export function pct(value?: number): number {

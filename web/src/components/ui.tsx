@@ -5,7 +5,9 @@ import type {
   SelectHTMLAttributes,
   TextareaHTMLAttributes,
 } from "react";
+import { useI18n } from "@/i18n";
 import { cn } from "@/lib/cn";
+import { ApiError } from "@/lib/api";
 import { statusClass } from "@/lib/format";
 
 type ButtonVariant = "default" | "ghost" | "danger";
@@ -73,7 +75,9 @@ export function Badge({ children, className }: { children: ReactNode; className?
 }
 
 export function StatusBadge({ status }: { status?: string }) {
-  return <Badge className={statusClass(status)}>{status || "unknown"}</Badge>;
+  const { t } = useI18n();
+  const label = status ? t.raw(`status.${status}`, status) : t("common.unknown");
+  return <Badge className={statusClass(status)}>{label}</Badge>;
 }
 
 export function Card({ children, className }: { children: ReactNode; className?: string }) {
@@ -105,11 +109,16 @@ export function Empty({ text }: { text: string }) {
 }
 
 export function Loading() {
-  return <p className="py-6 text-sm text-muted-foreground">加载中…</p>;
+  const { t } = useI18n();
+  return <p className="py-6 text-sm text-muted-foreground">{t("common.loading")}</p>;
 }
 
 export function ErrorBox({ error }: { error: unknown }) {
-  const message = error instanceof Error ? error.message : String(error);
+  const { t } = useI18n();
+  const fallback = error instanceof Error ? error.message : String(error);
+  const message =
+    error instanceof ApiError ? t.raw(`error.${error.code}`, fallback) : fallback;
+
   return (
     <div className="rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger">
       {message}
@@ -119,4 +128,22 @@ export function ErrorBox({ error }: { error: unknown }) {
 
 export function Mono({ children, className }: { children: ReactNode; className?: string }) {
   return <span className={cn("font-mono text-xs text-muted-foreground", className)}>{children}</span>;
+}
+
+// 文案里用反引号包住标识符，这里渲染成等宽样式，避免为每个语言拆多个键。
+export function CodeText({ text, className }: { text: string; className?: string }) {
+  const parts = text.split("`");
+  return (
+    <span className={className}>
+      {parts.map((part, index) =>
+        index % 2 === 1 ? (
+          <Mono key={index} className="rounded bg-muted px-1 py-0.5">
+            {part}
+          </Mono>
+        ) : (
+          <span key={index}>{part}</span>
+        )
+      )}
+    </span>
+  );
 }

@@ -1,1 +1,0 @@
-import{a as o}from"./api-BwJtJOU1.js";function e(a=100){return o(`/api/v1/goals?limit=${a}`)}function t(a){return o(`/api/v1/goals/${encodeURIComponent(a)}`)}function i(a){return o("/api/v1/goals",{method:"POST",body:a})}function l(a){return o(`/api/v1/goals/${encodeURIComponent(a)}/cancel`,{method:"POST"})}export{l as a,i as c,t as g,e as l};

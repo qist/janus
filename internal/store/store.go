@@ -66,6 +66,7 @@ func Open(path string) (*Store, error) {
 		&WorkReviewModel{},
 		&WorkEventModel{},
 		&WorkCapsuleModel{},
+		&GoalModel{},
 	); err != nil {
 		return nil, fmt.Errorf("migrate work tables: %w", err)
 	}

@@ -1,16 +1,20 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"janus/internal/auditor"
 	"janus/internal/auth"
 	"janus/internal/authz"
+	"janus/internal/goals"
 	"janus/internal/policy"
 	"janus/internal/scoring"
 	"janus/internal/usage"
@@ -935,5 +939,174 @@ func TestAssignRequiresAdminScope(t *testing.T) {
 	}, http.StatusForbidden)
 	if code := errCode(t, resp); code != "forbidden" {
 		t.Fatalf("code = %q", code)
+	}
+}
+
+func (e *testEnv) enableGoals(t *testing.T) *goals.Service {
+	t.Helper()
+	svc := goals.New(goals.NewMemoryRepo(), e.board)
+	svc.Now = func() int64 { return 1_700_000_000 }
+	e.server.Goals = svc
+	return svc
+}
+
+func TestCreateGoalAndPoll(t *testing.T) {
+	e := newTestEnv(t)
+	e.enableGoals(t)
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/goals", adminKey, map[string]any{
+		"title":        "fix claim race",
+		"brief":        "two agents claim at once",
+		"workspace_id": "ws",
+	}, http.StatusAccepted)
+	var created struct {
+		GoalID string `json:"goal_id"`
+		Status string `json:"status"`
+	}
+	decodeBody(t, resp, &created)
+	if created.GoalID == "" {
+		t.Fatal("no goal_id returned")
+	}
+
+	var goal goals.Goal
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequest(http.MethodGet, e.srv.URL+"/api/v1/goals/"+created.GoalID, nil)
+		req.Header.Set(headerKey, readerKey)
+		got, err := e.srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("get goal: %v", err)
+		}
+		var body struct {
+			Goal goals.Goal `json:"goal"`
+		}
+		if err := json.NewDecoder(got.Body).Decode(&body); err != nil {
+			got.Body.Close()
+			t.Fatalf("decode: %v", err)
+		}
+		got.Body.Close()
+		goal = body.Goal
+		if goal.Status == goals.StatusActive {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if goal.Status != goals.StatusActive {
+		t.Fatalf("goal status = %q (%s)", goal.Status, goal.Error)
+	}
+	if len(goal.ItemIDs) != 1 {
+		t.Fatalf("item ids = %v", goal.ItemIDs)
+	}
+}
+
+func TestCreateGoalValidation(t *testing.T) {
+	e := newTestEnv(t)
+	e.enableGoals(t)
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/goals", adminKey, map[string]any{
+		"brief": "no title",
+	}, http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "invalid_request" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestGoalsUnavailable(t *testing.T) {
+	e := newTestEnv(t)
+	resp := e.expect(t, http.MethodPost, "/api/v1/goals", adminKey, map[string]any{
+		"title": "x", "workspace_id": "ws",
+	}, http.StatusNotImplemented)
+	if code := errCode(t, resp); code != "goals_unavailable" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestListGoalsAndNotFound(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableGoals(t)
+	if _, err := svc.Create(context.Background(), goals.CreateRequest{Title: "one", WorkspaceID: "ws"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	resp := e.expect(t, http.MethodGet, "/api/v1/goals", readerKey, nil, http.StatusOK)
+	var body struct {
+		Goals []goals.Goal `json:"goals"`
+	}
+	decodeBody(t, resp, &body)
+	if len(body.Goals) != 1 || body.Goals[0].Title != "one" {
+		t.Fatalf("goals = %+v", body.Goals)
+	}
+
+	resp = e.expect(t, http.MethodGet, "/api/v1/goals/goal_missing", readerKey, nil, http.StatusNotFound)
+	if code := errCode(t, resp); code != "goal_not_found" {
+		t.Fatalf("code = %q", code)
+	}
+
+	resp = e.expect(t, http.MethodGet, "/api/v1/goals?limit=0", readerKey, nil, http.StatusBadRequest)
+	if code := errCode(t, resp); code != "invalid_limit" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestGoalEventsStreamsProgress(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableGoals(t)
+	goal, err := svc.Create(context.Background(), goals.CreateRequest{Title: "stream", WorkspaceID: "ws"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, e.srv.URL+"/api/v1/goals/"+goal.ID+"/events", nil)
+	req.Header.Set(headerKey, readerKey)
+	resp, err := e.srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("content type = %q", ct)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	var event strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read event: %v (got %q)", err, event.String())
+		}
+		event.WriteString(line)
+		if line == "\n" {
+			break
+		}
+	}
+	got := event.String()
+	if !strings.Contains(got, "event: progress") || !strings.Contains(got, `"goal_id":"`+goal.ID+`"`) {
+		t.Fatalf("event = %q", got)
+	}
+}
+
+func TestCancelGoalEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableGoals(t)
+	goal, err := svc.Create(context.Background(), goals.CreateRequest{Title: "cancel me", WorkspaceID: "ws"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/goals/"+goal.ID+"/cancel", adminKey, nil, http.StatusOK)
+	var cancelled goals.Goal
+	decodeBody(t, resp, &cancelled)
+	if cancelled.Status != goals.StatusCancelled {
+		t.Fatalf("status = %s", cancelled.Status)
+	}
+
+	// Cancelling twice is harmless.
+	resp = e.expect(t, http.MethodPost, "/api/v1/goals/"+goal.ID+"/cancel", adminKey, nil, http.StatusOK)
+	decodeBody(t, resp, &cancelled)
+	if cancelled.Status != goals.StatusCancelled {
+		t.Fatalf("status = %s", cancelled.Status)
 	}
 }

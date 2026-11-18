@@ -59,6 +59,11 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | POST | `/api/v1/work-items/{id}/authorize` | authorize | 敏感操作授权，allow 时返回单次能力令牌 |
 | GET | `/api/v1/usage` | read | 用量汇总（按 key/group/工作项/provider/model/账号/时间过滤） |
 | GET | `/api/v1/scores` | read | 模型等级与分数（只读） |
+| POST | `/api/v1/goals` | write | 建目标，异步拆项，返回 `202 + goal_id` |
+| GET | `/api/v1/goals` | read | 目标列表（`limit` 1–200） |
+| GET | `/api/v1/goals/{id}` | read | `goal + progress`（total/done/blocked/percent） |
+| GET | `/api/v1/goals/{id}/events` | read | SSE 进度流 |
+| POST | `/api/v1/goals/{id}/cancel` | write | 取消目标（幂等） |
 
 约定：
 
@@ -79,6 +84,25 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/work-items/w1/claim \
   -H "X-API-Key: $JANUS_API_KEY" -H 'Content-Type: application/json' \
   -d '{"role":"worker","plan":"implement","lease_seconds":1200}'
 ```
+
+## 目标与进度
+
+`POST /api/v1/goals` 接一段意图，拆成工作项后立即返回 `202`：
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/api/v1/goals \
+  -H "X-API-Key: $JANUS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"title":"fix claim race","brief":"two agents claim at once","workspace_id":"ws"}'
+# 202 {"goal_id":"goal_2bcc...","status":"planning"}
+```
+
+- 规划在后台进行，`GET /goals/{id}` 随时给出 `goal + progress`（`total / done / blocked / percent`）。
+- 默认 planner 是 `SinglePlanner`：一个 goal → 一个工作项。这里不假装聪明——真正的拆项需要模型调用，等 planner 接入网关后再替换。
+- 全部工作项 `done` → goal 自动 `done`；出现 `blocked` 项 → goal `blocked`；规划出错 → `failed` 并保留原因。
+- SSE：`GET /goals/{id}/events` 每 2 秒推一条 `event: progress`，终态自动结束，最长 10 分钟；客户端断开即停。
+- `POST /goals/{id}/cancel` 只停 goal，**不动已经在板上的工作项**——它们有自己的租约和评审记录。
+
+状态：`planning / active / blocked / done / cancelled / failed`。
 
 ## MCP
 

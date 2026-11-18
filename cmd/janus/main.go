@@ -21,6 +21,7 @@ import (
 	"janus/internal/auth"
 	"janus/internal/authz"
 	"janus/internal/gateway"
+	"janus/internal/goals"
 	"janus/internal/mcp"
 	"janus/internal/pool"
 	"janus/internal/proxy"
@@ -71,6 +72,7 @@ func run() error {
 
 	board := work.NewBoard(st, nil)
 	svc := worksvc.New(board, st)
+	goalSvc := goals.New(st, board)
 
 	authority, err := capabilityAuthority(apiKey)
 	if err != nil {
@@ -98,6 +100,7 @@ func run() error {
 	server := api.New(svc, keys)
 	server.Usage = ledger
 	server.Scores = scores
+	server.Goals = goalSvc
 	mcpServer := mcp.New(svc, keys)
 	mcpServer.Version = version
 

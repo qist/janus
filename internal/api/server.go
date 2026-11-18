@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"janus/internal/goals"
 	"janus/internal/policy"
 	"janus/internal/scoring"
 	"janus/internal/usage"
@@ -45,6 +47,8 @@ type Server struct {
 	Usage usage.Ledger
 	// Scores is exposed read-only at /api/v1/scores; nil answers 501.
 	Scores *scoring.Engine
+	// Goals is the goal service; nil answers 501 on goal routes.
+	Goals *goals.Service
 }
 
 // New returns a server. A nil authenticator rejects every request.
@@ -70,6 +74,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/work-items", s.handleList)
 	mux.HandleFunc("GET /api/v1/usage", s.protect(ScopeRead, s.handleUsage))
 	mux.HandleFunc("GET /api/v1/scores", s.protect(ScopeRead, s.handleScores))
+	mux.HandleFunc("POST /api/v1/goals", s.protect(ScopeWrite, s.handleCreateGoal))
+	mux.HandleFunc("GET /api/v1/goals", s.protect(ScopeRead, s.handleListGoals))
+	mux.HandleFunc("GET /api/v1/goals/{id}", s.protect(ScopeRead, s.handleGetGoal))
+	mux.HandleFunc("GET /api/v1/goals/{id}/events", s.protect(ScopeRead, s.handleGoalEvents))
+	mux.HandleFunc("POST /api/v1/goals/{id}/cancel", s.protect(ScopeWrite, s.handleCancelGoal))
 	mux.HandleFunc("POST /api/v1/work-items", s.protect(ScopeWrite, s.handleCreate))
 	mux.HandleFunc("GET /api/v1/work-items/{id}", s.protect(ScopeRead, s.handleGet))
 	mux.HandleFunc("GET /api/v1/work-items/{id}/handoff", s.protect(ScopeRead, s.handleHandoff))
@@ -195,6 +204,159 @@ func parseUnix(value string) (int64, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+func (s *Server) handleCreateGoal(w http.ResponseWriter, r *http.Request, id Identity) {
+	if s.Goals == nil {
+		writeError(w, http.StatusNotImplemented, "goals_unavailable", "goal service is not configured")
+		return
+	}
+
+	var req goals.CreateRequest
+	if !decode(w, r, s.maxBody(), &req) {
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.WorkspaceID) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_request", "title and workspace_id are required")
+		return
+	}
+	req.CreatedBy = id.AgentID
+
+	goal, err := s.Goals.Submit(r.Context(), req)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"goal_id": goal.ID,
+		"status":  goal.Status,
+	})
+}
+
+func (s *Server) handleListGoals(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.Goals == nil {
+		writeError(w, http.StatusNotImplemented, "goals_unavailable", "goal service is not configured")
+		return
+	}
+
+	limit := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeError(w, http.StatusBadRequest, "invalid_limit", "limit must be between 1 and 200")
+			return
+		}
+		limit = parsed
+	}
+
+	list, err := s.Goals.List(r.Context(), limit)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if list == nil {
+		list = []goals.Goal{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"goals": list})
+}
+
+func (s *Server) handleGetGoal(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.Goals == nil {
+		writeError(w, http.StatusNotImplemented, "goals_unavailable", "goal service is not configured")
+		return
+	}
+
+	goalID := r.PathValue("id")
+	goal, err := s.Goals.Get(r.Context(), goalID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	progress, err := s.Goals.Progress(r.Context(), goalID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"goal": goal, "progress": progress})
+}
+
+func (s *Server) handleCancelGoal(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.Goals == nil {
+		writeError(w, http.StatusNotImplemented, "goals_unavailable", "goal service is not configured")
+		return
+	}
+	goal, err := s.Goals.Cancel(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, goal)
+}
+
+// handleGoalEvents streams progress as SSE until the goal reaches a terminal
+// state, the client disconnects, or the 10-minute cap is hit.
+func (s *Server) handleGoalEvents(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.Goals == nil {
+		writeError(w, http.StatusNotImplemented, "goals_unavailable", "goal service is not configured")
+		return
+	}
+
+	goalID := r.PathValue("id")
+	if _, err := s.Goals.Get(r.Context(), goalID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	flusher, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	send := func(ctx context.Context) bool {
+		progress, err := s.Goals.Progress(ctx, goalID)
+		if err != nil {
+			return true
+		}
+		payload, err := json.Marshal(progress)
+		if err != nil {
+			return true
+		}
+		if _, err := fmt.Fprintf(w, "event: progress\ndata: %s\n\n", payload); err != nil {
+			return true
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		switch progress.Status {
+		case goals.StatusDone, goals.StatusCancelled, goals.StatusFailed:
+			return true
+		}
+		return false
+	}
+
+	if send(r.Context()) {
+		return
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	deadline := time.NewTimer(10 * time.Minute)
+	defer deadline.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+			if send(r.Context()) {
+				return
+			}
+		}
+	}
 }
 
 // handleScores returns the current model tiers, sorted for stable output.
@@ -523,6 +685,8 @@ func classify(err error) (int, string) {
 	switch {
 	case errors.Is(err, work.ErrNotFound):
 		return http.StatusNotFound, "not_found"
+	case errors.Is(err, goals.ErrNotFound):
+		return http.StatusNotFound, "goal_not_found"
 	case errors.Is(err, work.ErrAlreadyExists):
 		return http.StatusConflict, "already_exists"
 	case errors.Is(err, work.ErrAlreadyClaimed):

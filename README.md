@@ -49,6 +49,7 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | GET | `/api/v1/work-items/{id}` | read | 项 + 租约 + 胶囊 + 评审 |
 | GET | `/api/v1/work-items/{id}/handoff` | read | 只读取交接包，不拿租约 |
 | POST | `/api/v1/work-items/{id}/claim` | claim | `{"role","plan","lease_seconds","model_id","model_version","tool_mode","task_class"}` → 租约 + 有界上下文 |
+| POST | `/api/v1/work-items/{id}/assign` | admin | 强制派工：指定 agent，绕过等级/依赖/路径锁，留审计 |
 | POST | `/api/v1/work-items/{id}/heartbeat` | claim | `{"epoch","extend_seconds"}` |
 | POST | `/api/v1/work-items/{id}/release` | claim | `{"epoch"}` |
 | POST | `/api/v1/work-items/{id}/submit` | submit | `{"epoch","idempotency_key","evidence"}` |
@@ -89,7 +90,7 @@ JSON-RPC 2.0，支持 `initialize`、`ping`、`tools/list`、`tools/call`；
 
 ```
 work_list  work_get  work_handoff  work_create
-work_claim work_heartbeat work_release
+work_claim work_assign work_heartbeat work_release
 work_submit work_verify work_verdict work_complete work_authorize
 ```
 
@@ -138,6 +139,23 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $JANUS_API_KEY" -H 'Content-Type: application/json' \
   -d '{"model":"fast","messages":[{"role":"user","content":"hi"}]}'
 ```
+
+### 强制派工
+
+`work_assign`（admin only）把卡住的项直接交给指定 agent：
+
+- **绕过**：模型等级、attempts 上限、`depends_on`、路径锁——这些本来是防止自动认领出错的，人工强制就是那个兜底；
+- **仍然拒绝**：项上已有活跃租约（不能出现两个持有者）、`done` / `cancelled`；
+- 租约 `forced=true`，事件日志记 `assigned` 且 actor 是强制派工的 admin；
+- agent 可以照常 `work_release` 交回（`forced` 租约不锁死）。
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/api/v1/work-items/w1/assign \
+  -H "X-API-Key: $JANUS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"agent_id":"agent-forced","role":"worker","plan":"resolve the blocker","model_id":"m1"}'
+```
+
+`blocked` 项被派工后回到 `running`，与普通认领返回同样的 `claim + pack`。
 
 ## 敏感操作授权
 

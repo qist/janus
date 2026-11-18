@@ -74,6 +74,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/work-items/{id}", s.protect(ScopeRead, s.handleGet))
 	mux.HandleFunc("GET /api/v1/work-items/{id}/handoff", s.protect(ScopeRead, s.handleHandoff))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/claim", s.protect(ScopeClaim, s.handleClaim))
+	mux.HandleFunc("POST /api/v1/work-items/{id}/assign", s.protect(ScopeAdmin, s.handleAssign))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/heartbeat", s.protect(ScopeClaim, s.handleHeartbeat))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/release", s.protect(ScopeClaim, s.handleRelease))
 	mux.HandleFunc("POST /api/v1/work-items/{id}/submit", s.protect(ScopeSubmit, s.handleSubmit))
@@ -283,6 +284,47 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, id Identity
 		TaskClass:    req.TaskClass,
 	}
 	result, err := s.Svc.Claim(r.Context(), r.PathValue("id"), who, req.Role, req.Plan, req.LeaseSeconds)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+type assignRequest struct {
+	AgentID      string    `json:"agent_id"`
+	Role         work.Role `json:"role"`
+	Plan         string    `json:"plan"`
+	LeaseSeconds int64     `json:"lease_seconds"`
+	ModelID      string    `json:"model_id"`
+	ModelVersion string    `json:"model_version"`
+	ToolMode     string    `json:"tool_mode"`
+	TaskClass    string    `json:"task_class"`
+}
+
+// handleAssign is forced dispatch: admin only, bypasses tier and path locks,
+// still refuses a live lease and terminal items.
+func (s *Server) handleAssign(w http.ResponseWriter, r *http.Request, id Identity) {
+	var req assignRequest
+	if !decode(w, r, s.maxBody(), &req) {
+		return
+	}
+	if strings.TrimSpace(req.AgentID) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_request", "agent_id required")
+		return
+	}
+	if !req.Role.Valid() {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_role", fmt.Sprintf("unknown role %q", req.Role))
+		return
+	}
+
+	result, err := s.Svc.Assign(r.Context(), r.PathValue("id"), id.AgentID, work.Claimant{
+		AgentID:      req.AgentID,
+		ModelID:      req.ModelID,
+		ModelVersion: req.ModelVersion,
+		ToolMode:     req.ToolMode,
+		TaskClass:    req.TaskClass,
+	}, req.Role, req.Plan, req.LeaseSeconds)
 	if err != nil {
 		s.fail(w, r, err)
 		return

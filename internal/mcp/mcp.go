@@ -220,6 +220,8 @@ func (s *Server) runTool(ctx context.Context, id auth.Identity, name string, arg
 		return s.workCreate(ctx, id, args)
 	case "work_claim":
 		return s.workClaim(ctx, id, args)
+	case "work_assign":
+		return s.workAssign(ctx, id, args)
 	case "work_heartbeat":
 		return s.workHeartbeat(ctx, id, args)
 	case "work_release":
@@ -357,6 +359,39 @@ func (s *Server) workClaim(ctx context.Context, id auth.Identity, raw json.RawMe
 		TaskClass:    args.TaskClass,
 	}
 	return s.Svc.Claim(ctx, args.ID, who, args.Role, args.Plan, args.LeaseSeconds)
+}
+
+func (s *Server) workAssign(ctx context.Context, id auth.Identity, raw json.RawMessage) (any, error) {
+	if !id.Has(auth.ScopeAdmin) {
+		return nil, fail("forbidden", "work_assign requires the admin scope")
+	}
+	var args struct {
+		ID           string    `json:"id"`
+		AgentID      string    `json:"agent_id"`
+		Role         work.Role `json:"role"`
+		Plan         string    `json:"plan"`
+		LeaseSeconds int64     `json:"lease_seconds"`
+		ModelID      string    `json:"model_id"`
+		ModelVersion string    `json:"model_version"`
+		ToolMode     string    `json:"tool_mode"`
+		TaskClass    string    `json:"task_class"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(args.AgentID) == "" {
+		return nil, fail("invalid_arguments", "agent_id required")
+	}
+	if !args.Role.Valid() {
+		return nil, fail("invalid_role", fmt.Sprintf("unknown role %q", args.Role))
+	}
+	return s.Svc.Assign(ctx, args.ID, id.AgentID, work.Claimant{
+		AgentID:      args.AgentID,
+		ModelID:      args.ModelID,
+		ModelVersion: args.ModelVersion,
+		ToolMode:     args.ToolMode,
+		TaskClass:    args.TaskClass,
+	}, args.Role, args.Plan, args.LeaseSeconds)
 }
 
 func (s *Server) workHeartbeat(ctx context.Context, id auth.Identity, raw json.RawMessage) (any, error) {

@@ -81,6 +81,23 @@ func toolDefs() []toolInfo {
 			}, "id", "role", "plan"),
 		},
 		{
+			Name: "work_assign",
+			Description: "Forced dispatch (admin only). Hands a blocked or open item to a specific agent, " +
+				"bypassing tier, attempts, dependencies and path locks. A live lease and terminal items are still " +
+				"refused, and the forcing admin is recorded in the event log.",
+			InputSchema: object(map[string]any{
+				"id":            str("Work item id"),
+				"agent_id":      str("Agent that must take the item"),
+				"role":          enum("Role to assign", "worker", "verifier", "integrator"),
+				"plan":          str("What the agent is expected to do"),
+				"lease_seconds": integer("Lease length in seconds (default 1200, max 7200)"),
+				"model_id":      str("Model that will run the work"),
+				"model_version": str("Model version"),
+				"tool_mode":     enum("How tools are executed", "native", "bridge", "none"),
+				"task_class":    str("Task class for scoring"),
+			}, "id", "agent_id", "role", "plan"),
+		},
+		{
 			Name:        "work_heartbeat",
 			Description: "Extend your lease. Only the current holder may call it; a stale epoch is rejected.",
 			InputSchema: object(map[string]any{

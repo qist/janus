@@ -87,12 +87,25 @@ func (s *Service) Claim(ctx context.Context, itemID string, who work.Claimant, r
 	if err != nil {
 		return ClaimResult{}, err
 	}
+	return s.resultFor(ctx, claim)
+}
 
-	item, ok := s.Board.Get(ctx, itemID)
+// Assign is forced dispatch by an admin. It bypasses the tier gate on purpose:
+// the admin has already decided. The board still refuses a live lease and
+// terminal items, and records the forcing actor in the event log.
+func (s *Service) Assign(ctx context.Context, itemID, actor string, target work.Claimant, role work.Role, plan string, leaseSeconds int64) (ClaimResult, error) {
+	claim, err := s.Board.Assign(ctx, itemID, target, role, plan, leaseSeconds, actor)
+	if err != nil {
+		return ClaimResult{}, err
+	}
+	return s.resultFor(ctx, claim)
+}
+
+func (s *Service) resultFor(ctx context.Context, claim work.Claim) (ClaimResult, error) {
+	item, ok := s.Board.Get(ctx, claim.WorkItemID)
 	if !ok {
 		return ClaimResult{Claim: claim}, work.ErrNotFound
 	}
-
 	caps, warnings := s.capsuleFor(ctx, item)
 	pack, packWarnings := s.buildPack(ctx, item, caps)
 	return ClaimResult{

@@ -182,22 +182,128 @@ func (b *Board) ClaimWith(ctx context.Context, itemID string, who Claimant, role
 	return claim, nil
 }
 
+// Assign is forced dispatch: an admin hands the item to a specific agent,
+// bypassing attempts, dependencies and path locks. A live lease and terminal
+// states are still refused, and the event log records who forced it.
+func (b *Board) Assign(ctx context.Context, itemID string, target Claimant, role Role, plan string, leaseSeconds int64, actor string) (Claim, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if strings.TrimSpace(actor) == "" {
+		return Claim{}, errors.New("assigning actor required")
+	}
+	if _, err := b.expireOutside(ctx, itemID); err != nil {
+		return Claim{}, err
+	}
+
+	var claim Claim
+	err := b.repo.Transact(ctx, func(ctx context.Context, repo Repository) error {
+		item, err := repo.GetItem(ctx, itemID)
+		if err != nil {
+			return err
+		}
+		if err := validateClaimInput(target, role, plan); err != nil {
+			return err
+		}
+		if _, ok, err := repo.GetActiveClaim(ctx, itemID); err != nil {
+			return err
+		} else if ok {
+			return ErrAlreadyClaimed
+		}
+
+		switch role {
+		case RoleWorker:
+			if item.Status != StatusOpen && item.Status != StatusBlocked {
+				return ErrInvalidTransition
+			}
+			item.Status = StatusRunning
+		case RoleVerifier:
+			if item.Status != StatusReview {
+				return ErrInvalidTransition
+			}
+		case RoleIntegrator:
+			if item.Status != StatusApproved {
+				return ErrInvalidTransition
+			}
+			item.Status = StatusIntegrating
+		}
+
+		epoch, err := repo.NextLeaseEpoch(ctx, itemID)
+		if err != nil {
+			return err
+		}
+		now := b.now()
+		claim = newClaim(itemID, target, role, plan, epoch, now, clampLease(leaseSeconds))
+		claim.Forced = true
+		item.LastIdempotencyKey = ""
+		item.UpdatedAt = now
+
+		if err := repo.SaveClaim(ctx, claim); err != nil {
+			return err
+		}
+		if err := repo.UpdateItem(ctx, item, item.Version); err != nil {
+			return err
+		}
+		return b.appendEvent(ctx, repo, itemID, "assigned", actor)
+	})
+	if err != nil {
+		return Claim{}, err
+	}
+	return claim, nil
+}
+
+func validateClaimInput(who Claimant, role Role, plan string) error {
+	if strings.TrimSpace(who.AgentID) == "" {
+		return errors.New("agent id required")
+	}
+	if !role.Valid() {
+		return fmt.Errorf("invalid role %q", role)
+	}
+	if strings.TrimSpace(plan) == "" {
+		return ErrPlanRequired
+	}
+	if len(plan) > MaxPlanBytes {
+		return ErrPlanTooLong
+	}
+	return nil
+}
+
+func clampLease(seconds int64) int64 {
+	if seconds <= 0 {
+		return DefaultLeaseSeconds
+	}
+	if seconds > MaxLeaseSeconds {
+		return MaxLeaseSeconds
+	}
+	return seconds
+}
+
+func newClaim(itemID string, who Claimant, role Role, plan string, epoch, now, leaseSeconds int64) Claim {
+	return Claim{
+		ID:             fmt.Sprintf("cl_%s_%d", itemID, epoch),
+		WorkItemID:     itemID,
+		AgentID:        who.AgentID,
+		ModelID:        who.ModelID,
+		ModelVersion:   who.ModelVersion,
+		ToolMode:       who.ToolMode,
+		TaskClass:      who.TaskClass,
+		Role:           role,
+		LeaseEpoch:     epoch,
+		LeaseExpiresAt: now + leaseSeconds,
+		HeartbeatAt:    now,
+		Plan:           plan,
+		Status:         ClaimActive,
+		CreatedAt:      now,
+	}
+}
+
 func (b *Board) claim(ctx context.Context, repo Repository, itemID string, who Claimant, role Role, plan string, leaseSeconds int64) (Claim, error) {
 	item, err := repo.GetItem(ctx, itemID)
 	if err != nil {
 		return Claim{}, err
 	}
-	if strings.TrimSpace(who.AgentID) == "" {
-		return Claim{}, errors.New("agent id required")
-	}
-	if !role.Valid() {
-		return Claim{}, fmt.Errorf("invalid role %q", role)
-	}
-	if strings.TrimSpace(plan) == "" {
-		return Claim{}, ErrPlanRequired
-	}
-	if len(plan) > MaxPlanBytes {
-		return Claim{}, ErrPlanTooLong
+	if err := validateClaimInput(who, role, plan); err != nil {
+		return Claim{}, err
 	}
 
 	if _, ok, err := repo.GetActiveClaim(ctx, itemID); err != nil {
@@ -214,12 +320,7 @@ func (b *Board) claim(ctx context.Context, repo Repository, itemID string, who C
 		}
 	}
 
-	if leaseSeconds <= 0 {
-		leaseSeconds = DefaultLeaseSeconds
-	}
-	if leaseSeconds > MaxLeaseSeconds {
-		leaseSeconds = MaxLeaseSeconds
-	}
+	leaseSeconds = clampLease(leaseSeconds)
 
 	epoch, err := repo.NextLeaseEpoch(ctx, itemID)
 	if err != nil {
@@ -227,22 +328,7 @@ func (b *Board) claim(ctx context.Context, repo Repository, itemID string, who C
 	}
 
 	now := b.now()
-	claim := Claim{
-		ID:             fmt.Sprintf("cl_%s_%d", itemID, epoch),
-		WorkItemID:     itemID,
-		AgentID:        who.AgentID,
-		ModelID:        who.ModelID,
-		ModelVersion:   who.ModelVersion,
-		ToolMode:       who.ToolMode,
-		TaskClass:      who.TaskClass,
-		Role:           role,
-		LeaseEpoch:     epoch,
-		LeaseExpiresAt: now + leaseSeconds,
-		HeartbeatAt:    now,
-		Plan:           plan,
-		Status:         ClaimActive,
-		CreatedAt:      now,
-	}
+	claim := newClaim(itemID, who, role, plan, epoch, now, leaseSeconds)
 
 	switch role {
 	case RoleWorker:

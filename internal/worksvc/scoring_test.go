@@ -230,3 +230,28 @@ func TestTaskClassAndSensitivity(t *testing.T) {
 		t.Fatal("critical risk should be sensitive")
 	}
 }
+
+func TestAssignBypassesTierGate(t *testing.T) {
+	ctx := context.Background()
+	svc, board, _, _ := scoredService(t)
+	addItem(t, board, "w2", work.RiskMedium)
+
+	target := work.Claimant{AgentID: "agent-worker", ModelID: "m1"}
+	if _, err := svc.Claim(ctx, "w2", target, work.RoleWorker, "p", 60); !errors.Is(err, ErrTierDenied) {
+		t.Fatalf("Claim = %v, want ErrTierDenied", err)
+	}
+
+	result, err := svc.Assign(ctx, "w2", "admin-1", target, work.RoleWorker, "forced fix", 60)
+	if err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	if !result.Claim.Forced {
+		t.Fatal("assigned claim is not marked forced")
+	}
+	if result.Claim.AgentID != "agent-worker" || result.Claim.ModelID != "m1" {
+		t.Fatalf("claim = %+v", result.Claim)
+	}
+	if result.Pack.Text == "" {
+		t.Fatal("forced assignment did not return a pack")
+	}
+}

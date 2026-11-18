@@ -198,7 +198,7 @@ func TestToolsList(t *testing.T) {
 
 	want := []string{
 		"work_list", "work_get", "work_handoff", "work_create", "work_claim",
-		"work_heartbeat", "work_release", "work_submit", "work_verify",
+		"work_assign", "work_heartbeat", "work_release", "work_submit", "work_verify",
 		"work_verdict", "work_complete", "work_authorize",
 	}
 	got := make(map[string]toolInfo, len(list.Tools))
@@ -554,4 +554,39 @@ func TestAuthorizeTool(t *testing.T) {
 	e.call(t, adminKey, "work_authorize", map[string]any{
 		"id": "w1", "epoch": 1, "action": map[string]any{},
 	}).mustFail(t, "invalid_action")
+}
+
+func TestAssignTool(t *testing.T) {
+	e := newEnv(t, false)
+	if res := e.call(t, adminKey, "work_create", map[string]any{"item": map[string]any{
+		"id": "w1", "title": "blocked", "status": "blocked",
+	}}); res.IsError {
+		t.Fatalf("work_create: %s", res.text())
+	}
+
+	res := e.call(t, adminKey, "work_assign", map[string]any{
+		"id": "w1", "agent_id": "agent-x", "role": "worker", "plan": "forced fix", "model_id": "m1",
+	})
+	if res.IsError {
+		t.Fatalf("work_assign: %s", res.text())
+	}
+	var assigned struct {
+		Claim work.Claim `json:"claim"`
+		Pack  struct {
+			Text string `json:"text"`
+		} `json:"pack"`
+	}
+	if err := json.Unmarshal([]byte(res.text()), &assigned); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !assigned.Claim.Forced || assigned.Claim.AgentID != "agent-x" {
+		t.Fatalf("claim = %+v", assigned.Claim)
+	}
+	if assigned.Pack.Text == "" {
+		t.Fatal("no pack in assign result")
+	}
+
+	e.call(t, workerKey, "work_assign", map[string]any{
+		"id": "w1", "agent_id": "agent-x", "role": "worker", "plan": "x",
+	}).mustFail(t, "forbidden")
 }

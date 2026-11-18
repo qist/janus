@@ -878,3 +878,62 @@ func TestScoresWithoutEngineIsNotImplemented(t *testing.T) {
 		t.Fatalf("code = %q", code)
 	}
 }
+
+func TestAssignEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	createItem(t, e, work.WorkItem{
+		ID:          "w1",
+		WorkspaceID: "ws",
+		Title:       "blocked",
+		Status:      work.StatusBlocked,
+		Contract:    work.Contract{Goal: "ship", Paths: []string{"internal/work"}},
+	})
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/assign", adminKey, assignRequest{
+		AgentID: "agent-x",
+		Role:    work.RoleWorker,
+		Plan:    "forced fix",
+		ModelID: "m1",
+	}, http.StatusOK)
+	var assigned worksvc.ClaimResult
+	decodeBody(t, resp, &assigned)
+	if !assigned.Claim.Forced || assigned.Claim.AgentID != "agent-x" {
+		t.Fatalf("claim = %+v", assigned.Claim)
+	}
+	if assigned.Pack.Text == "" {
+		t.Fatal("no pack returned for forced assignment")
+	}
+
+	// A live lease still blocks a second assignment.
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w1/assign", adminKey, assignRequest{
+		AgentID: "agent-y", Role: work.RoleWorker, Plan: "again",
+	}, http.StatusConflict)
+	if code := errCode(t, resp); code != "already_claimed" {
+		t.Fatalf("code = %q", code)
+	}
+
+	// Missing target agent.
+	resp = e.expect(t, http.MethodPost, "/api/v1/work-items/w1/assign", adminKey, assignRequest{
+		Role: work.RoleWorker, Plan: "x",
+	}, http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "invalid_request" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestAssignRequiresAdminScope(t *testing.T) {
+	e := newTestEnv(t)
+	createItem(t, e, work.WorkItem{
+		ID:          "w1",
+		WorkspaceID: "ws",
+		Title:       "open",
+		Contract:    work.Contract{Goal: "ship"},
+	})
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/work-items/w1/assign", workerKey, assignRequest{
+		AgentID: "agent-other", Role: work.RoleWorker, Plan: "x",
+	}, http.StatusForbidden)
+	if code := errCode(t, resp); code != "forbidden" {
+		t.Fatalf("code = %q", code)
+	}
+}

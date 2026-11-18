@@ -315,12 +315,15 @@ func chatToMessages(raw []byte, model string) ([]byte, error) {
 	if modelName == "" {
 		modelName = model
 	}
-	id := parsed.ID
+	// Upstream ids come as both chatcmpl- and chatcmpl_; the Messages client only
+	// needs them stable, so the prefix is normalised to msg_.
+	id := strings.TrimPrefix(parsed.ID, "chatcmpl-")
+	id = strings.TrimPrefix(id, "chatcmpl_")
 	if id == "" {
-		id = "chatcmpl_" + randomHex(8)
+		id = randomHex(16)
 	}
 	payload := map[string]any{
-		"id":            "msg_" + strings.TrimPrefix(id, "chatcmpl_"),
+		"id":            "msg_" + id,
 		"type":          "message",
 		"role":          "assistant",
 		"model":         modelName,

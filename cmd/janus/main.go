@@ -56,6 +56,9 @@ func main() {
 func run() error {
 	showVersion := flag.Bool("version", false, "print version")
 	addr := flag.String("addr", envOr("JANUS_ADDR", "127.0.0.1:8080"), "HTTP listen address")
+	tlsAddr := flag.String("tls-addr", os.Getenv("JANUS_TLS_ADDR"), "HTTPS listen address (optional)")
+	tlsCert := flag.String("tls-cert", os.Getenv("JANUS_TLS_CERT"), "TLS certificate path")
+	tlsKey := flag.String("tls-key", os.Getenv("JANUS_TLS_KEY"), "TLS private key path")
 	dbPath := flag.String("db", envOr("JANUS_DB", "janus.db"), "SQLite database path")
 	workspace := flag.String("workspace", os.Getenv("JANUS_WORKSPACE"), "workspace root for contract checks (optional)")
 	agentID := flag.String("agent-id", envOr("JANUS_AGENT_ID", "admin"), "agent id bound to JANUS_API_KEY")
@@ -180,13 +183,32 @@ func run() error {
 		io.WriteString(w, `{"error":{"code":"not_found","message":"no such endpoint"}}`+"\n")
 	})
 
+	handler := securityHeaders(mux)
 	httpServer := &http.Server{
 		Addr:              *addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
+	}
+
+	// A second listener serves the same handler over TLS. Both ports stay open
+	// during a migration, so an existing client keeps working until it is
+	// pointed at https.
+	var tlsServer *http.Server
+	if strings.TrimSpace(*tlsAddr) != "" {
+		if *tlsCert == "" || *tlsKey == "" {
+			return errors.New("JANUS_TLS_ADDR requires JANUS_TLS_CERT and JANUS_TLS_KEY")
+		}
+		tlsServer = &http.Server{
+			Addr:              *tlsAddr,
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      5 * time.Minute,
+			IdleTimeout:       2 * time.Minute,
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -200,6 +222,15 @@ func run() error {
 		}
 	}()
 
+	if tlsServer != nil {
+		go func() {
+			log.Printf("janus listening on %s (TLS)", *tlsAddr)
+			if err := tlsServer.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
+
 	select {
 	case err := <-errCh:
 		return err
@@ -209,7 +240,26 @@ func run() error {
 	log.Print("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if tlsServer != nil {
+		_ = tlsServer.Shutdown(shutdownCtx)
+	}
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// securityHeaders adds the headers a browser-facing service should always send.
+// HSTS is only set on TLS requests: sending it over plain HTTP is ignored by
+// browsers and would be a lie on the migration port.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Frame-Options", "DENY")
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // buildGate wires the auditor models from JANUS_AUDITORS. Without any model the

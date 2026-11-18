@@ -380,6 +380,25 @@ prompt/completion/cached tokens、耗时、HTTP 状态、错误码、是否流�
 `/ui/usage` 用这些接口渲染：周期切换、失败数、token/成本卡片、趋势条、按模型/上游拆分、最近调用表。
 失败调用同样计入行数，`failed` 单独计数，错误率不需要另外一套监控表。
 
+### 传输层（TLS）
+
+janus 可以在同一进程里多开一个 HTTPS 监听，用于把明文端口逐步迁走：
+
+```
+JANUS_TLS_ADDR=0.0.0.0:8443
+JANUS_TLS_CERT=/opt/janus-control/tls/janus.crt
+JANUS_TLS_KEY=/opt/janus-control/tls/janus.key
+```
+
+- 两个端口跑同一个 handler：8080（HTTP）保留给尚未迁移的客户端，8443（HTTPS/HTTP2）给新配置；
+- 开了 TLS 才发送 `Strict-Transport-Security`；明文端口不发 HSTS（浏览器会忽略，且是假的承诺）；
+- 两种端口都发 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY`；
+- 证书自签也行（`openssl req -x509 -addext "subjectAltName=IP:<host>"`），客户端需要信任该证书；
+  有域名时应换成 Let's Encrypt 签发的证书；
+- 迁完客户端后应关闭 `JANUS_ADDR` 的对外暴露（或绑 `127.0.0.1`），只留 HTTPS。
+
+明文端口仍能被同网段嗅探到 API key header，这是必须迁移的原因。
+
 ## 8. 远端工作与输出
 
 工作项详情已经能看：

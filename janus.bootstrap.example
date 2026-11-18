@@ -1,4 +1,8 @@
 JANUS_ADDR=127.0.0.1:2810
+# 可选：同进程再开一个 HTTPS 监听（迁移期保留明文端口）
+# JANUS_TLS_ADDR=0.0.0.0:8443
+# JANUS_TLS_CERT=/etc/janus/tls/janus.crt
+# JANUS_TLS_KEY=/etc/janus/tls/janus.key
 JANUS_DB=./data/janus.db
 JANUS_DB_KEY=
 JANUS_DATA_DIR=./data

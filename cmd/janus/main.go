@@ -24,6 +24,7 @@ import (
 	"janus/internal/goals"
 	"janus/internal/mcp"
 	"janus/internal/pool"
+	"janus/internal/provider"
 	"janus/internal/proxy"
 	"janus/internal/scoring"
 	"janus/internal/store"
@@ -96,12 +97,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	providers, err := buildProviders(st)
+	if err != nil {
+		return err
+	}
+	if err := mergeManagedRoutes(routes, providers, ledger); err != nil {
+		return err
+	}
 	proxyServer := proxy.New(routes, keys, ledger)
 
 	server := api.New(svc, keys)
 	server.Usage = ledger
 	server.Scores = scores
 	server.Goals = goalSvc
+	server.Providers = providers
 	mcpServer := mcp.New(svc, keys)
 	mcpServer.Version = version
 
@@ -192,17 +201,7 @@ func buildGate(ledger usage.Ledger) (*auditor.Gate, error) {
 		if err != nil {
 			return nil, fmt.Errorf("auditor %q: %w", cfg.Name, err)
 		}
-		if ledger != nil {
-			client.OnUsage = func(u gateway.Usage) {
-				_ = ledger.Append(context.Background(), usage.Entry{
-					ProviderID:       u.ProviderID,
-					CredentialID:     u.CredentialID,
-					Model:            u.Model,
-					PromptTokens:     u.PromptTokens,
-					CompletionTokens: u.CompletionTokens,
-				})
-			}
-		}
+		client.OnUsage = usageRecorder(ledger)
 		gate.Auditors = append(gate.Auditors, auditor.NewModelAuditor(client.Name, client.Model, modelCompleter{client}))
 	}
 	log.Printf("configured %d auditor model(s)", len(gate.Auditors))
@@ -245,6 +244,68 @@ func buildModelRoutes() (map[string]*gateway.Client, error) {
 	}
 	log.Printf("configured %d model route(s)", len(routes))
 	return routes, nil
+}
+
+// buildProviders wires DB-backed providers, credentials and routes when
+// JANUS_MASTER_KEY is set. Without a key the endpoints answer 501 rather than
+// storing secrets in plaintext.
+func buildProviders(st *store.Store) (*provider.Service, error) {
+	raw := strings.TrimSpace(os.Getenv("JANUS_MASTER_KEY"))
+	if raw == "" {
+		log.Print("JANUS_MASTER_KEY unset: provider management disabled (501)")
+		return nil, nil
+	}
+	key, err := provider.ParseMasterKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("JANUS_MASTER_KEY: %w", err)
+	}
+	box, err := provider.NewSecretBox(key)
+	if err != nil {
+		return nil, fmt.Errorf("JANUS_MASTER_KEY: %w", err)
+	}
+	return provider.New(st, box), nil
+}
+
+// mergeManagedRoutes adds routes stored in the database to the environment
+// routes. Env definitions win on a name collision: a stored route cannot
+// silently shadow an operator's explicit JANUS_MODELS entry.
+func mergeManagedRoutes(routes map[string]*gateway.Client, svc *provider.Service, ledger usage.Ledger) error {
+	if svc == nil {
+		return nil
+	}
+	managed, err := svc.Clients(context.Background())
+	if err != nil {
+		return fmt.Errorf("load stored model routes: %w", err)
+	}
+	for name, client := range managed {
+		if _, exists := routes[name]; exists {
+			log.Printf("model %q is defined by JANUS_MODELS and the provider store; keeping the env one", name)
+			continue
+		}
+		client.OnUsage = usageRecorder(ledger)
+		routes[name] = client
+	}
+	if len(managed) > 0 {
+		log.Printf("loaded %d stored model route(s)", len(managed))
+	}
+	return nil
+}
+
+// usageRecorder returns the ledger callback shared by every gateway client.
+// Failed calls do not reach it: the gateway only reports successful usage.
+func usageRecorder(ledger usage.Ledger) func(gateway.Usage) {
+	if ledger == nil {
+		return nil
+	}
+	return func(u gateway.Usage) {
+		_ = ledger.Append(context.Background(), usage.Entry{
+			ProviderID:       u.ProviderID,
+			CredentialID:     u.CredentialID,
+			Model:            u.Model,
+			PromptTokens:     u.PromptTokens,
+			CompletionTokens: u.CompletionTokens,
+		})
+	}
 }
 
 // newModelClient builds one upstream client, including its account pool.

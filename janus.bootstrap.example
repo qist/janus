@@ -12,6 +12,9 @@ JANUS_AGENT_ID=admin
 JANUS_WORKSPACE=
 # 能力令牌签名密钥（>=32 字节）；不设置则从 JANUS_API_KEY 派生，重启后令牌失效
 JANUS_CAPABILITY_KEY=
+# 上游凭据加密密钥（32 字节 hex/base64/raw）；不设置则 provider 管理返回 501
+# 生成：openssl rand -hex 32
+JANUS_MASTER_KEY=
 # 审计模型（JSON 数组）；不设置则敏感操作一律 deny
 # JANUS_AUDITORS=[{"name":"openai","base_url":"https://api.openai.com/v1","api_key_env":"OPENAI_API_KEY","model":"gpt-4o-mini"}]
 # /v1 代理暴露的模型（aliases 可选，api_key_envs 支持多 key 失败切换）

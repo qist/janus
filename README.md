@@ -35,6 +35,7 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | `JANUS_AUDITORS` | 空 | 审计模型 JSON 数组；不设则敏感操作一律 deny |
 | `JANUS_MODELS` | 空 | `/v1` 代理暴露的模型/别名 JSON 数组 |
 | `JANUS_CAPABILITY_KEY` | 空 | 能力令牌签名密钥（≥32 字节） |
+| `JANUS_MASTER_KEY` | 空 | 上游凭据加密密钥（32 字节 hex/base64/raw）；不设则 provider 管理返回 501 |
 
 ## HTTP API
 
@@ -60,6 +61,10 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | POST | `/api/v1/work-items/{id}/cancel` | write | 取消工作项并释放活跃租约（幂等） |
 | GET | `/api/v1/usage` | read | 用量汇总（按 key/group/工作项/provider/model/账号/时间过滤） |
 | GET | `/api/v1/scores` | read | 模型等级与分数（只读） |
+| GET | `/api/v1/providers` · `/api/v1/model-routes` | read | 上游与模型路由（凭据只显示 masked） |
+| POST | `/api/v1/providers` · `/api/v1/model-routes` | admin | 新建上游 / 路由 |
+| POST | `/api/v1/providers/{id}/credentials` | admin | 写入密钥（只进不出） |
+| PATCH/DELETE | `/api/v1/providers/{id}` | admin | 启停 / 删除（有引用时拒绝） |
 | POST | `/api/v1/goals` | write | 建目标，异步拆项，返回 `202 + goal_id` |
 | GET | `/api/v1/goals` | read | 目标列表（`limit` 1–200） |
 | GET | `/api/v1/goals/{id}` | read | `goal + progress`（total/done/blocked/percent） |
@@ -102,8 +107,8 @@ make ui        # 重新构建并更新 internal/ui/dist（dist 随仓库提交�
 make ui-dev    # 本地 Vite 开发，/api 与 /v1 代理到 127.0.0.1:8080
 ```
 
-模型页目前只读：模型与别名来自 `JANUS_MODELS`。provider / 凭据的在线管理（含 OAuth 登录）
-需要后端 CRUD 与加密存储，方案见 `docs/FRONTEND.md` §7。
+模型页目前只读。后端已经可以管理 provider / 凭据 / 路由（见下一节），控制台页面还未接上；
+OAuth 登录仍未实现，方案见 `docs/FRONTEND.md` §7。
 
 ## 目标与进度
 
@@ -149,6 +154,49 @@ work_submit work_verify work_verdict work_complete work_authorize
 curl -s -X POST "http://127.0.0.1:8080/mcp/$JANUS_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"work_list","arguments":{}}}'
+```
+
+## 模型接入（provider / 凭据 / 路由）
+
+设置 `JANUS_MASTER_KEY` 后，上游配置可以存在库里，不再只能靠 `JANUS_MODELS` 环境变量：
+
+| 方法 | 路径 | Scope | 说明 |
+|---|---|---|---|
+| GET | `/api/v1/providers` | read | 上游列表 |
+| POST | `/api/v1/providers` | admin | `{"id","name","kind(openai|anthropic|custom)","base_url"}` |
+| PATCH | `/api/v1/providers/{id}` | admin | `{"name","base_url","enabled"}` |
+| DELETE | `/api/v1/providers/{id}` | admin | 仍被路由或凭据引用时返回 `409 provider_in_use` |
+| GET | `/api/v1/providers/{id}/credentials` | admin | 只返回 `masked` 与状态 |
+| POST | `/api/v1/providers/{id}/credentials` | admin | `{"label","kind(api_key|oauth)","secret"}` |
+| DELETE | `/api/v1/credentials/{id}` | admin | 删除凭据 |
+| GET | `/api/v1/model-routes` | read | 暴露模型 → 上游模型 |
+| POST | `/api/v1/model-routes` | admin | `{"exposed_model","provider_id","upstream_model","aliases"}` |
+| DELETE | `/api/v1/model-routes/{id}` | admin | 删除路由 |
+
+- 密钥用 **AES-256-GCM** 密封后入库，nonce 随机；`JANUS_MASTER_KEY` 只在进程里，
+  数据库被拿走也解不开。密钥**只写不读**：创建响应都只带 `masked`（如 `…9999`）。
+- 同一凭据不能同时被两个路由复用成不同模型：路由按 `(provider, upstream_model)` 建 client，
+  账号池按 provider 聚合，额度耗尽自动切换。
+- 名字冲突在写入时就拒绝：`exposed_model` 与所有 `aliases` 共享一张命名空间，
+  不允许两个路由指向同一名字。
+- 启动时把库中路由并入 `/v1`：**`JANUS_MODELS` 优先**，同名时记日志并保留环境变量那份，
+  避免库里的配置悄悄覆盖运维显式声明。改动后需要重启生效（运行时热加载是下一步）。
+- 未设置 `JANUS_MASTER_KEY` 时所有写接口返回 `501 providers_unavailable`，不会退化成明文存储。
+
+```bash
+export JANUS_MASTER_KEY=$(openssl rand -hex 32)
+
+curl -s -X POST http://127.0.0.1:8080/api/v1/providers \
+  -H "X-API-Key: $JANUS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"id":"openai","kind":"openai","base_url":"https://api.openai.com/v1"}'
+
+curl -s -X POST http://127.0.0.1:8080/api/v1/providers/openai/credentials \
+  -H "X-API-Key: $JANUS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"label":"primary","secret":"sk-..."}'   # 响应只有 masked
+
+curl -s -X POST http://127.0.0.1:8080/api/v1/model-routes \
+  -H "X-API-Key: $JANUS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"exposed_model":"fast","provider_id":"openai","upstream_model":"gpt-4o-mini","aliases":["turbo"]}'
 ```
 
 ## /v1 模型代理

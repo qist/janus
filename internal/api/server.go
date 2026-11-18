@@ -18,6 +18,7 @@ import (
 
 	"janus/internal/goals"
 	"janus/internal/policy"
+	"janus/internal/provider"
 	"janus/internal/scoring"
 	"janus/internal/usage"
 	"janus/internal/work"
@@ -49,6 +50,8 @@ type Server struct {
 	Scores *scoring.Engine
 	// Goals is the goal service; nil answers 501 on goal routes.
 	Goals *goals.Service
+	// Providers manages upstream providers and credentials; nil answers 501.
+	Providers *provider.Service
 }
 
 // New returns a server. A nil authenticator rejects every request.
@@ -74,6 +77,16 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/work-items", s.handleList)
 	mux.HandleFunc("GET /api/v1/usage", s.protect(ScopeRead, s.handleUsage))
 	mux.HandleFunc("GET /api/v1/scores", s.protect(ScopeRead, s.handleScores))
+	mux.HandleFunc("GET /api/v1/providers", s.protect(ScopeRead, s.handleListProviders))
+	mux.HandleFunc("POST /api/v1/providers", s.protect(ScopeAdmin, s.handleCreateProvider))
+	mux.HandleFunc("PATCH /api/v1/providers/{id}", s.protect(ScopeAdmin, s.handleUpdateProvider))
+	mux.HandleFunc("DELETE /api/v1/providers/{id}", s.protect(ScopeAdmin, s.handleDeleteProvider))
+	mux.HandleFunc("GET /api/v1/providers/{id}/credentials", s.protect(ScopeAdmin, s.handleListCredentials))
+	mux.HandleFunc("POST /api/v1/providers/{id}/credentials", s.protect(ScopeAdmin, s.handleCreateCredential))
+	mux.HandleFunc("DELETE /api/v1/credentials/{id}", s.protect(ScopeAdmin, s.handleDeleteCredential))
+	mux.HandleFunc("GET /api/v1/model-routes", s.protect(ScopeRead, s.handleListRoutes))
+	mux.HandleFunc("POST /api/v1/model-routes", s.protect(ScopeAdmin, s.handleCreateRoute))
+	mux.HandleFunc("DELETE /api/v1/model-routes/{id}", s.protect(ScopeAdmin, s.handleDeleteRoute))
 	mux.HandleFunc("POST /api/v1/goals", s.protect(ScopeWrite, s.handleCreateGoal))
 	mux.HandleFunc("GET /api/v1/goals", s.protect(ScopeRead, s.handleListGoals))
 	mux.HandleFunc("GET /api/v1/goals/{id}", s.protect(ScopeRead, s.handleGetGoal))
@@ -696,6 +709,16 @@ func classify(err error) (int, string) {
 		return http.StatusNotFound, "not_found"
 	case errors.Is(err, goals.ErrNotFound):
 		return http.StatusNotFound, "goal_not_found"
+	case errors.Is(err, provider.ErrNotFound):
+		return http.StatusNotFound, "provider_not_found"
+	case errors.Is(err, provider.ErrConflict):
+		return http.StatusConflict, "already_exists"
+	case errors.Is(err, provider.ErrInUse):
+		return http.StatusConflict, "provider_in_use"
+	case errors.Is(err, provider.ErrInvalidInput):
+		return http.StatusUnprocessableEntity, "invalid_request"
+	case errors.Is(err, provider.ErrSecretBox):
+		return http.StatusNotImplemented, "secrets_unavailable"
 	case errors.Is(err, work.ErrAlreadyExists):
 		return http.StatusConflict, "already_exists"
 	case errors.Is(err, work.ErrAlreadyClaimed):

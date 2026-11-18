@@ -79,17 +79,23 @@ web/
 - 当前 UI **不解析 scope**，管理员操作失败时展示后端返回的 `forbidden`。
   下一步加 `GET /api/v1/me` 返回 `{agent_id, scopes}`，据此隐藏/禁用按钮。
 
-## 7. 多模型与凭据（下一阶段）
+## 7. 多模型与凭据
 
-现在 `/ui/models` 只读展示 `JANUS_MODELS` 暴露的模型/别名。要支持「很多模型的登录」，需要后端配合：
+后端已经落地（`internal/provider` + `/api/v1/providers`、`/api/v1/model-routes`）：
 
-1. `providers` 表：`id / kind(openai|anthropic|custom) / base_url / enabled`；
-2. `provider_credentials` 表：`id / provider_id / label / kind(api_key|oauth) / secret_ciphertext / status / quota / cooldown`；
-3. `model_routes` 表：`exposed_model / provider_id / upstream_model / priority / aliases`；
-4. CRUD + 连通性探测接口；secret 只在服务端解密，列表接口只回 `masked`；
-5. OAuth 设备码/回调用服务端流程，浏览器只拿一次性 state，不接触 refresh token。
+1. `model_providers`：`id / name / kind(openai|anthropic|custom) / base_url / enabled`；
+2. `provider_credentials`：`id / provider_id / label / kind(api_key|oauth) / secret（AES-GCM 密文）/ status / total / remaining`；
+3. `model_routes`：`exposed_model / provider_id / upstream_model / priority / aliases`；
+4. secret 只在服务端解密；创建与列表都只回 `masked`，`SecretCiphertext` 带 `json:"-"`；
+5. 启动时把库中路由并入 `/v1`，同名时 `JANUS_MODELS` 优先。
 
-在此之前，模型配置仍以环境变量为准，UI 明确标注这一点，避免假装能改。
+还没做的两件事：
+
+- **控制台页面**：`/ui/models` 仍只读 `JANUS_MODELS`，下一步接 provider / 凭据 / 路由的增删与启停；
+- **OAuth 登录**：设备码/回调用服务端流程，浏览器只拿一次性 state，不接触 refresh token；
+  表结构已留 `kind=oauth`，但授权流程未实现。
+
+在页面接上之前，UI 明确标注配置来自环境变量，避免假装能改。
 
 ## 8. 远端工作与输出
 

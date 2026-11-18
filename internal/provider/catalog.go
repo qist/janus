@@ -92,14 +92,16 @@ var channelCatalog = []Channel{
 	{
 		ID: "openai-codex", Name: "OpenAI Codex (ChatGPT plan)", Category: ChannelSubscription,
 		Kind: KindOpenAI, Protocols: []string{"responses", "chat"}, Auth: []string{"oauth"},
-		BaseURL: "https://chatgpt.com/backend-api/codex",
-		Note:    "OAuth only; Responses protocol, needs the Codex adapter.",
+		Protocol: ProtocolResponses,
+		BaseURL:  "https://chatgpt.com/backend-api/codex",
+		Note:     "OAuth only; Responses protocol, needs the Codex adapter.",
 	},
 	{
 		ID: "claude-code", Name: "Claude Code (Anthropic plan)", Category: ChannelSubscription,
 		Kind: KindAnthropic, Protocols: []string{"anthropic"}, Auth: []string{"oauth"},
-		BaseURL: "https://api.anthropic.com",
-		Note:    "OAuth token needs the anthropic-beta oauth header.",
+		Protocol: ProtocolAnthropic,
+		BaseURL:  "https://api.anthropic.com",
+		Note:     "OAuth token needs the anthropic-beta oauth header.",
 	},
 	{
 		ID: "workbuddy", Name: "WorkBuddy / CodeBuddy (Tencent plan)", Category: ChannelSubscription,
@@ -122,6 +124,7 @@ var channelCatalog = []Channel{
 	{
 		ID: "google-code-assist", Name: "Google Code Assist / Gemini CLI", Category: ChannelSubscription,
 		Kind: KindCustom, Protocols: []string{"gemini"}, Auth: []string{"oauth"},
+		Protocol:    ProtocolGemini,
 		BaseURL:     "https://cloudcode-pa.googleapis.com",
 		AltBaseURLs: []string{"https://daily-cloudcode-pa.googleapis.com"},
 		Note:        "Gemini protocol; a Gemini adapter and a custom OAuth client are required before login can work.",

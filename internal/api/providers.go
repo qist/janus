@@ -10,17 +10,20 @@ import (
 )
 
 type createProviderRequest struct {
-	ID      string        `json:"id"`
-	Name    string        `json:"name"`
-	Kind    provider.Kind `json:"kind"`
-	BaseURL string        `json:"base_url"`
-	Channel string        `json:"channel"`
+	ID      string                `json:"id"`
+	Name    string                `json:"name"`
+	Kind    provider.Kind         `json:"kind"`
+	BaseURL string                `json:"base_url"`
+	Channel string                `json:"channel"`
+	OAuth   *provider.OAuthConfig `json:"oauth"`
 }
 
 type updateProviderRequest struct {
-	Name    *string `json:"name"`
-	BaseURL *string `json:"base_url"`
-	Enabled *bool   `json:"enabled"`
+	Name       *string               `json:"name"`
+	BaseURL    *string               `json:"base_url"`
+	Enabled    *bool                 `json:"enabled"`
+	OAuth      *provider.OAuthConfig `json:"oauth"`
+	ClearOAuth bool                  `json:"clear_oauth"`
 }
 
 type createCredentialRequest struct {
@@ -29,9 +32,23 @@ type createCredentialRequest struct {
 	Secret string                  `json:"secret"`
 }
 
+type updateCredentialRequest struct {
+	Label    *string `json:"label"`
+	Account  *string `json:"account"`
+	Priority *int    `json:"priority"`
+	Disabled *bool   `json:"disabled"`
+}
+
+type importRequest struct {
+	Source string `json:"source"`
+	Entry  string `json:"entry"`
+	Label  string `json:"label"`
+}
+
 type oauthCompleteRequest struct {
 	SessionID string `json:"session_id"`
 	Code      string `json:"code"`
+	Label     string `json:"label"`
 }
 
 type createRouteRequest struct {
@@ -99,6 +116,7 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request, _ 
 		Kind:    req.Kind,
 		BaseURL: req.BaseURL,
 		Channel: req.Channel,
+		OAuth:   req.OAuth,
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -117,9 +135,11 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 	updated, err := s.Providers.UpdateProvider(r.Context(), r.PathValue("id"), provider.ProviderPatch{
-		Name:    req.Name,
-		BaseURL: req.BaseURL,
-		Enabled: req.Enabled,
+		Name:       req.Name,
+		BaseURL:    req.BaseURL,
+		Enabled:    req.Enabled,
+		OAuth:      req.OAuth,
+		ClearOAuth: req.ClearOAuth,
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -305,7 +325,8 @@ func (s *Server) handleStartProviderOAuth(w http.ResponseWriter, r *http.Request
 	if s.providersUnavailable(w) {
 		return
 	}
-	start, err := s.Providers.StartOAuth(r.Context(), r.PathValue("id"))
+	start, err := s.Providers.StartOAuth(r.Context(), r.PathValue("id"),
+		strings.TrimSpace(r.URL.Query().Get("credential_id")))
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -323,11 +344,70 @@ func (s *Server) handleCompleteProviderOAuth(w http.ResponseWriter, r *http.Requ
 	if !decode(w, r, s.maxBody(), &req) {
 		return
 	}
-	credential, err := s.Providers.CompleteOAuth(r.Context(), r.PathValue("id"), req.SessionID, req.Code)
+	credential, err := s.Providers.CompleteOAuth(r.Context(), r.PathValue("id"), req.SessionID, req.Code, req.Label)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	s.reloadModels(r.Context())
-	writeJSON(w, http.StatusCreated, credential)
+	writeJSON(w, http.StatusOK, credential)
+}
+
+// handleUpdateCredential changes the operator-visible metadata of one account:
+// its note, its place in the rotation, or whether it is used at all.
+func (s *Server) handleUpdateCredential(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	var req updateCredentialRequest
+	if !decode(w, r, s.maxBody(), &req) {
+		return
+	}
+	updated, err := s.Providers.UpdateCredential(r.Context(), r.PathValue("id"), provider.CredentialPatch{
+		Label:    req.Label,
+		Account:  req.Account,
+		Priority: req.Priority,
+		Disabled: req.Disabled,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.reloadModels(r.Context())
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// handleResetCredential clears cooldown/exhausted state after a top-up or a
+// re-authorization done elsewhere.
+func (s *Server) handleResetCredential(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	updated, err := s.Providers.ResetCredential(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.reloadModels(r.Context())
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// handleImportLocal adopts a CLI sign-in that already exists on this host.
+func (s *Server) handleImportLocal(w http.ResponseWriter, r *http.Request, _ Identity) {
+	if s.providersUnavailable(w) {
+		return
+	}
+	var req importRequest
+	if !decode(w, r, s.maxBody(), &req) {
+		return
+	}
+	result, err := s.Providers.ImportLocal(r.Context(),
+		r.PathValue("id"), provider.ImportSource(strings.ToLower(strings.TrimSpace(req.Source))),
+		req.Entry, req.Label)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.reloadModels(r.Context())
+	writeJSON(w, http.StatusOK, result)
 }

@@ -146,3 +146,59 @@ func TestListCredentialsFilter(t *testing.T) {
 		t.Fatalf("p1 = %+v", p1)
 	}
 }
+
+func TestUpdateCredentialHealthPreservesSecret(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openProviderStore(t)
+	if err := s.SaveCredential(ctx, provider.Credential{
+		ID: "cred_1", ProviderID: "p1", Label: "primary", Kind: provider.CredentialOAuth,
+		Status: provider.StatusOK, Masked: "…ijkl", HasSecret: true,
+		SecretCiphertext: "sealed-blob", Remaining: 90, CreatedAt: 100, UpdatedAt: 100,
+	}); err != nil {
+		t.Fatalf("SaveCredential: %v", err)
+	}
+	if err := s.UpdateCredentialHealth(ctx, provider.CredentialHealth{
+		ID: "cred_1", Status: provider.StatusExhausted, ResetsAt: 500,
+		LastUsedAt: 200, LastError: "quota",
+	}); err != nil {
+		t.Fatalf("UpdateCredentialHealth: %v", err)
+	}
+	list, err := s.ListCredentials(ctx, "p1")
+	if err != nil {
+		t.Fatalf("ListCredentials: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("credentials = %d", len(list))
+	}
+	got := list[0]
+	if got.SecretCiphertext != "sealed-blob" {
+		t.Fatalf("health write clobbered the secret: %q", got.SecretCiphertext)
+	}
+	if got.Status != provider.StatusExhausted || got.ResetsAt != 500 || got.Remaining != 0 || got.LastError != "quota" {
+		t.Fatalf("health = %+v", got)
+	}
+}
+
+func TestProviderOAuthConfigRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openProviderStore(t)
+	if err := s.SaveProvider(ctx, provider.Provider{
+		ID: "wb", Kind: provider.KindOpenAI, BaseURL: "https://copilot.tencent.com/v2",
+		Channel: "workbuddy", Enabled: true,
+		OAuth: &provider.OAuthConfig{
+			ClientID: "cid", AuthorizeURL: "https://login.example.com/a",
+			TokenURL: "https://login.example.com/t", RedirectURI: "https://login.example.com/cb",
+			Scopes: []string{"openid"}, TokenStyle: "json",
+		},
+		CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("SaveProvider: %v", err)
+	}
+	got, err := s.GetProvider(ctx, "wb")
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if got.OAuth == nil || got.OAuth.ClientID != "cid" || len(got.OAuth.Scopes) != 1 {
+		t.Fatalf("oauth = %+v", got.OAuth)
+	}
+}

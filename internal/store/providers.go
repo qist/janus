@@ -15,11 +15,13 @@ var _ provider.Store = (*Store)(nil)
 
 // ProviderModel is the persisted upstream endpoint.
 type ProviderModel struct {
-	ID        string `gorm:"primaryKey;size:64"`
-	Name      string `gorm:"size:128"`
-	Kind      string `gorm:"size:16"`
-	BaseURL   string `gorm:"size:512"`
-	Channel   string `gorm:"size:64"`
+	ID      string `gorm:"primaryKey;size:64"`
+	Name    string `gorm:"size:128"`
+	Kind    string `gorm:"size:16"`
+	BaseURL string `gorm:"size:512"`
+	Channel string `gorm:"size:64"`
+	// OAuthJSON is the operator-supplied public-client flow, opaque here.
+	OAuthJSON []byte `gorm:"column:oauth_json;type:blob"`
 	Enabled   bool   `gorm:"index"`
 	CreatedAt int64
 	UpdatedAt int64
@@ -33,14 +35,23 @@ type ProviderCredentialModel struct {
 	ID         string `gorm:"primaryKey;size:64"`
 	ProviderID string `gorm:"index;size:64"`
 	Label      string `gorm:"size:128"`
+	Account    string `gorm:"size:191"`
+	Plan       string `gorm:"size:32"`
 	Kind       string `gorm:"size:16"`
 	Status     string `gorm:"index;size:16"`
 	Priority   int    `gorm:"index"`
+	Disabled   bool   `gorm:"index"`
 	Masked     string `gorm:"size:32"`
 	Secret     string `gorm:"type:blob"`
 	Remaining  int64
 	Total      int64
 	ExpiresAt  int64
+	// Health is persisted so a restart does not resurrect an exhausted or
+	// rate-limited account.
+	LastUsedAt    int64
+	CooldownUntil int64
+	ResetsAt      int64
+	LastError     string `gorm:"size:512"`
 	// QuotaJSON is the last vendor allowance snapshot, opaque to the store.
 	QuotaJSON []byte `gorm:"type:blob"`
 	CreatedAt int64
@@ -66,12 +77,21 @@ func (ModelRouteModel) TableName() string { return "model_routes" }
 
 // SaveProvider upserts a provider.
 func (s *Store) SaveProvider(ctx context.Context, p provider.Provider) error {
+	var oauthJSON []byte
+	if p.OAuth != nil {
+		encoded, err := json.Marshal(p.OAuth)
+		if err != nil {
+			return fmt.Errorf("encode provider oauth: %w", err)
+		}
+		oauthJSON = encoded
+	}
 	m := ProviderModel{
 		ID:        p.ID,
 		Name:      p.Name,
 		Kind:      string(p.Kind),
 		BaseURL:   p.BaseURL,
 		Channel:   p.Channel,
+		OAuthJSON: oauthJSON,
 		Enabled:   p.Enabled,
 		CreatedAt: p.CreatedAt,
 		UpdatedAt: p.UpdatedAt,
@@ -131,20 +151,27 @@ func (s *Store) SaveCredential(ctx context.Context, c provider.Credential) error
 		quotaJSON = encoded
 	}
 	m := ProviderCredentialModel{
-		ID:         c.ID,
-		ProviderID: c.ProviderID,
-		Label:      c.Label,
-		Kind:       string(c.Kind),
-		Status:     string(c.Status),
-		Priority:   c.Priority,
-		Masked:     c.Masked,
-		Secret:     c.SecretCiphertext,
-		Remaining:  c.Remaining,
-		Total:      c.Total,
-		ExpiresAt:  c.ExpiresAt,
-		QuotaJSON:  quotaJSON,
-		CreatedAt:  c.CreatedAt,
-		UpdatedAt:  c.UpdatedAt,
+		ID:            c.ID,
+		ProviderID:    c.ProviderID,
+		Label:         c.Label,
+		Account:       c.Account,
+		Plan:          c.Plan,
+		Kind:          string(c.Kind),
+		Status:        string(c.Status),
+		Priority:      c.Priority,
+		Disabled:      c.Disabled,
+		Masked:        c.Masked,
+		Secret:        c.SecretCiphertext,
+		Remaining:     c.Remaining,
+		Total:         c.Total,
+		ExpiresAt:     c.ExpiresAt,
+		LastUsedAt:    c.LastUsedAt,
+		CooldownUntil: c.CooldownUntil,
+		ResetsAt:      c.ResetsAt,
+		LastError:     c.LastError,
+		QuotaJSON:     quotaJSON,
+		CreatedAt:     c.CreatedAt,
+		UpdatedAt:     c.UpdatedAt,
 	}
 	if err := s.DB.WithContext(ctx).Save(&m).Error; err != nil {
 		return fmt.Errorf("save credential %q: %w", c.ID, err)
@@ -169,14 +196,21 @@ func (s *Store) ListCredentials(ctx context.Context, providerID string) ([]provi
 			ID:               m.ID,
 			ProviderID:       m.ProviderID,
 			Label:            m.Label,
+			Account:          m.Account,
+			Plan:             m.Plan,
 			Kind:             provider.CredentialKind(m.Kind),
 			Status:           provider.Status(m.Status),
 			Priority:         m.Priority,
+			Disabled:         m.Disabled,
 			Masked:           m.Masked,
 			HasSecret:        m.Secret != "",
 			Remaining:        m.Remaining,
 			Total:            m.Total,
 			ExpiresAt:        m.ExpiresAt,
+			LastUsedAt:       m.LastUsedAt,
+			CooldownUntil:    m.CooldownUntil,
+			ResetsAt:         m.ResetsAt,
+			LastError:        m.LastError,
 			CreatedAt:        m.CreatedAt,
 			UpdatedAt:        m.UpdatedAt,
 			SecretCiphertext: m.Secret,
@@ -191,6 +225,33 @@ func (s *Store) ListCredentials(ctx context.Context, providerID string) ([]provi
 		out = append(out, credential)
 	}
 	return out, nil
+}
+
+// UpdateCredentialHealth writes only the health columns, leaving the sealed
+// secret untouched.
+func (s *Store) UpdateCredentialHealth(ctx context.Context, health provider.CredentialHealth) error {
+	updates := map[string]any{
+		"status":         string(health.Status),
+		"cooldown_until": health.CooldownUntil,
+		"resets_at":      health.ResetsAt,
+		"last_used_at":   health.LastUsedAt,
+		"last_error":     health.LastError,
+		"updated_at":     health.LastUsedAt,
+	}
+	if health.Status == provider.StatusExhausted {
+		updates["remaining"] = 0
+	}
+	result := s.DB.WithContext(ctx).
+		Model(&ProviderCredentialModel{}).
+		Where("id = ?", health.ID).
+		Updates(updates)
+	if result.Error != nil {
+		return fmt.Errorf("update credential health %q: %w", health.ID, result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return provider.ErrCredentialNotFound
+	}
+	return nil
 }
 
 // DeleteCredential removes one credential row.
@@ -269,7 +330,7 @@ func (s *Store) DeleteRoute(ctx context.Context, id string) error {
 }
 
 func providerFromModel(m ProviderModel) provider.Provider {
-	return provider.Provider{
+	out := provider.Provider{
 		ID:        m.ID,
 		Name:      m.Name,
 		Kind:      provider.Kind(m.Kind),
@@ -279,4 +340,11 @@ func providerFromModel(m ProviderModel) provider.Provider {
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}
+	if len(m.OAuthJSON) > 0 {
+		var oauth provider.OAuthConfig
+		if err := json.Unmarshal(m.OAuthJSON, &oauth); err == nil {
+			out.OAuth = &oauth
+		}
+	}
+	return out
 }

@@ -146,11 +146,39 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A conversation keeps the same account while it is healthy: switching
+	// costs a cold prompt cache. Clients that do not send an id get the plain
+	// priority/health selection.
+	affinity := sessionAffinity(r, payload)
+	if affinity != "" {
+		r = r.WithContext(gateway.WithAffinity(r.Context(), affinity))
+	}
+
 	if stream {
 		s.stream(w, r, identity, client, model, rewritten)
 		return
 	}
 	s.forward(w, r, identity, client, model, rewritten)
+}
+
+// sessionAffinity extracts the identity a coding agent already sends. Header
+// names come from the agents janus serves (Claude Code, Codex, WorkBuddy,
+// OpenCode); prompt_cache_key is OpenAI's own cache hint.
+func sessionAffinity(r *http.Request, payload map[string]any) string {
+	for _, name := range []string{
+		"X-Session-Affinity",
+		"X-Session-Id",
+		"X-Conversation-Id",
+		"X-Magpie-Session",
+	} {
+		if value := strings.TrimSpace(r.Header.Get(name)); value != "" {
+			return value
+		}
+	}
+	if value, ok := payload["prompt_cache_key"].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
 
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, id auth.Identity, client *gateway.Client, exposed string, body []byte) {

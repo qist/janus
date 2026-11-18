@@ -56,7 +56,7 @@ func TestOAuthStartAndComplete(t *testing.T) {
 
 	addProvider(t, svc, "https://api.example.com/v1")
 
-	start, err := svc.StartOAuth(ctx, "p1")
+	start, err := svc.StartOAuth(ctx, "p1", "")
 	if err != nil {
 		t.Fatalf("StartOAuth: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestOAuthStartAndComplete(t *testing.T) {
 		t.Fatal("auth url has no state")
 	}
 
-	credential, err := svc.CompleteOAuth(ctx, "p1", start.SessionID, "the-code#"+state)
+	credential, err := svc.CompleteOAuth(ctx, "p1", start.SessionID, "the-code#"+state, "")
 	if err != nil {
 		t.Fatalf("CompleteOAuth: %v", err)
 	}
@@ -113,16 +113,16 @@ func TestOAuthRejectsBadStateAndReusedSession(t *testing.T) {
 	withOAuth(t, svc, srv.URL)
 	addProvider(t, svc, "https://api.example.com/v1")
 
-	start, err := svc.StartOAuth(ctx, "p1")
+	start, err := svc.StartOAuth(ctx, "p1", "")
 	if err != nil {
 		t.Fatalf("StartOAuth: %v", err)
 	}
-	if _, err := svc.CompleteOAuth(ctx, "p1", start.SessionID, "code#wrong-state"); !errors.Is(err, ErrOAuthState) {
+	if _, err := svc.CompleteOAuth(ctx, "p1", start.SessionID, "code#wrong-state", ""); !errors.Is(err, ErrOAuthState) {
 		t.Fatalf("state mismatch = %v", err)
 	}
 
 	// The session is one-shot even when the state was wrong.
-	if _, err := svc.CompleteOAuth(ctx, "p1", start.SessionID, "code"); !errors.Is(err, ErrOAuthSession) {
+	if _, err := svc.CompleteOAuth(ctx, "p1", start.SessionID, "code", ""); !errors.Is(err, ErrOAuthSession) {
 		t.Fatalf("reused session = %v", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestOAuthUnsupportedKind(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
-	if _, err := svc.StartOAuth(ctx, "custom"); !errors.Is(err, ErrOAuthUnsupported) {
+	if _, err := svc.StartOAuth(ctx, "custom", ""); !errors.Is(err, ErrOAuthUnsupported) {
 		t.Fatalf("StartOAuth = %v, want ErrOAuthUnsupported", err)
 	}
 }
@@ -147,7 +147,7 @@ func TestOAuthSessionUnknown(t *testing.T) {
 	withOAuth(t, svc, "https://example.com/token")
 	addProvider(t, svc, "https://api.example.com/v1")
 
-	if _, err := svc.CompleteOAuth(context.Background(), "p1", "oauth_missing", "code"); !errors.Is(err, ErrOAuthSession) {
+	if _, err := svc.CompleteOAuth(context.Background(), "p1", "oauth_missing", "code", ""); !errors.Is(err, ErrOAuthSession) {
 		t.Fatalf("err = %v, want ErrOAuthSession", err)
 	}
 }
@@ -161,7 +161,7 @@ func TestOAuthRefreshBeforeUse(t *testing.T) {
 
 	addProvider(t, svc, "https://api.example.com/v1")
 	// Seed an already-expired token set, as if it had been stored days ago.
-	if _, err := svc.storeTokens(ctx, "p1", "oauth", oauth.TokenSet{
+	if _, err := svc.storeTokens(ctx, "p1", "oauth", "", "", oauth.TokenSet{
 		AccessToken: "at-stale", RefreshToken: "rt-1", ExpiresAt: 1,
 	}); err != nil {
 		t.Fatalf("storeTokens: %v", err)

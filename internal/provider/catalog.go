@@ -54,6 +54,18 @@ var channelCatalog = []Channel{
 		Note:    "OAuth token needs the anthropic-beta oauth header.",
 	},
 	{
+		ID: "workbuddy", Name: "WorkBuddy / CodeBuddy (Tencent plan)", Category: ChannelSubscription,
+		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"oauth"},
+		BaseURL: "https://copilot.tencent.com/v2",
+		Note:    "Tencent CodeBuddy plan. Uses X-User-Id style headers and a vendor-specific refresh endpoint; import an existing login or configure a custom OAuth flow.",
+	},
+	{
+		ID: "workbuddy-ai", Name: "WorkBuddy AI (international)", Category: ChannelSubscription,
+		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"oauth"},
+		BaseURL: "https://www.workbuddy.ai/v2",
+		Note:    "Same shape as the China build, separate account store.",
+	},
+	{
 		ID: "github-copilot", Name: "GitHub Copilot", Category: ChannelSubscription,
 		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"device_code"},
 		BaseURL: "https://api.githubcopilot.com",
@@ -149,6 +161,12 @@ var channelCatalog = []Channel{
 		ID: "baidu-qianfan", Name: "Baidu Qianfan", Category: ChannelVendor,
 		Kind: KindOpenAI, Protocols: []string{"chat"}, Auth: []string{"api_key"},
 		BaseURL: "https://qianfan.baidubce.com/v2",
+	},
+	{
+		ID: "longcat", Name: "Meituan LongCat", Category: ChannelVendor,
+		Kind: KindOpenAI, Protocols: []string{"chat", "anthropic"}, Auth: []string{"api_key"},
+		BaseURL:     "https://api.longcat.chat/openai",
+		AltBaseURLs: []string{"https://api.longcat.chat/anthropic"},
 	},
 	{
 		ID: "siliconflow", Name: "SiliconFlow", Category: ChannelRelay,
@@ -278,8 +296,9 @@ var channelCatalog = []Channel{
 	},
 	{
 		ID: "opencode-zen", Name: "OpenCode Zen", Category: ChannelRelay,
-		Kind: KindOpenAI, Protocols: []string{"chat", "anthropic"}, Auth: []string{"api_key"},
+		Kind: KindOpenAI, Protocols: []string{"chat", "anthropic"}, Auth: []string{"api_key", "oauth"},
 		BaseURL: "https://opencode.ai/zen/v1",
+		Note:    "OpenCode keeps provider sign-ins in auth.json; import them with source=opencode.",
 	},
 	{
 		ID: "typesafe", Name: "TypeSafe", Category: ChannelRelay,

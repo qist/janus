@@ -377,7 +377,7 @@ func TestOAuthEndpoints(t *testing.T) {
 	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p1/oauth/complete", adminKey, map[string]any{
 		"session_id": start.SessionID,
 		"code":       "oauth-code#" + wantState,
-	}, http.StatusCreated)
+	}, http.StatusOK)
 	var credential provider.Credential
 	decodeBody(t, resp, &credential)
 	if credential.Kind != provider.CredentialOAuth || credential.Masked == "" {
@@ -402,6 +402,68 @@ func TestOAuthEndpoints(t *testing.T) {
 	// Starting a sign-in is admin work.
 	resp = e.expect(t, http.MethodPost, "/api/v1/providers/p1/oauth/start", readerKey, nil, http.StatusForbidden)
 	if code := errCode(t, resp); code != "forbidden" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestCredentialPatchAndReset(t *testing.T) {
+	e := newTestEnv(t)
+	svc := e.enableProviders(t)
+	ctx := context.Background()
+
+	if _, err := svc.CreateProvider(ctx, provider.Provider{
+		ID: "p1", Kind: provider.KindOpenAI, BaseURL: "https://api.example.com/v1",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	credential, err := svc.CreateCredential(ctx, "p1", "first", provider.CredentialAPIKey, "sk-live-1234")
+	if err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	resp := e.expect(t, http.MethodPatch, "/api/v1/credentials/"+credential.ID, adminKey, map[string]any{
+		"label":    "work account",
+		"priority": 3,
+		"disabled": true,
+	}, http.StatusOK)
+	var updated provider.Credential
+	decodeBody(t, resp, &updated)
+	if updated.Label != "work account" || updated.Priority != 3 || !updated.Disabled {
+		t.Fatalf("updated = %+v", updated)
+	}
+
+	if err := svc.RecordCredentialOutcome(ctx, credential.ID, provider.StatusRateLimited, 1_700_000_060, 0, "429"); err != nil {
+		t.Fatalf("RecordCredentialOutcome: %v", err)
+	}
+	resp = e.expect(t, http.MethodPost, "/api/v1/credentials/"+credential.ID+"/reset", adminKey, nil, http.StatusOK)
+	var reset provider.Credential
+	decodeBody(t, resp, &reset)
+	if reset.Status != provider.StatusUnknown || reset.Disabled {
+		t.Fatalf("reset = %+v", reset)
+	}
+
+	resp = e.expect(t, http.MethodPatch, "/api/v1/credentials/missing", adminKey, map[string]any{
+		"label": "x",
+	}, http.StatusNotFound)
+	if code := errCode(t, resp); code != "credential_not_found" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestProviderCustomOAuthValidation(t *testing.T) {
+	e := newTestEnv(t)
+	e.enableProviders(t)
+
+	resp := e.expect(t, http.MethodPost, "/api/v1/providers", adminKey, createProviderRequest{
+		ID: "p1", Kind: provider.KindOpenAI, BaseURL: "https://api.example.com/v1",
+		OAuth: &provider.OAuthConfig{
+			ClientID:     "client",
+			AuthorizeURL: "https://login.example.com/authorize",
+			TokenURL:     "not-a-url",
+			RedirectURI:  "https://login.example.com/callback",
+		},
+	}, http.StatusUnprocessableEntity)
+	if code := errCode(t, resp); code != "invalid_request" {
 		t.Fatalf("code = %q", code)
 	}
 }

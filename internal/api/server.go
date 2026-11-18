@@ -99,6 +99,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/quotas", s.protect(ScopeRead, s.handleListQuotas))
 	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/start", s.protect(ScopeAdmin, s.handleStartProviderOAuth))
 	mux.HandleFunc("POST /api/v1/providers/{id}/oauth/complete", s.protect(ScopeAdmin, s.handleCompleteProviderOAuth))
+	mux.HandleFunc("POST /api/v1/providers/{id}/import", s.protect(ScopeAdmin, s.handleImportLocal))
+	mux.HandleFunc("PATCH /api/v1/credentials/{id}", s.protect(ScopeAdmin, s.handleUpdateCredential))
+	mux.HandleFunc("POST /api/v1/credentials/{id}/reset", s.protect(ScopeAdmin, s.handleResetCredential))
 	mux.HandleFunc("DELETE /api/v1/credentials/{id}", s.protect(ScopeAdmin, s.handleDeleteCredential))
 	mux.HandleFunc("GET /api/v1/model-routes", s.protect(ScopeRead, s.handleListRoutes))
 	mux.HandleFunc("POST /api/v1/model-routes", s.protect(ScopeAdmin, s.handleCreateRoute))
@@ -739,6 +742,8 @@ func classify(err error) (int, string) {
 		return http.StatusNotFound, "goal_not_found"
 	case errors.Is(err, provider.ErrNotFound):
 		return http.StatusNotFound, "provider_not_found"
+	case errors.Is(err, provider.ErrCredentialNotFound):
+		return http.StatusNotFound, "credential_not_found"
 	case errors.Is(err, provider.ErrConflict):
 		return http.StatusConflict, "already_exists"
 	case errors.Is(err, provider.ErrInUse):

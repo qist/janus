@@ -3,6 +3,7 @@ import type {
   Channel,
   Credential,
   CredentialKind,
+  OAuthConfig,
   OAuthStart,
   ProbeResult,
   Provider,
@@ -25,6 +26,7 @@ export type CreateProviderBody = {
   kind: ProviderKind;
   base_url: string;
   channel?: string;
+  oauth?: OAuthConfig;
 };
 
 export function createProvider(body: CreateProviderBody) {
@@ -35,6 +37,8 @@ export type ProviderPatch = {
   name?: string;
   base_url?: string;
   enabled?: boolean;
+  oauth?: OAuthConfig;
+  clear_oauth?: boolean;
 };
 
 export function updateProvider(id: string, patch: ProviderPatch) {
@@ -71,6 +75,47 @@ export function deleteCredential(id: string) {
   return api<void>(`/api/v1/credentials/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
+export type CredentialPatch = {
+  label?: string;
+  account?: string;
+  priority?: number;
+  disabled?: boolean;
+};
+
+export function updateCredential(id: string, patch: CredentialPatch) {
+  return api<Credential>(`/api/v1/credentials/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: patch,
+  });
+}
+
+/** Clears cooldown/exhausted state after a top-up or an external re-auth. */
+export function resetCredential(id: string) {
+  return api<Credential>(`/api/v1/credentials/${encodeURIComponent(id)}/reset`, {
+    method: "POST",
+  });
+}
+
+export type ImportSource = "codex" | "claude" | "opencode";
+
+export type ImportResult = {
+  source: string;
+  path: string;
+  imported: Credential[];
+  skipped?: string[];
+};
+
+/** Adopts a CLI sign-in that already exists on the server host. */
+export function importLocal(
+  providerID: string,
+  body: { source: ImportSource; entry?: string; label?: string }
+) {
+  return api<ImportResult>(
+    `/api/v1/providers/${encodeURIComponent(providerID)}/import`,
+    { method: "POST", body }
+  );
+}
+
 export function listRoutes() {
   return api<{ routes: Route[] }>("/api/v1/model-routes");
 }
@@ -98,18 +143,26 @@ export function probeProvider(id: string) {
   });
 }
 
-/** Starts a PKCE sign-in and returns the vendor page to open. */
-export function startOAuth(providerID: string) {
-  return api<OAuthStart>(`/api/v1/providers/${encodeURIComponent(providerID)}/oauth/start`, {
-    method: "POST",
-  });
+/** Starts a PKCE sign-in and returns the vendor page to open. Passing a
+ * credential id re-authorizes that account instead of adding a new one. */
+export function startOAuth(providerID: string, credentialID?: string) {
+  const suffix = credentialID ? `?credential_id=${encodeURIComponent(credentialID)}` : "";
+  return api<OAuthStart>(
+    `/api/v1/providers/${encodeURIComponent(providerID)}/oauth/start${suffix}`,
+    { method: "POST" }
+  );
 }
 
 /** Finishes a sign-in with the code (or full callback URL) the vendor showed. */
-export function completeOAuth(providerID: string, sessionID: string, code: string) {
+export function completeOAuth(
+  providerID: string,
+  sessionID: string,
+  code: string,
+  label?: string
+) {
   return api<Credential>(`/api/v1/providers/${encodeURIComponent(providerID)}/oauth/complete`, {
     method: "POST",
-    body: { session_id: sessionID, code },
+    body: { session_id: sessionID, code, label },
   });
 }
 

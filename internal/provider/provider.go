@@ -89,10 +89,59 @@ type Provider struct {
 	BaseURL string `json:"base_url"`
 	// Channel is the catalogue id this provider was modelled on. It is
 	// informational: routing only needs Kind and BaseURL.
-	Channel   string `json:"channel,omitempty"`
-	Enabled   bool   `json:"enabled"`
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
+	Channel string `json:"channel,omitempty"`
+	// OAuth, when set, overrides the built-in flow. It lets an operator bring
+	// their own public client (PKCE) for a vendor janus has no preset for,
+	// instead of janus shipping somebody else's client id.
+	OAuth     *OAuthConfig `json:"oauth,omitempty"`
+	Enabled   bool         `json:"enabled"`
+	CreatedAt int64        `json:"created_at"`
+	UpdatedAt int64        `json:"updated_at"`
+}
+
+// OAuthConfig is a public-client authorization-code flow. No client secret is
+// accepted: a confidential client would need the secret sealed server-side,
+// which is a separate design. PKCE is mandatory.
+type OAuthConfig struct {
+	ClientID     string   `json:"client_id"`
+	AuthorizeURL string   `json:"authorize_url"`
+	TokenURL     string   `json:"token_url"`
+	RedirectURI  string   `json:"redirect_uri"`
+	Scopes       []string `json:"scopes,omitempty"`
+	// ExtraAuthParams are appended to the authorize URL (e.g. audience).
+	ExtraAuthParams map[string]string `json:"extra_auth_params,omitempty"`
+	// TokenStyle is "form" (default) or "json".
+	TokenStyle string `json:"token_style,omitempty"`
+	// VerifierEncoding is "base64url" (default, RFC 7636) or "hex".
+	VerifierEncoding string `json:"verifier_encoding,omitempty"`
+	VerifierBytes    int    `json:"verifier_bytes,omitempty"`
+}
+
+// Validate checks that a custom flow has the endpoints it needs.
+func (c OAuthConfig) Validate() error {
+	if strings.TrimSpace(c.ClientID) == "" {
+		return fmt.Errorf("%w: oauth.client_id required", ErrInvalidInput)
+	}
+	for name, raw := range map[string]string{
+		"oauth.authorize_url": c.AuthorizeURL,
+		"oauth.token_url":     c.TokenURL,
+		"oauth.redirect_uri":  c.RedirectURI,
+	} {
+		if err := validateBaseURL(raw); err != nil {
+			return fmt.Errorf("%w: %s", ErrInvalidInput, name)
+		}
+	}
+	switch c.TokenStyle {
+	case "", "form", "json":
+	default:
+		return fmt.Errorf("%w: oauth.token_style must be form or json", ErrInvalidInput)
+	}
+	switch c.VerifierEncoding {
+	case "", "hex", "base64url":
+	default:
+		return fmt.Errorf("%w: oauth.verifier_encoding must be hex or base64url", ErrInvalidInput)
+	}
+	return nil
 }
 
 // Credential is one key or OAuth grant. SecretCiphertext never leaves the
@@ -110,10 +159,24 @@ type Credential struct {
 	// Priority orders credentials for probing and for pool selection; lower
 	// comes first. It is assigned at creation so the order cannot drift with
 	// random ids.
-	Priority  int   `json:"priority"`
+	Priority int `json:"priority"`
+	// Account is a human label for the signed-in identity (email, plan or an
+	// operator note). One provider may hold several accounts; this is what the
+	// console shows to tell them apart.
+	Account string `json:"account,omitempty"`
+	// Plan is the subscription tier the vendor reported, e.g. "plus".
+	Plan string `json:"plan,omitempty"`
+	// Disabled takes a credential out of rotation without deleting it.
+	Disabled  bool  `json:"disabled,omitempty"`
 	Remaining int64 `json:"remaining,omitempty"`
 	Total     int64 `json:"total,omitempty"`
 	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// Health is what the pool learned and persisted, so a restart does not
+	// resurrect an exhausted account.
+	LastUsedAt    int64  `json:"last_used_at,omitempty"`
+	CooldownUntil int64  `json:"cooldown_until,omitempty"`
+	ResetsAt      int64  `json:"resets_at,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
 	// Quota is the last allowance snapshot read from the vendor; nil means it
 	// has never been read. A failed read keeps the previous snapshot.
 	Quota     *Quota `json:"quota,omitempty"`
@@ -138,11 +201,12 @@ type Route struct {
 
 // Errors returned by the service; the API maps them to stable codes.
 var (
-	ErrNotFound     = errors.New("provider resource not found")
-	ErrConflict     = errors.New("provider resource already exists")
-	ErrInUse        = errors.New("provider still has credentials or routes")
-	ErrSecretBox    = errors.New("secret box is not configured")
-	ErrInvalidInput = errors.New("invalid provider input")
+	ErrNotFound           = errors.New("provider resource not found")
+	ErrCredentialNotFound = errors.New("credential not found")
+	ErrConflict           = errors.New("provider resource already exists")
+	ErrInUse              = errors.New("provider still has credentials or routes")
+	ErrSecretBox          = errors.New("secret box is not configured")
+	ErrInvalidInput       = errors.New("invalid provider input")
 )
 
 // Store persists providers, credentials and routes.
@@ -153,6 +217,9 @@ type Store interface {
 	DeleteProvider(ctx context.Context, id string) error
 
 	SaveCredential(ctx context.Context, c Credential) error
+	// UpdateCredentialHealth writes only the health columns. A full-row save
+	// could overwrite a token refreshed concurrently by another request.
+	UpdateCredentialHealth(ctx context.Context, health CredentialHealth) error
 	// ListCredentials with an empty providerID returns every credential.
 	ListCredentials(ctx context.Context, providerID string) ([]Credential, error)
 	DeleteCredential(ctx context.Context, id string) error
@@ -175,6 +242,9 @@ type Service struct {
 	OAuth *oauth.Registry
 	// oauth holds sign-ins started from the console, in memory only.
 	oauth oauthSessions
+	// credMu serialises credential writes: a token refresh and a health update
+	// can concern the same row.
+	credMu sync.Mutex
 }
 
 // New returns a service. box may be nil only for read-only deployments, in
@@ -201,6 +271,11 @@ func (s *Service) CreateProvider(ctx context.Context, p Provider) (Provider, err
 	if err := validateBaseURL(p.BaseURL); err != nil {
 		return Provider{}, err
 	}
+	if p.OAuth != nil {
+		if err := p.OAuth.Validate(); err != nil {
+			return Provider{}, err
+		}
+	}
 	if p.Name == "" {
 		p.Name = p.ID
 	}
@@ -223,9 +298,11 @@ func (s *Service) CreateProvider(ctx context.Context, p Provider) (Provider, err
 
 // ProviderPatch carries optional updates.
 type ProviderPatch struct {
-	Name    *string
-	BaseURL *string
-	Enabled *bool
+	Name       *string
+	BaseURL    *string
+	Enabled    *bool
+	OAuth      *OAuthConfig
+	ClearOAuth bool
 }
 
 // UpdateProvider applies a patch. Disabling a provider leaves its rows intact.
@@ -250,6 +327,18 @@ func (s *Service) UpdateProvider(ctx context.Context, id string, patch ProviderP
 	}
 	if patch.Enabled != nil {
 		p.Enabled = *patch.Enabled
+	}
+	if patch.OAuth != nil && patch.ClearOAuth {
+		return Provider{}, fmt.Errorf("%w: oauth and clear_oauth are mutually exclusive", ErrInvalidInput)
+	}
+	if patch.ClearOAuth {
+		p.OAuth = nil
+	}
+	if patch.OAuth != nil {
+		if err := patch.OAuth.Validate(); err != nil {
+			return Provider{}, err
+		}
+		p.OAuth = patch.OAuth
 	}
 	p.UpdatedAt = s.now()
 	if err := s.Store.SaveProvider(ctx, p); err != nil {
@@ -337,6 +426,7 @@ func (s *Service) CreateCredential(ctx context.Context, providerID, label string
 		Priority:         priority,
 		ProviderID:       providerID,
 		Label:            strings.TrimSpace(label),
+		Account:          strings.TrimSpace(label),
 		Kind:             kind,
 		Status:           StatusUnknown,
 		Masked:           Mask(secret),
@@ -347,7 +437,7 @@ func (s *Service) CreateCredential(ctx context.Context, providerID, label string
 	}
 	// A coarse id keeps inserts readable while still unique enough for a single
 	// node; multi-node would use a UUID.
-	if err := s.Store.SaveCredential(ctx, credential); err != nil {
+	if err := s.saveCredential(ctx, credential); err != nil {
 		return Credential{}, err
 	}
 	return publicCredential(credential), nil
@@ -510,29 +600,39 @@ func (s *Service) Clients(ctx context.Context) (map[string]*gateway.Client, erro
 		}
 
 		accounts := pool.New(s.now)
-		for index, credential := range byProvider[p.ID] {
-			if credential.Status == StatusInvalid {
+		for _, credential := range byProvider[p.ID] {
+			if credential.Disabled || credential.Status == StatusInvalid {
 				continue
 			}
-			secret, err := s.credentialKey(ctx, string(p.Kind), credential)
+			secret, err := s.credentialKey(ctx, p, credential)
 			if err != nil {
 				return nil, fmt.Errorf("credential %q: %w", credential.ID, err)
 			}
 			account := pool.Account{
-				ID:         credential.ID,
-				ProviderID: p.Name,
-				APIKey:     secret,
-				Models:     []string{route.UpstreamModel},
-				Priority:   index,
-				Total:      credential.Total,
-				Remaining:  credential.Remaining,
+				ID:            credential.ID,
+				ProviderID:    p.ID,
+				APIKey:        secret,
+				Models:        []string{route.UpstreamModel},
+				Priority:      credential.Priority,
+				Status:        pool.Status(credential.Status),
+				Total:         credential.Total,
+				Remaining:     credential.Remaining,
+				CooldownUntil: credential.CooldownUntil,
+				ResetsAt:      credential.ResetsAt,
+				LastUsedAt:    credential.LastUsedAt,
+				LastError:     credential.LastError,
 			}
 			if err := accounts.Add(account); err != nil {
 				return nil, err
 			}
 		}
 		if accounts.Len() > 0 {
-			client.Credentials = credentialSource{accounts: accounts}
+			client.Credentials = &credentialSource{
+				svc:      s,
+				provider: p,
+				accounts: accounts,
+				bindings: make(map[string]string),
+			}
 		}
 
 		out[route.ExposedModel] = client
@@ -543,25 +643,81 @@ func (s *Service) Clients(ctx context.Context) (map[string]*gateway.Client, erro
 	return out, nil
 }
 
-// credentialSource adapts the pool to gateway.CredentialSource.
+// credentialSource adapts the pool to gateway.CredentialSource. It also keeps
+// the conversation→account binding and writes health back to the store, so a
+// restart does not forget which account is cooling down.
 type credentialSource struct {
+	svc      *Service
+	provider Provider
 	accounts *pool.Pool
+
+	mu       sync.Mutex
+	bindings map[string]string
 }
 
-func (c credentialSource) Next(ctx context.Context, provider, model string) (gateway.Credential, error) {
-	account, err := c.accounts.Next(provider, model)
+func (c *credentialSource) Next(ctx context.Context, _, model string) (gateway.Credential, error) {
+	key := gateway.Affinity(ctx)
+	pinned := ""
+	if key != "" {
+		c.mu.Lock()
+		pinned = c.bindings[key]
+		c.mu.Unlock()
+	}
+	account, err := c.accounts.Pick(c.provider.ID, model, pinned, nil)
 	if err != nil {
 		return gateway.Credential{}, err
+	}
+	if key != "" && account.ID != pinned {
+		c.mu.Lock()
+		c.bindings[key] = account.ID
+		c.mu.Unlock()
 	}
 	return gateway.Credential{ID: account.ID, APIKey: account.APIKey}, nil
 }
 
-func (c credentialSource) Report(_ context.Context, credentialID string, status int, body string, retryAfter time.Duration) {
+func (c *credentialSource) Report(ctx context.Context, credentialID string, status int, body string, retryAfter time.Duration) {
 	if status >= 200 && status <= 299 {
 		c.accounts.ReportSuccess(credentialID)
+		c.persist(ctx, credentialID, StatusOK, 0, 0, "")
 		return
 	}
-	c.accounts.ReportFailure(credentialID, pool.ClassifyHTTP(status, body, retryAfter))
+	failure := pool.ClassifyHTTP(status, body, retryAfter)
+	c.accounts.ReportFailure(credentialID, failure)
+	if failure.Kind == pool.FailureClient {
+		// A client error is not the account's fault; leave its state alone.
+		return
+	}
+	now := c.svc.now()
+	cooldownUntil := int64(0)
+	if failure.Cooldown > 0 {
+		cooldownUntil = now + failure.Cooldown
+	}
+	resetsAt := failure.ResetsAt
+	if resetsAt == 0 && failure.Kind == pool.FailureQuota && retryAfter > 0 {
+		resetsAt = now + int64(retryAfter/time.Second)
+	}
+	state := StatusRateLimited
+	switch failure.Kind {
+	case pool.FailureQuota:
+		state = StatusExhausted
+	case pool.FailureInvalid:
+		state = StatusInvalid
+	}
+	c.persist(ctx, credentialID, state, cooldownUntil, resetsAt, failure.Reason)
+}
+
+// persist writes the outcome without holding up the response. Losing one row
+// only means the next request learns the same thing again.
+func (c *credentialSource) persist(ctx context.Context, credentialID string, state Status, cooldownUntil, resetsAt int64, reason string) {
+	go func() {
+		runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := c.svc.RecordCredentialOutcome(runCtx, credentialID, state, cooldownUntil, resetsAt, reason); err != nil {
+			// The credential may have been deleted between the call and the
+			// write; that is not worth failing a request over.
+			_ = err
+		}
+	}()
 }
 
 func (s *Service) now() int64 {
@@ -688,6 +844,26 @@ func (m *MemoryStore) DeleteCredential(_ context.Context, id string) error {
 		return ErrNotFound
 	}
 	delete(m.credentials, id)
+	return nil
+}
+
+func (m *MemoryStore) UpdateCredentialHealth(_ context.Context, health CredentialHealth) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	credential, ok := m.credentials[health.ID]
+	if !ok {
+		return ErrCredentialNotFound
+	}
+	credential.Status = health.Status
+	credential.CooldownUntil = health.CooldownUntil
+	credential.ResetsAt = health.ResetsAt
+	credential.LastUsedAt = health.LastUsedAt
+	credential.LastError = health.LastError
+	credential.UpdatedAt = health.LastUsedAt
+	if health.Status == StatusExhausted {
+		credential.Remaining = 0
+	}
+	m.credentials[health.ID] = credential
 	return nil
 }
 

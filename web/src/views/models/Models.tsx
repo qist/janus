@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, KeyRound, Play, Plus, RefreshCw, Square, Trash2 } from "lucide-react";
+import {
+  Activity,
+  ArrowDown,
+  ArrowUp,
+  Download,
+  KeyRound,
+  Play,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { getMe } from "@/api/account";
 import { listModels } from "@/api/insight";
 import {
@@ -10,13 +22,16 @@ import {
   deleteCredential,
   deleteProvider,
   deleteRoute,
+  importLocal,
   listChannels,
   listCredentials,
   listProviders,
   listRoutes,
   probeProvider,
   refreshQuota,
+  resetCredential,
   startOAuth,
+  updateCredential,
   updateProvider,
 } from "@/api/providers";
 import type {
@@ -24,12 +39,14 @@ import type {
   Credential,
   Me,
   ModelInfo,
+  OAuthConfig,
   ProbeResult,
   Provider,
   ProviderKind,
   Quota,
   Route,
 } from "@/api/types";
+import type { ImportSource } from "@/api/providers";
 import { useI18n } from "@/i18n";
 import { ApiError } from "@/lib/api";
 import {
@@ -110,8 +127,19 @@ export default function Models() {
   const [unavailable, setUnavailable] = useState<string | null>(null);
   const [probes, setProbes] = useState<Record<string, ProbeResult>>({});
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [oauth, setOauth] = useState<{ providerID: string; sessionID: string; authURL: string } | null>(null);
+  const [oauth, setOauth] = useState<{
+    providerID: string;
+    sessionID: string;
+    authURL: string;
+    credentialID?: string;
+  } | null>(null);
   const [oauthCode, setOauthCode] = useState("");
+  const [oauthLabel, setOauthLabel] = useState("");
+  const [importForm, setImportForm] = useState({
+    source: "codex" as ImportSource,
+    entry: "",
+    label: "",
+  });
   const [busy, setBusy] = useState<string | null>(null);
 
   const [providerForm, setProviderForm] = useState({
@@ -120,6 +148,7 @@ export default function Models() {
     kind: "openai" as ProviderKind,
     base_url: "",
     channel: "",
+    oauthJson: "",
   });
   const [credentialForm, setCredentialForm] = useState({
     provider_id: "",
@@ -137,7 +166,9 @@ export default function Models() {
   const canAdmin = Boolean(me?.scopes.includes("admin"));
   const credentialProvider = providers?.find((p) => p.id === credentialForm.provider_id);
   const supportsOAuth =
-    credentialProvider?.kind === "openai" || credentialProvider?.kind === "anthropic";
+    Boolean(credentialProvider?.oauth) ||
+    credentialProvider?.kind === "openai" ||
+    credentialProvider?.kind === "anthropic";
 
   const load = useCallback(async () => {
     setError(null);
@@ -215,6 +246,15 @@ export default function Models() {
 
   async function onCreateProvider(event: React.FormEvent) {
     event.preventDefault();
+    let oauth: OAuthConfig | undefined;
+    if (providerForm.oauthJson.trim()) {
+      try {
+        oauth = JSON.parse(providerForm.oauthJson);
+      } catch {
+        setError(new Error(t("models.oauthJsonInvalid")));
+        return;
+      }
+    }
     await run("provider:create", async () => {
       await createProvider({
         id: providerForm.id.trim(),
@@ -222,8 +262,16 @@ export default function Models() {
         kind: providerForm.kind,
         base_url: providerForm.base_url.trim(),
         channel: providerForm.channel || undefined,
+        oauth,
       });
-      setProviderForm({ id: "", name: "", kind: "openai", base_url: "", channel: "" });
+      setProviderForm({
+        id: "",
+        name: "",
+        kind: "openai",
+        base_url: "",
+        channel: "",
+        oauthJson: "",
+      });
     });
   }
 
@@ -238,15 +286,21 @@ export default function Models() {
     });
   }
 
-  async function onStartOAuth() {
+  async function onStartOAuth(credentialID?: string) {
     const target = providers?.find((p) => p.id === credentialForm.provider_id);
     if (!target) return;
     setBusy("oauth:start");
     setError(null);
     try {
-      const start = await startOAuth(target.id);
-      setOauth({ providerID: target.id, sessionID: start.session_id, authURL: start.auth_url });
+      const start = await startOAuth(target.id, credentialID);
+      setOauth({
+        providerID: target.id,
+        sessionID: start.session_id,
+        authURL: start.auth_url,
+        credentialID,
+      });
       setOauthCode("");
+      setOauthLabel("");
       window.open(start.auth_url, "_blank", "noopener,noreferrer");
     } catch (err) {
       setError(err);
@@ -260,15 +314,44 @@ export default function Models() {
     setBusy("oauth:complete");
     setError(null);
     try {
-      await completeOAuth(oauth.providerID, oauth.sessionID, oauthCode.trim());
+      await completeOAuth(
+        oauth.providerID,
+        oauth.sessionID,
+        oauthCode.trim(),
+        oauthLabel.trim() || undefined
+      );
       setOauth(null);
       setOauthCode("");
+      setOauthLabel("");
       await load();
     } catch (err) {
       setError(err);
     } finally {
       setBusy(null);
     }
+  }
+
+  async function onImport() {
+    if (!credentialForm.provider_id) return;
+    await run("import", () =>
+      importLocal(credentialForm.provider_id, {
+        source: importForm.source,
+        entry: importForm.entry.trim() || undefined,
+        label: importForm.label.trim() || undefined,
+      })
+    );
+  }
+
+  // moveCredential swaps priorities with the neighbour so one click is one
+  // stable position, instead of leaving ties for the pool to break.
+  async function moveCredential(list: Credential[], index: number, delta: number) {
+    const other = list[index + delta];
+    const current = list[index];
+    if (!other || !current) return;
+    await run(`credential:${current.id}`, async () => {
+      await updateCredential(current.id, { priority: other.priority });
+      await updateCredential(other.id, { priority: current.priority });
+    });
   }
 
   async function onCreateRoute(event: React.FormEvent) {
@@ -451,6 +534,7 @@ export default function Models() {
                     kind: channel.kind,
                     base_url: channel.base_url || providerForm.base_url,
                     channel: channel.id,
+                    oauthJson: providerForm.oauthJson,
                   });
                 }}
               >
@@ -500,6 +584,19 @@ export default function Models() {
                   setProviderForm({ ...providerForm, base_url: event.target.value })
                 }
               />
+            </Field>
+            <Field label={t("models.oauthConfig")} className="sm:col-span-2 lg:col-span-4">
+              <textarea
+                rows={3}
+                spellCheck={false}
+                placeholder='{"client_id":"...","authorize_url":"https://...","token_url":"https://...","redirect_uri":"https://..."}'
+                className="w-full rounded-lg border bg-transparent px-3 py-2 font-mono text-xs outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                value={providerForm.oauthJson}
+                onChange={(event) =>
+                  setProviderForm({ ...providerForm, oauthJson: event.target.value })
+                }
+              />
+              <p className="mt-1 text-xs text-muted-foreground">{t("models.oauthConfigHint")}</p>
             </Field>
             <div className="sm:col-span-2 lg:col-span-4">
               <Button type="submit" disabled={busy === "provider:create"}>
@@ -552,11 +649,15 @@ export default function Models() {
               <div className="mb-3 rounded-lg border p-3">
                 {!oauth || oauth.providerID !== credentialForm.provider_id ? (
                   <div className="flex flex-wrap items-center justify-between gap-3">
-                    <p className="text-xs text-muted-foreground">{t("models.oauthHint")}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {credentialProvider?.oauth
+                        ? t("models.oauthCustomHint")
+                        : t("models.oauthHint")}
+                    </p>
                     <Button
                       variant="ghost"
                       disabled={busy === "oauth:start"}
-                      onClick={onStartOAuth}
+                      onClick={() => onStartOAuth()}
                     >
                       <KeyRound className="h-4 w-4" />
                       {busy === "oauth:start" ? t("models.oauthStarting") : t("models.oauthLogin")}
@@ -564,13 +665,24 @@ export default function Models() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">{t("models.oauthPasteHint")}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {oauth.credentialID
+                        ? t("models.oauthReauthHint")
+                        : t("models.oauthPasteHint")}
+                    </p>
                     <div className="flex flex-wrap items-end gap-2">
                       <Field label={t("models.oauthCode")} className="min-w-[280px] flex-1">
                         <Input
                           value={oauthCode}
                           placeholder={t("models.oauthCodePlaceholder")}
                           onChange={(event) => setOauthCode(event.target.value)}
+                        />
+                      </Field>
+                      <Field label={t("models.accountLabel")} className="w-48">
+                        <Input
+                          value={oauthLabel}
+                          placeholder={t("models.accountLabelPlaceholder")}
+                          onChange={(event) => setOauthLabel(event.target.value)}
                         />
                       </Field>
                       <Button
@@ -586,6 +698,7 @@ export default function Models() {
                         onClick={() => {
                           setOauth(null);
                           setOauthCode("");
+                          setOauthLabel("");
                         }}
                       >
                         {t("models.oauthCancel")}
@@ -606,6 +719,39 @@ export default function Models() {
               </div>
             ) : null}
 
+            {canAdmin ? (
+              <div className="mb-3 flex flex-wrap items-end gap-2 rounded-lg border border-dashed p-3">
+                <Field label={t("models.importSource")} className="w-40">
+                  <Select
+                    value={importForm.source}
+                    onChange={(event) =>
+                      setImportForm({ ...importForm, source: event.target.value as ImportSource })
+                    }
+                  >
+                    <option value="codex">Codex</option>
+                    <option value="claude">Claude Code</option>
+                    <option value="opencode">OpenCode</option>
+                  </Select>
+                </Field>
+                <Field label={t("models.importEntry")} className="w-44">
+                  <Input
+                    value={importForm.entry}
+                    placeholder={t("models.importEntryPlaceholder")}
+                    onChange={(event) =>
+                      setImportForm({ ...importForm, entry: event.target.value })
+                    }
+                  />
+                </Field>
+                <Button variant="ghost" disabled={busy === "import"} onClick={onImport}>
+                  <Download className="h-4 w-4" />
+                  {busy === "import" ? t("models.importing") : t("models.importLocal")}
+                </Button>
+                <p className="basis-full text-xs text-muted-foreground">
+                  {t("models.importHint")}
+                </p>
+              </div>
+            ) : null}
+
             {(credentials[credentialForm.provider_id] || []).length === 0 ? (
               <Empty text={t("models.credentialEmpty")} />
             ) : (
@@ -613,46 +759,133 @@ export default function Models() {
                 <table className="w-full text-sm">
                   <thead className="text-left text-xs text-muted-foreground">
                     <tr>
-                      <th className="py-2">{t("models.credentialLabel")}</th>
+                      <th className="py-2">{t("models.account")}</th>
                       <th>{t("models.masked")}</th>
                       <th>{t("common.status")}</th>
                       <th>{t("models.quota")}</th>
+                      <th>{t("models.priority")}</th>
                       <th className="text-right">{t("common.none")}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(credentials[credentialForm.provider_id] || []).map((credential) => (
-                      <tr key={credential.id} className="border-t">
-                        <td className="py-2">
-                          <div>{credential.label || credential.id}</div>
-                          <div className="font-mono text-xs text-muted-foreground">
-                            {credential.kind}
-                          </div>
-                        </td>
-                        <td className="font-mono text-xs">{credential.masked || "—"}</td>
-                        <td>
-                          <StatusBadge status={credential.status} />
-                        </td>
-                        <td>
-                          <QuotaCell quota={credential.quota} />
-                        </td>
-                        <td className="py-2 text-right">
-                          <Button
-                            variant="ghost"
-                            disabled={!canAdmin || busy === `credential:${credential.id}`}
-                            onClick={() => {
-                              if (!window.confirm(t("models.deleteCredentialConfirm"))) return;
-                              void run(`credential:${credential.id}`, () =>
-                                deleteCredential(credential.id)
-                              );
-                            }}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            {t("models.delete")}
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
+                    {(credentials[credentialForm.provider_id] || []).map(
+                      (credential, index, list) => (
+                        <tr key={credential.id} className="border-t align-top">
+                          <td className="py-2">
+                            <div className="font-medium">
+                              {credential.label || credential.account || credential.id}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              {credential.account && credential.account !== credential.label
+                                ? credential.account
+                                : null}
+                              {credential.plan ? ` · ${credential.plan}` : ""}
+                              {credential.kind === "oauth" ? " · oauth" : ""}
+                              {credential.disabled ? ` · ${t("models.disabled")}` : ""}
+                            </div>
+                          </td>
+                          <td className="font-mono text-xs">{credential.masked || "—"}</td>
+                          <td>
+                            <StatusBadge status={credential.status} />
+                            {credential.last_error ? (
+                              <div
+                                className="max-w-[180px] truncate text-xs text-muted-foreground"
+                                title={credential.last_error}
+                              >
+                                {credential.last_error}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td>
+                            <QuotaCell quota={credential.quota} />
+                          </td>
+                          <td className="font-mono text-xs">{credential.priority}</td>
+                          <td className="py-2 text-right">
+                            <div className="flex flex-wrap justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                title={t("models.moveUp")}
+                                disabled={!canAdmin || index === 0 || busy === `credential:${credential.id}`}
+                                onClick={() => void moveCredential(list, index, -1)}
+                              >
+                                <ArrowUp className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                title={t("models.moveDown")}
+                                disabled={
+                                  !canAdmin ||
+                                  index === list.length - 1 ||
+                                  busy === `credential:${credential.id}`
+                                }
+                                onClick={() => void moveCredential(list, index, 1)}
+                              >
+                                <ArrowDown className="h-3.5 w-3.5" />
+                              </Button>
+                              {canAdmin && credential.kind === "oauth" && supportsOAuth ? (
+                                <Button
+                                  variant="ghost"
+                                  title={t("models.reauthorize")}
+                                  disabled={busy === `credential:${credential.id}`}
+                                  onClick={() => {
+                                    setCredentialForm({
+                                      ...credentialForm,
+                                      provider_id: credential.provider_id,
+                                    });
+                                    void onStartOAuth(credential.id);
+                                  }}
+                                >
+                                  <KeyRound className="h-3.5 w-3.5" />
+                                </Button>
+                              ) : null}
+                              <Button
+                                variant="ghost"
+                                title={t("models.reset")}
+                                disabled={!canAdmin || busy === `credential:${credential.id}`}
+                                onClick={() =>
+                                  void run(`credential:${credential.id}`, () =>
+                                    resetCredential(credential.id)
+                                  )
+                                }
+                              >
+                                <RotateCcw className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                title={credential.disabled ? t("models.enable") : t("models.disable")}
+                                disabled={!canAdmin || busy === `credential:${credential.id}`}
+                                onClick={() =>
+                                  void run(`credential:${credential.id}`, () =>
+                                    updateCredential(credential.id, {
+                                      disabled: !credential.disabled,
+                                    })
+                                  )
+                                }
+                              >
+                                {credential.disabled ? (
+                                  <Play className="h-3.5 w-3.5" />
+                                ) : (
+                                  <Square className="h-3.5 w-3.5" />
+                                )}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                title={t("models.delete")}
+                                disabled={!canAdmin || busy === `credential:${credential.id}`}
+                                onClick={() => {
+                                  if (!window.confirm(t("models.deleteCredentialConfirm"))) return;
+                                  void run(`credential:${credential.id}`, () =>
+                                    deleteCredential(credential.id)
+                                  );
+                                }}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    )}
                   </tbody>
                 </table>
               </div>

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,14 +36,18 @@ type OAuthSession struct {
 	Verifier   string
 	State      string
 	CreatedAt  int64
+	// TargetCredentialID, when set, means "re-authorize this account" rather
+	// than "add another account".
+	TargetCredentialID string
 }
 
 // OAuthStart is what the console needs to open the vendor's page.
 type OAuthStart struct {
-	SessionID   string `json:"session_id"`
-	AuthURL     string `json:"auth_url"`
-	RedirectURI string `json:"redirect_uri"`
-	ExpiresIn   int64  `json:"expires_in"`
+	SessionID    string `json:"session_id"`
+	AuthURL      string `json:"auth_url"`
+	RedirectURI  string `json:"redirect_uri"`
+	ExpiresIn    int64  `json:"expires_in"`
+	CredentialID string `json:"credential_id,omitempty"`
 }
 
 type oauthSessions struct {
@@ -51,14 +56,27 @@ type oauthSessions struct {
 }
 
 // StartOAuth creates a PKCE session for a provider and returns the vendor URL.
-func (s *Service) StartOAuth(ctx context.Context, providerID string) (OAuthStart, error) {
+// A non-empty credentialID starts a re-authorization of that account.
+func (s *Service) StartOAuth(ctx context.Context, providerID, credentialID string) (OAuthStart, error) {
 	p, err := s.Store.GetProvider(ctx, providerID)
 	if err != nil {
 		return OAuthStart{}, err
 	}
-	cfg, ok := s.oauthRegistry().Get(string(p.Kind))
+	cfg, ok := s.oauthConfig(p)
 	if !ok {
-		return OAuthStart{}, fmt.Errorf("%w: %s", ErrOAuthUnsupported, p.Kind)
+		return OAuthStart{}, fmt.Errorf("%w: %s", ErrOAuthUnsupported, p.ChannelOrKind())
+	}
+	if credentialID != "" {
+		existing, err := s.credential(ctx, credentialID)
+		if err != nil {
+			return OAuthStart{}, err
+		}
+		if existing.ProviderID != p.ID {
+			return OAuthStart{}, fmt.Errorf("%w: credential belongs to another provider", ErrInvalidInput)
+		}
+		if existing.Kind != CredentialOAuth {
+			return OAuthStart{}, fmt.Errorf("%w: only oauth credentials can be re-authorized", ErrInvalidInput)
+		}
 	}
 
 	verifier, err := oauth.NewVerifier(cfg)
@@ -75,12 +93,13 @@ func (s *Service) StartOAuth(ctx context.Context, providerID string) (OAuthStart
 	}
 
 	session := OAuthSession{
-		ID:         newOAuthSessionID(),
-		ProviderID: p.ID,
-		Kind:       string(p.Kind),
-		Verifier:   verifier,
-		State:      state,
-		CreatedAt:  s.now(),
+		ID:                 newOAuthSessionID(),
+		ProviderID:         p.ID,
+		Kind:               cfg.Kind,
+		Verifier:           verifier,
+		State:              state,
+		CreatedAt:          s.now(),
+		TargetCredentialID: strings.TrimSpace(credentialID),
 	}
 
 	s.oauth.mu.Lock()
@@ -97,16 +116,18 @@ func (s *Service) StartOAuth(ctx context.Context, providerID string) (OAuthStart
 	s.oauth.mu.Unlock()
 
 	return OAuthStart{
-		SessionID:   session.ID,
-		AuthURL:     authURL,
-		RedirectURI: cfg.RedirectURI,
-		ExpiresIn:   int64(OAuthSessionTTL / time.Second),
+		SessionID:    session.ID,
+		AuthURL:      authURL,
+		RedirectURI:  cfg.RedirectURI,
+		ExpiresIn:    int64(OAuthSessionTTL / time.Second),
+		CredentialID: session.TargetCredentialID,
 	}, nil
 }
 
 // CompleteOAuth finishes a session with the code (or the whole callback URL)
-// the vendor showed the operator, and stores the tokens as a credential.
-func (s *Service) CompleteOAuth(ctx context.Context, providerID, sessionID, input string) (Credential, error) {
+// the vendor showed the operator. label is an optional operator note; when it
+// is empty the identity from the token decides.
+func (s *Service) CompleteOAuth(ctx context.Context, providerID, sessionID, input, label string) (Credential, error) {
 	session, ok := s.takeSession(sessionID)
 	if !ok || session.ProviderID != providerID {
 		return Credential{}, ErrOAuthSession
@@ -123,7 +144,11 @@ func (s *Service) CompleteOAuth(ctx context.Context, providerID, sessionID, inpu
 		return Credential{}, ErrOAuthState
 	}
 
-	cfg, ok := s.oauthRegistry().Get(session.Kind)
+	p, err := s.Store.GetProvider(ctx, providerID)
+	if err != nil {
+		return Credential{}, err
+	}
+	cfg, ok := s.oauthConfig(p)
 	if !ok {
 		return Credential{}, fmt.Errorf("%w: %s", ErrOAuthUnsupported, session.Kind)
 	}
@@ -135,7 +160,20 @@ func (s *Service) CompleteOAuth(ctx context.Context, providerID, sessionID, inpu
 		return Credential{}, fmt.Errorf("%w: empty access token", oauth.ErrExchange)
 	}
 
-	credential, err := s.storeTokens(ctx, providerID, "oauth", tokens)
+	account, plan := tokenIdentity(tokens)
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = account
+	}
+
+	if session.TargetCredentialID != "" {
+		updated, err := s.replaceTokens(ctx, session.TargetCredentialID, label, account, plan, tokens)
+		if err != nil {
+			return Credential{}, err
+		}
+		return publicCredential(updated), nil
+	}
+	credential, err := s.storeTokens(ctx, providerID, label, account, plan, tokens)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -155,18 +193,11 @@ func (s *Service) takeSession(id string) (OAuthSession, bool) {
 	return session, true
 }
 
-// storeTokens seals a token set and writes it as an oauth credential.
-func (s *Service) storeTokens(ctx context.Context, providerID, label string, tokens oauth.TokenSet) (Credential, error) {
-	if s.Box == nil {
-		return Credential{}, ErrSecretBox
-	}
-	encoded, err := json.Marshal(tokens)
+// storeTokens seals a token set and writes it as a new oauth credential.
+func (s *Service) storeTokens(ctx context.Context, providerID, label, account, plan string, tokens oauth.TokenSet) (Credential, error) {
+	sealed, err := s.sealTokens(tokens)
 	if err != nil {
-		return Credential{}, fmt.Errorf("encode tokens: %w", err)
-	}
-	sealed, err := s.Box.Seal(string(encoded))
-	if err != nil {
-		return Credential{}, fmt.Errorf("seal tokens: %w", err)
+		return Credential{}, err
 	}
 
 	existing, err := s.Store.ListCredentials(ctx, providerID)
@@ -184,27 +215,101 @@ func (s *Service) storeTokens(ctx context.Context, providerID, label string, tok
 	credential := Credential{
 		ID:               newResourceID("cred"),
 		ProviderID:       providerID,
-		Label:            label,
+		Label:            strings.TrimSpace(label),
 		Kind:             CredentialOAuth,
 		Status:           StatusOK,
 		Masked:           Mask(tokens.AccessToken),
 		HasSecret:        true,
 		Priority:         priority,
+		Account:          account,
+		Plan:             plan,
 		ExpiresAt:        tokens.ExpiresAt,
 		SecretCiphertext: sealed,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
-	if err := s.Store.SaveCredential(ctx, credential); err != nil {
+	if err := s.saveCredential(ctx, credential); err != nil {
 		return Credential{}, err
 	}
 	return credential, nil
 }
 
+// replaceTokens rewrites an existing account after a re-authorization. The
+// priority and label the operator set are kept unless a new label is given.
+func (s *Service) replaceTokens(ctx context.Context, id, label, account, plan string, tokens oauth.TokenSet) (Credential, error) {
+	credential, err := s.credential(ctx, id)
+	if err != nil {
+		return Credential{}, err
+	}
+	sealed, err := s.sealTokens(tokens)
+	if err != nil {
+		return Credential{}, err
+	}
+	if strings.TrimSpace(label) != "" {
+		credential.Label = strings.TrimSpace(label)
+	}
+	if account != "" {
+		credential.Account = account
+	}
+	if plan != "" {
+		credential.Plan = plan
+	}
+	credential.SecretCiphertext = sealed
+	credential.Masked = Mask(tokens.AccessToken)
+	credential.ExpiresAt = tokens.ExpiresAt
+	credential.Status = StatusOK
+	credential.Disabled = false
+	credential.CooldownUntil = 0
+	credential.ResetsAt = 0
+	credential.LastError = ""
+	credential.UpdatedAt = s.now()
+	if err := s.saveCredential(ctx, credential); err != nil {
+		return Credential{}, err
+	}
+	return credential, nil
+}
+
+// SaveOAuthTokens stores a token set on an existing credential. Import uses
+// it; re-authorization goes through replaceTokens so a new account is never
+// created by accident.
+func (s *Service) SaveOAuthTokens(ctx context.Context, id, account, plan string, tokens oauth.TokenSet) (Credential, error) {
+	return s.replaceTokens(ctx, id, "", account, plan, tokens)
+}
+
+func (s *Service) sealTokens(tokens oauth.TokenSet) (string, error) {
+	if s.Box == nil {
+		return "", ErrSecretBox
+	}
+	encoded, err := json.Marshal(tokens)
+	if err != nil {
+		return "", fmt.Errorf("encode tokens: %w", err)
+	}
+	sealed, err := s.Box.Seal(string(encoded))
+	if err != nil {
+		return "", fmt.Errorf("seal tokens: %w", err)
+	}
+	return sealed, nil
+}
+
+// CreateOAuthCredential stores an imported token set without a sign-in.
+func (s *Service) CreateOAuthCredential(ctx context.Context, providerID, label, account, plan string, tokens oauth.TokenSet) (Credential, error) {
+	if _, err := s.Store.GetProvider(ctx, providerID); err != nil {
+		return Credential{}, err
+	}
+	if !tokens.Valid() {
+		return Credential{}, fmt.Errorf("%w: access token required", ErrInvalidInput)
+	}
+	credential, err := s.storeTokens(ctx, providerID, label, account, plan, tokens)
+	if err != nil {
+		return Credential{}, err
+	}
+	return publicCredential(credential), nil
+}
+
 // credentialKey returns the bearer value to use upstream. For OAuth
 // credentials it refreshes an expiring access token first and persists the new
 // set; plain API keys come back unchanged.
-func (s *Service) credentialKey(ctx context.Context, providerKind string, credential Credential) (string, error) {
+func (s *Service) credentialKey(ctx context.Context, p Provider, credential Credential) (string, error) {
 	if s.Box == nil {
 		return "", ErrSecretBox
 	}
@@ -219,7 +324,7 @@ func (s *Service) credentialKey(ctx context.Context, providerKind string, creden
 	}
 
 	if tokens.RefreshToken != "" && tokens.Expired(s.now(), 120) {
-		if cfg, ok := s.oauthRegistry().Get(providerKind); ok {
+		if cfg, ok := s.oauthConfig(p); ok {
 			refreshed, err := cfg.Refresh(ctx, tokens.RefreshToken)
 			if err == nil && refreshed.Valid() {
 				if refreshed.RefreshToken == "" {
@@ -236,11 +341,7 @@ func (s *Service) credentialKey(ctx context.Context, providerKind string, creden
 // persistTokens rewrites a credential in place after a refresh. Best effort: a
 // failed write only means the next request refreshes again.
 func (s *Service) persistTokens(ctx context.Context, credential Credential, tokens oauth.TokenSet) {
-	encoded, err := json.Marshal(tokens)
-	if err != nil {
-		return
-	}
-	sealed, err := s.Box.Seal(string(encoded))
+	sealed, err := s.sealTokens(tokens)
 	if err != nil {
 		return
 	}
@@ -250,7 +351,36 @@ func (s *Service) persistTokens(ctx context.Context, credential Credential, toke
 	credential.HasSecret = true
 	credential.Status = StatusOK
 	credential.UpdatedAt = s.now()
-	_ = s.Store.SaveCredential(ctx, credential)
+	_ = s.saveCredential(ctx, credential)
+}
+
+// oauthConfig prefers an operator-supplied flow, then the catalogue channel,
+// then the protocol kind. The channel is what distinguishes Codex from a plain
+// OpenAI key provider on the same host.
+func (s *Service) oauthConfig(p Provider) (oauth.Config, bool) {
+	if p.OAuth != nil {
+		return configFromOAuth(*p.OAuth), true
+	}
+	registry := s.oauthRegistry()
+	if cfg, ok := registry.Get(p.Channel); ok {
+		return cfg, true
+	}
+	return registry.Get(string(p.Kind))
+}
+
+func configFromOAuth(c OAuthConfig) oauth.Config {
+	return oauth.Config{
+		Kind:             "custom",
+		ClientID:         c.ClientID,
+		AuthorizeURL:     c.AuthorizeURL,
+		TokenURL:         c.TokenURL,
+		RedirectURI:      c.RedirectURI,
+		Scopes:           c.Scopes,
+		ExtraAuthParams:  c.ExtraAuthParams,
+		TokenStyle:       c.TokenStyle,
+		VerifierBytes:    c.VerifierBytes,
+		VerifierEncoding: c.VerifierEncoding,
+	}
 }
 
 func (s *Service) oauthRegistry() *oauth.Registry {
@@ -258,6 +388,14 @@ func (s *Service) oauthRegistry() *oauth.Registry {
 		return s.OAuth
 	}
 	return oauth.DefaultRegistry()
+}
+
+// ChannelOrKind is what an error message should name.
+func (p Provider) ChannelOrKind() string {
+	if p.Channel != "" {
+		return p.Channel
+	}
+	return string(p.Kind)
 }
 
 // parseOAuthInput accepts a bare code, "code#state" (what Claude's page shows)
@@ -278,6 +416,79 @@ func parseOAuthInput(input string) (code, state string) {
 		return strings.TrimSpace(before), strings.TrimSpace(after)
 	}
 	return value, ""
+}
+
+// tokenIdentity reads the identity claims vendors put in the id_token (or, for
+// some, the access token). A token without usable claims is not an error: the
+// operator can still label the account by hand.
+func tokenIdentity(tokens oauth.TokenSet) (account, plan string) {
+	for _, raw := range []string{tokens.IDToken, tokens.AccessToken} {
+		claims := decodeClaims(raw)
+		if len(claims) == 0 {
+			continue
+		}
+		if account == "" {
+			account = firstString(claims, "email", "preferred_username", "upn", "name")
+		}
+		if plan == "" {
+			plan = planFromClaims(claims)
+		}
+		if account != "" && plan != "" {
+			break
+		}
+	}
+	return account, plan
+}
+
+func decodeClaims(token string) map[string]any {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		// Some issuers pad the segment; tolerate both.
+		payload, err = base64.URLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return nil
+		}
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil
+	}
+	return claims
+}
+
+func firstString(claims map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := claims[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func planFromClaims(claims map[string]any) string {
+	for _, key := range []string{"plan_type", "subscription_type", "subscriptionType", "tier"} {
+		if value, ok := claims[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	// OpenAI nests the plan under its auth namespace.
+	for key, value := range claims {
+		if !strings.HasSuffix(key, "/auth") {
+			continue
+		}
+		nested, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if plan := firstString(nested, "chatgpt_plan_type", "plan_type"); plan != "" {
+			return plan
+		}
+	}
+	return ""
 }
 
 func newOAuthSessionID() string {

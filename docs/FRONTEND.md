@@ -109,21 +109,73 @@ web/
 无需重启：在途请求保留已解析的 client，新请求看到新表。重载失败（例如某个密钥解不开）
 只记日志，写入不回滚，旧表继续服务；控制台的「探测」按钮就是用来发现这种问题的。
 
-### OAuth 登录
+### OAuth 登录与多账号
 
 参考 sub2api 与 magpie 的做法，采用**授权码 + PKCE + 粘回授权码**，而不是在本机起回调监听：
 
-- `openai` 走 Codex CLI 的客户端（`auth.openai.com`，回调固定 `localhost:1455`，
-  janus 部署在远端时浏览器无法回连，所以必须粘贴）；
-- `anthropic` 走 Claude Code 的客户端（`claude.com/cai/oauth/authorize`），授权后官方回调页
+- `openai-codex` 走 Codex CLI 的客户端（`auth.openai.com`，回调固定 `localhost:1455`，
+  janus 部署在远端时浏览器无法回连，所以必须粘贴）；未选渠道的老上游按 `kind=openai` 命中同一流程；
+- `claude-code` 走 Claude Code 的客户端（`claude.com/cai/oauth/authorize`），授权后官方回调页
   直接显示 `code#state`，粘贴即可；
 - 会话在内存里、10 分钟有效、一次性；state 不匹配直接拒绝；
 - 令牌以 JSON 密文存储（access / refresh / expires_at），**距到期 2 分钟内自动刷新**并写回，
   刷新失败保留旧令牌，由上游 401 暴露问题；
 - 控制台拿不到任何令牌，只能看到 `masked`。
 
-还没做：设备码流程（magpie 对 Copilot 等用）、OAuth 凭据的「重新授权」入口、以及
-厂商没有 `/models` 时的专用探测。
+**同一个渠道可以有多个账号**。每个 `provider_credentials` 行就是一个账号，`label / account /
+plan / priority / disabled` 是运营字段，令牌仍是密文。`POST .../oauth/complete` 每次都新增一行；
+带 `credential_id` 调 `oauth/start` 则是**重新授权**，完成后原地更新，不新增、不改优先级。
+
+调度规则（`internal/pool`）：
+
+1. `disabled` 与 `status=invalid` 的账号不参与；
+2. 按 `priority` 升序，其次剩余额度、重置时间、最久未用；
+3. 同一会话（`X-Session-Affinity` / `X-Session-Id` / `X-Conversation-Id` /
+   `X-Magpie-Session` / `prompt_cache_key`）**粘住同一个账号**，保住 prompt cache；
+   账号失效时才切换，并把新账号绑定到该会话；
+4. 401/403 → `invalid` 并停用；402/额度 429 → `exhausted` 并记 `resets_at`；
+   普通 429 → `rate_limited` + 冷却；5xx → 短暂冷却；其它 4xx 不归咎账号；
+5. 结果异步写回 `provider_credentials`（status / cooldown / resets_at / last_error / last_used_at），
+   **重启后不会把耗尽账号当可用**。`POST /api/v1/credentials/{id}/reset` 手动清除状态；
+6. `PATCH /api/v1/credentials/{id}` 改备注、优先级或启停；「上移/下移」在控制台里交换两行优先级。
+
+### 自定义 OAuth 与订阅渠道
+
+`provider.oauth`（`model_providers.oauth_json`）允许每个上游自带一套**公共客户端**流程：
+`client_id / authorize_url / token_url / redirect_uri / scopes / extra_auth_params /
+token_style(form|json) / verifier_encoding(hex|base64url)`。它优先于内置流程，因此
+WorkBuddy、CodeBuddy、Qoder、Cursor、Kiro、ZCode、美团 LongCat 这类渠道可以由运营方
+用自己的 client 接入，而 janus 不内置别人的 client id，也不承担对应的封号风险。
+
+不内置的原因很实际：magpie 已把 WorkBuddy、Cursor、Kiro、Qoder、ZCode、Grok、Antigravity、
+Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode 插件，并注明
+"reaching them can break their vendors' terms"。janus 只提供机制，不代替运营方做这个决定。
+
+各渠道差异：
+
+- `workbuddy` / `workbuddy-ai`（腾讯 CodeBuddy 套餐）：OpenAI chat 协议，
+  但鉴权头与刷新端点是厂商私有的（`/v2/plugin/auth/token/refresh`）；
+  当前只保证**导入的 access token 在有效期内可用**，到期后需要重新导入/授权；
+- `opencode-zen` / `opencode-go`：API key 或 OAuth 均可；OpenCode 自己的 `auth.json`
+  可以用下面的导入功能直接复用；
+- `longcat`（美团）：OpenAI + Anthropic 兼容，API key，不是 OAuth。
+
+### 导入本机登录
+
+`POST /api/v1/providers/{id}/import`（admin）读取服务端主机上已有的 CLI 登录：
+
+| source | 文件 | 说明 |
+|---|---|---|
+| `codex` | `~/.codex/auth.json` | 取 `tokens.access_token / refresh_token / id_token` |
+| `claude` | `~/.claude/.credentials.json` | 取 `claudeAiOauth.*`，毫秒/秒到期时间都兼容 |
+| `opencode` | `$XDG_DATA_HOME/opencode/auth.json` 或 `~/.local/share/opencode/auth.json` | 只取 `type=oauth` 且带 access 的条目；`entry` 指定 provider key |
+
+导入按 `account`（id_token 里的 email、OpenCode 条目名）去重：重复导入更新同一行，
+不会长出第二个账号。令牌只在服务端解封，接口返回的仍是 `masked`。
+和 CC Switch 的 Accounts 面板思路一致，但 janus 没有把凭据写回 CLI 的配置。
+
+还没做：设备码流程（Copilot）、WorkBuddy 等厂商私有刷新协议、Codex Responses 与
+Anthropic Messages 协议适配（订阅令牌现在能登录、能读余量，但还不能直接跑 chat 请求）。
 
 ### 渠道目录
 
@@ -131,7 +183,8 @@ web/
 `vendor`（厂商直连）、`subscription`（OAuth 订阅套餐）、`relay`（聚合/中转）、`local`（自建网关）。
 每条包含 `kind / protocols / auth / base_url / alt_base_urls / note`，覆盖 OpenAI、Anthropic、
 Google、DeepSeek、Kimi、GLM、MiniMax、Qwen、火山、混元、千帆、SiliconFlow、OpenRouter、
-Vercel、OpenCode、xAI、Groq、Together、Fireworks、Cerebras、Ollama、LiteLLM 等约 50 个入口；
+Vercel、OpenCode、xAI、Groq、Together、Fireworks、Cerebras、Ollama、LiteLLM、WorkBuddy、
+CodeBuddy、美团 LongCat 等约 55 个入口；
 `protocols` 如实标注上游原生协议，`kind` 只表示 janus 当前能直接说的协议，避免把
 "上游支持 Responses" 误渲染成"网关已支持 Responses"。
 

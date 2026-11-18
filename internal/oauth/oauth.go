@@ -46,7 +46,8 @@ func (t TokenSet) Expired(now int64, skew int64) bool {
 
 // Config describes one vendor's OAuth client.
 type Config struct {
-	// Kind matches the provider kind: "openai" or "anthropic".
+	// Kind names the flow, e.g. "openai-codex" or "claude-code". It is also
+	// the catalogue channel the registry is keyed by.
 	Kind         string
 	ClientID     string
 	AuthorizeURL string
@@ -69,46 +70,64 @@ type Registry struct {
 }
 
 // DefaultRegistry returns the clients used by the official CLIs.
+//
+// Two presets only. Other coding subscriptions (Cursor, Kiro, Qoder,
+// WorkBuddy, ZCode, …) are served by third-party OpenCode plugins that carry
+// their own client ids; shipping those here would mean shipping someone else's
+// client and taking on their account-ban risk. janus instead exposes a custom
+// PKCE flow per provider (Provider.OAuth), so an operator can bring their own.
 func DefaultRegistry() *Registry {
+	codex := Config{
+		Kind:             "openai-codex",
+		ClientID:         "app_EMoamEEZ73f0CkXaXp7hrann", // Codex CLI
+		AuthorizeURL:     "https://auth.openai.com/oauth/authorize",
+		TokenURL:         "https://auth.openai.com/oauth/token",
+		RedirectURI:      "http://localhost:1455/auth/callback",
+		Scopes:           []string{"openid", "profile", "email", "offline_access"},
+		VerifierBytes:    64,
+		VerifierEncoding: "hex",
+		TokenStyle:       "form",
+	}
+	claude := Config{
+		Kind:         "claude-code",
+		ClientID:     "9d1c250a-e61b-44d9-88ed-5944d1962f5e", // Claude Code
+		AuthorizeURL: "https://claude.com/cai/oauth/authorize",
+		TokenURL:     "https://platform.claude.com/v1/oauth/token",
+		RedirectURI:  "https://platform.claude.com/oauth/code/callback",
+		Scopes: []string{
+			"org:create_api_key",
+			"user:profile",
+			"user:inference",
+			"user:sessions:claude_code",
+			"user:mcp_servers",
+			"user:file_upload",
+		},
+		VerifierBytes:    32,
+		VerifierEncoding: "base64url",
+		TokenStyle:       "json",
+	}
+	// The bare protocol names are aliases for providers created before the
+	// catalogue existed. They are separate entries, not a second lookup, so
+	// Registry.Set on an alias replaces only that alias.
+	openaiAlias := codex
+	openaiAlias.Kind = "openai"
+	anthropicAlias := claude
+	anthropicAlias.Kind = "anthropic"
 	return &Registry{configs: map[string]Config{
-		"openai": {
-			Kind:             "openai",
-			ClientID:         "app_EMoamEEZ73f0CkXaXp7hrann", // Codex CLI
-			AuthorizeURL:     "https://auth.openai.com/oauth/authorize",
-			TokenURL:         "https://auth.openai.com/oauth/token",
-			RedirectURI:      "http://localhost:1455/auth/callback",
-			Scopes:           []string{"openid", "profile", "email", "offline_access"},
-			VerifierBytes:    64,
-			VerifierEncoding: "hex",
-			TokenStyle:       "form",
-		},
-		"anthropic": {
-			Kind:         "anthropic",
-			ClientID:     "9d1c250a-e61b-44d9-88ed-5944d1962f5e", // Claude Code
-			AuthorizeURL: "https://claude.com/cai/oauth/authorize",
-			TokenURL:     "https://platform.claude.com/v1/oauth/token",
-			RedirectURI:  "https://platform.claude.com/oauth/code/callback",
-			Scopes: []string{
-				"org:create_api_key",
-				"user:profile",
-				"user:inference",
-				"user:sessions:claude_code",
-				"user:mcp_servers",
-				"user:file_upload",
-			},
-			VerifierBytes:    32,
-			VerifierEncoding: "base64url",
-			TokenStyle:       "json",
-		},
+		"openai-codex": codex,
+		"openai":       openaiAlias,
+		"claude-code":  claude,
+		"anthropic":    anthropicAlias,
 	}}
 }
 
-// Get returns the flow for a provider kind.
+// Get returns the flow for a channel, or for a protocol kind when no channel
+// preset exists.
 func (r *Registry) Get(kind string) (Config, bool) {
 	if r == nil {
 		return Config{}, false
 	}
-	config, ok := r.configs[kind]
+	config, ok := r.configs[strings.ToLower(strings.TrimSpace(kind))]
 	return config, ok
 }
 

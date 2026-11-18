@@ -211,12 +211,25 @@ export type ProviderKind = "openai" | "anthropic" | "custom";
 export type CredentialKind = "api_key" | "oauth";
 export type CredentialStatus = "unknown" | "ok" | "exhausted" | "rate_limited" | "invalid";
 
+export type OAuthConfig = {
+  client_id: string;
+  authorize_url: string;
+  token_url: string;
+  redirect_uri: string;
+  scopes?: string[];
+  extra_auth_params?: Record<string, string>;
+  token_style?: "form" | "json";
+  verifier_encoding?: "hex" | "base64url";
+  verifier_bytes?: number;
+};
+
 export type Provider = {
   id: string;
   name: string;
   kind: ProviderKind;
   base_url: string;
   channel?: string;
+  oauth?: OAuthConfig;
   enabled: boolean;
   created_at: number;
   updated_at: number;
@@ -265,13 +278,21 @@ export type Credential = {
   id: string;
   provider_id: string;
   label?: string;
+  account?: string;
+  plan?: string;
   kind: CredentialKind;
   status: CredentialStatus;
   masked?: string;
   has_secret: boolean;
+  priority: number;
+  disabled?: boolean;
   remaining?: number;
   total?: number;
   expires_at?: number;
+  last_used_at?: number;
+  cooldown_until?: number;
+  resets_at?: number;
+  last_error?: string;
   quota?: Quota;
   created_at: number;
   updated_at: number;

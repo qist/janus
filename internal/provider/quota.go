@@ -82,7 +82,7 @@ func (s *Service) RefreshQuota(ctx context.Context, providerID string) ([]QuotaR
 
 		credential.Quota = &quota
 		credential.UpdatedAt = s.now()
-		if err := s.Store.SaveCredential(ctx, credential); err != nil {
+		if err := s.saveCredential(ctx, credential); err != nil {
 			return results, err
 		}
 		results = append(results, QuotaResult{

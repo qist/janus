@@ -172,10 +172,10 @@ export function completeOAuth(
 }
 
 /** Starts a device-code sign-in (GitHub Copilot). */
-export function startDevice(providerID: string, label?: string) {
+export function startDevice(providerID: string, label?: string, credentialID?: string) {
   return api<DeviceStart>(`/api/v1/providers/${encodeURIComponent(providerID)}/device/start`, {
     method: "POST",
-    body: { label },
+    body: { label, credential_id: credentialID },
   });
 }
 

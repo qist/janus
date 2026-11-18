@@ -146,6 +146,7 @@ export default function Models() {
     userCode: string;
     verificationURI: string;
     interval: number;
+    credentialID?: string;
   } | null>(null);
   const [importForm, setImportForm] = useState({
     source: "codex" as ImportSource,
@@ -371,19 +372,20 @@ export default function Models() {
     }
   }
 
-  async function onStartDevice(providerID?: string, label?: string) {
+  async function onStartDevice(providerID?: string, label?: string, credentialID?: string) {
     const target = providerID ?? credentialForm.provider_id;
     if (!target) return;
     setBusy("device:start");
     setError(null);
     try {
-      const start = await startDevice(target, label);
+      const start = await startDevice(target, label, credentialID);
       setDevice({
         providerID: target,
         sessionID: start.session_id,
         userCode: start.user_code,
         verificationURI: start.verification_uri,
         interval: start.interval,
+        credentialID,
       });
       window.open(start.verification_uri, "_blank", "noopener,noreferrer");
     } catch (err) {
@@ -1020,7 +1022,9 @@ export default function Models() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">{t("models.deviceCodeHint")}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {device.credentialID ? t("models.deviceReauthHint") : t("models.deviceCodeHint")}
+                    </p>
                     <div className="flex flex-wrap items-center gap-3">
                       <code className="rounded bg-muted px-3 py-1.5 font-mono text-lg tracking-widest">
                         {device.userCode}
@@ -1146,7 +1150,9 @@ export default function Models() {
                               >
                                 <ArrowDown className="h-3.5 w-3.5" />
                               </Button>
-                              {canAdmin && credential.kind === "oauth" && supportsOAuth ? (
+                              {canAdmin &&
+                              credential.kind === "oauth" &&
+                              (supportsOAuth || supportsDevice) ? (
                                 <Button
                                   variant="ghost"
                                   title={t("models.reauthorize")}
@@ -1156,7 +1162,15 @@ export default function Models() {
                                       ...credentialForm,
                                       provider_id: credential.provider_id,
                                     });
-                                    void onStartOAuth(credential.id);
+                                    if (supportsDevice) {
+                                      void onStartDevice(
+                                        credential.provider_id,
+                                        undefined,
+                                        credential.id
+                                      );
+                                    } else {
+                                      void onStartOAuth(credential.id);
+                                    }
                                   }}
                                 >
                                   <KeyRound className="h-3.5 w-3.5" />

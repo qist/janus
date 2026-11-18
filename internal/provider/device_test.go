@@ -80,7 +80,7 @@ func TestDeviceFlowCreatesCredentialAndUsesDerivedToken(t *testing.T) {
 		t.Fatalf("CreateProvider: %v", err)
 	}
 
-	start, err := svc.StartDevice(ctx, "gh", "")
+	start, err := svc.StartDevice(ctx, "gh", "", "")
 	if err != nil {
 		t.Fatalf("StartDevice: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestDeviceFlowErrors(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
-	if _, err := svc.StartDevice(ctx, "plain", ""); err == nil {
+	if _, err := svc.StartDevice(ctx, "plain", "", ""); err == nil {
 		t.Fatal("device flow started on a non-device channel")
 	}
 
@@ -225,7 +225,7 @@ func TestDeviceFlowErrors(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateProvider gh: %v", err)
 	}
-	start, err := svc.StartDevice(ctx, "gh", "")
+	start, err := svc.StartDevice(ctx, "gh", "", "")
 	if err != nil {
 		t.Fatalf("StartDevice: %v", err)
 	}
@@ -273,3 +273,86 @@ func TestOAuthRequiresOAuthChannel(t *testing.T) {
 }
 
 var _ = io.Discard
+
+func TestDeviceReauthorizationUpdatesInPlace(t *testing.T) {
+	ctx := context.Background()
+	svc := testService(t)
+	polls := 0
+	svc.Devices = deviceRegistry(t, &polls)
+
+	if _, err := svc.CreateProvider(ctx, Provider{
+		ID: "gh", Kind: KindOpenAI, Channel: "github-copilot",
+		BaseURL: "https://api.githubcopilot.com",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	first, err := svc.storeTokens(ctx, "gh", "work", "octocat", "", oauth.TokenSet{
+		AccessToken: "gh-token", DerivedToken: "old", DerivedExpiresAt: 1,
+	})
+	if err != nil {
+		t.Fatalf("storeTokens: %v", err)
+	}
+	label := "work"
+	priority := 4
+	if _, err := svc.UpdateCredential(ctx, first.ID, CredentialPatch{Label: &label, Priority: &priority}); err != nil {
+		t.Fatalf("UpdateCredential: %v", err)
+	}
+
+	start, err := svc.StartDevice(ctx, "gh", "", first.ID)
+	if err != nil {
+		t.Fatalf("StartDevice reauth: %v", err)
+	}
+	// One pending poll keeps the session; the second completes.
+	if _, err := svc.PollDevice(ctx, "gh", start.SessionID); err != nil {
+		t.Fatalf("PollDevice pending: %v", err)
+	}
+	poll, err := svc.PollDevice(ctx, "gh", start.SessionID)
+	if err != nil {
+		t.Fatalf("PollDevice complete: %v", err)
+	}
+	if poll.Status != "complete" || poll.Credential == nil {
+		t.Fatalf("poll = %+v", poll)
+	}
+	if poll.Credential.ID != first.ID {
+		t.Fatalf("re-authorization created a new account: %s != %s", poll.Credential.ID, first.ID)
+	}
+	if poll.Credential.Priority != 4 || poll.Credential.Label != "work" {
+		t.Fatalf("fields not preserved: %+v", poll.Credential)
+	}
+
+	stored, _ := svc.Store.ListCredentials(ctx, "gh")
+	if len(stored) != 1 {
+		t.Fatalf("credential rows = %d, want 1", len(stored))
+	}
+	provider, _ := svc.Store.GetProvider(ctx, "gh")
+	key, err := svc.credentialKey(ctx, provider, stored[0])
+	if err != nil {
+		t.Fatalf("credentialKey: %v", err)
+	}
+	if key != "copilot-token" {
+		t.Fatalf("key = %q", key)
+	}
+}
+
+func TestDeviceReauthorizationRejectsForeignKey(t *testing.T) {
+	ctx := context.Background()
+	svc := testService(t)
+	polls := 0
+	svc.Devices = deviceRegistry(t, &polls)
+
+	for _, id := range []string{"gh", "gh2"} {
+		if _, err := svc.CreateProvider(ctx, Provider{
+			ID: id, Kind: KindOpenAI, Channel: "github-copilot",
+			BaseURL: "https://api.githubcopilot.com",
+		}); err != nil {
+			t.Fatalf("CreateProvider %s: %v", id, err)
+		}
+	}
+	other, err := svc.storeTokens(ctx, "gh2", "x", "x", "", oauth.TokenSet{AccessToken: "t"})
+	if err != nil {
+		t.Fatalf("storeTokens: %v", err)
+	}
+	if _, err := svc.StartDevice(ctx, "gh", "", other.ID); err == nil {
+		t.Fatal("re-authorized a credential from another provider")
+	}
+}

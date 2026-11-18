@@ -369,7 +369,7 @@ func (s *Server) handleStartDevice(w http.ResponseWriter, r *http.Request, _ Ide
 			return
 		}
 	}
-	start, err := s.Providers.StartDevice(r.Context(), r.PathValue("id"), req.Label)
+	start, err := s.Providers.StartDevice(r.Context(), r.PathValue("id"), req.Label, req.CredentialID)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -399,8 +399,9 @@ func (s *Server) handlePollDevice(w http.ResponseWriter, r *http.Request, _ Iden
 }
 
 type deviceRequest struct {
-	SessionID string `json:"session_id"`
-	Label     string `json:"label"`
+	SessionID    string `json:"session_id"`
+	Label        string `json:"label"`
+	CredentialID string `json:"credential_id"`
 }
 
 // handleStartProviderOAuth begins a PKCE sign-in and returns the vendor URL.

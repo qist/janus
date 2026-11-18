@@ -43,6 +43,8 @@ type deviceSession struct {
 	Interval   int
 	ExpiresAt  int64
 	Label      string
+	// TargetCredentialID re-authorizes one account instead of adding another.
+	TargetCredentialID string
 }
 
 type deviceSessions struct {
@@ -63,7 +65,7 @@ func (s *Service) deviceConfig(p Provider) (oauth.DeviceConfig, bool) {
 
 // StartDevice begins a device authorization. The operator visits
 // verification_uri, enters user_code, and the console polls PollDevice.
-func (s *Service) StartDevice(ctx context.Context, providerID, label string) (DeviceStart, error) {
+func (s *Service) StartDevice(ctx context.Context, providerID, label, credentialID string) (DeviceStart, error) {
 	p, err := s.Store.GetProvider(ctx, providerID)
 	if err != nil {
 		return DeviceStart{}, err
@@ -72,6 +74,18 @@ func (s *Service) StartDevice(ctx context.Context, providerID, label string) (De
 	if !ok {
 		return DeviceStart{}, fmt.Errorf("%w: channel %q has no device flow (github-copilot only)", ErrOAuthUnsupported, p.ChannelOrKind())
 	}
+	if credentialID != "" {
+		existing, err := s.credential(ctx, credentialID)
+		if err != nil {
+			return DeviceStart{}, err
+		}
+		if existing.ProviderID != p.ID {
+			return DeviceStart{}, fmt.Errorf("%w: credential belongs to another provider", ErrInvalidInput)
+		}
+		if existing.Kind != CredentialOAuth {
+			return DeviceStart{}, fmt.Errorf("%w: only oauth credentials can be re-authorized", ErrInvalidInput)
+		}
+	}
 
 	code, err := cfg.Start(ctx)
 	if err != nil {
@@ -79,12 +93,13 @@ func (s *Service) StartDevice(ctx context.Context, providerID, label string) (De
 	}
 
 	session := deviceSession{
-		ID:         "dev_" + strings.TrimPrefix(newOAuthSessionID(), "oauth_"),
-		ProviderID: p.ID,
-		DeviceCode: code.DeviceCode,
-		Interval:   code.Interval,
-		ExpiresAt:  s.now() + int64(code.ExpiresIn),
-		Label:      strings.TrimSpace(label),
+		ID:                 "dev_" + strings.TrimPrefix(newOAuthSessionID(), "oauth_"),
+		ProviderID:         p.ID,
+		DeviceCode:         code.DeviceCode,
+		Interval:           code.Interval,
+		ExpiresAt:          s.now() + int64(code.ExpiresIn),
+		Label:              strings.TrimSpace(label),
+		TargetCredentialID: strings.TrimSpace(credentialID),
 	}
 
 	s.devices.mu.Lock()
@@ -172,11 +187,18 @@ func (s *Service) PollDevice(ctx context.Context, providerID, sessionID string) 
 	if account == "" {
 		account = "github"
 	}
-	label := session.Label
-	if label == "" {
-		label = account
+	var credential Credential
+	if session.TargetCredentialID != "" {
+		// Re-authorization keeps priority, label and disabled state decisions
+		// (except that a successful re-auth re-enables the account).
+		credential, err = s.replaceTokens(ctx, session.TargetCredentialID, session.Label, account, "", tokens)
+	} else {
+		label := session.Label
+		if label == "" {
+			label = account
+		}
+		credential, err = s.CreateOAuthCredential(ctx, p.ID, label, account, "", tokens)
 	}
-	credential, err := s.CreateOAuthCredential(ctx, p.ID, label, account, "", tokens)
 	if err != nil {
 		return DevicePoll{}, err
 	}

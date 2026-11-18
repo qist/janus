@@ -204,6 +204,7 @@ export const zh = {
   "models.deviceStarting": "正在申请代码…",
   "models.deviceHint": "该渠道通过 GitHub 设备码登录：点按钮后到 GitHub 输入一次性代码，页面会自动完成。",
   "models.deviceCodeHint": "在 GitHub 页面输入下面的代码（已为你打开授权页）：",
+  "models.deviceReauthHint": "正在重新授权这个账号；完成后保留原有优先级与备注，不会新增账号。",
   "models.deviceOpen": "重新打开授权页",
   "models.deviceWaiting": "等待授权…",
   "models.syncRoutes": "同步模型",

@@ -595,6 +595,21 @@ func TestDeviceFlowEndpoints(t *testing.T) {
 		t.Fatal("response leaked the sealed secret")
 	}
 
+	// Re-authorization reuses the same credential row.
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/gh/device/start", adminKey, map[string]any{
+		"credential_id": complete.Credential.ID,
+	}, http.StatusOK)
+	var reauth provider.DeviceStart
+	decodeBody(t, resp, &reauth)
+	resp = e.expect(t, http.MethodPost, "/api/v1/providers/gh/device/poll", adminKey, map[string]any{
+		"session_id": reauth.SessionID,
+	}, http.StatusOK)
+	var renewed provider.DevicePoll
+	decodeBody(t, resp, &renewed)
+	if renewed.Status != "complete" || renewed.Credential == nil || renewed.Credential.ID != complete.Credential.ID {
+		t.Fatalf("renewed = %+v", renewed)
+	}
+
 	resp = e.expect(t, http.MethodPost, "/api/v1/providers/gh/device/start", readerKey, nil, http.StatusForbidden)
 	_ = errCode(t, resp)
 

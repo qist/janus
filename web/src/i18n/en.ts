@@ -208,6 +208,7 @@ export const en: Record<MessageKey, string> = {
   "models.deviceStarting": "Requesting code…",
   "models.deviceHint": "This channel signs in through GitHub device code: open the page, enter the one-time code, and this view completes automatically.",
   "models.deviceCodeHint": "Enter this code on GitHub (the page was opened for you):",
+  "models.deviceReauthHint": "Re-authorizing this account: its priority and note are kept and no new account is created.",
   "models.deviceOpen": "Reopen GitHub",
   "models.deviceWaiting": "Waiting for approval…",
   "models.syncRoutes": "Sync models",

@@ -133,7 +133,8 @@ GitHub token 也能用（会先换取短期 token）。
 `POST /providers/{id}/device/start` 返回 `user_code` 与 `verification_uri`，控制台打开该页并每
 `interval` 秒调 `POST /providers/{id}/device/poll`；`status=pending` 继续等，`complete` 时返回新凭据。
 获得 GitHub token 后立即调用 `api.github.com/copilot_internal/v2/token` 换取短期 token（30 分钟级），
-换不到就算登录失败，不会留下一个用不了的凭据。短期 token 与到期时间以 `derived_token` /
+换不到就算登录失败，不会留下一个用不了的凭据。带 `credential_id` 调用 `device/start` 是**原地重授权**：
+完成后沿用该行的优先级与备注，不新增账号。短期 token 与到期时间以 `derived_token` /
 `derived_expires_at` 存在同一份密文里，`credentialKey` 在到期前 2 分钟自动续换并写回。
 
 **同一个渠道可以有多个账号**。每个 `provider_credentials` 行就是一个账号，`label / account /
@@ -188,7 +189,7 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
 不会长出第二个账号。令牌只在服务端解封，接口返回的仍是 `masked`。
 和 CC Switch 的 Accounts 面板思路一致，但 janus 没有把凭据写回 CLI 的配置。
 
-还没做：WorkBuddy 等厂商私有刷新协议、设备码账号的「原地重授权」、精确的 token 计数。
+还没做：WorkBuddy 等厂商私有刷新协议、精确的 token 计数。
 
 ### 协议适配（chat ↔ Responses / Messages）
 

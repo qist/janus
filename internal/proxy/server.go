@@ -266,6 +266,7 @@ func (s *Server) record(r *http.Request, id auth.Identity, used gateway.Usage, e
 		UpstreamModel:    upstreamModel,
 		PromptTokens:     used.PromptTokens,
 		CompletionTokens: used.CompletionTokens,
+		CachedTokens:     used.CachedTokens,
 		Status:           status,
 		ErrorCode:        errorCode,
 		Stream:           stream,

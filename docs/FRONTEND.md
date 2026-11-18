@@ -174,8 +174,39 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
 不会长出第二个账号。令牌只在服务端解封，接口返回的仍是 `masked`。
 和 CC Switch 的 Accounts 面板思路一致，但 janus 没有把凭据写回 CLI 的配置。
 
-还没做：设备码流程（Copilot）、WorkBuddy 等厂商私有刷新协议、Codex Responses 与
-Anthropic Messages 协议适配（订阅令牌现在能登录、能读余量，但还不能直接跑 chat 请求）。
+还没做：设备码流程（Copilot）、WorkBuddy 等厂商私有刷新协议，以及入站 `/v1/messages`
+（Claude Code 客户端直连 janus 时说的是 Messages，不是 chat completions）。
+
+### 协议适配（chat ↔ Responses / Messages）
+
+调用方永远只说 OpenAI chat completions；上游说什么由 `model_providers.protocol` 决定：
+
+| protocol | 上游 | 端点 |
+|---|---|---|
+| `chat`（默认） | 任何 OpenAI 兼容端点 | `{base}/chat/completions` |
+| `responses` | OpenAI Responses / Codex 后端 | `{base}/responses`（`/backend-api/*` 不加 `/v1`） |
+| `anthropic` | Anthropic Messages / Claude Code | `{base}/v1/messages` |
+
+`protocol` 为空时按渠道推断：`openai-codex` → `responses`，`claude-code` 或 `kind=anthropic` →
+`anthropic`，其余 `chat`。控制台新建上游时可显式覆盖。
+
+翻译层在 `internal/gateway`，三种协议共用同一套选号、失败切换与用量采集：
+
+- **请求**：system 提为 `instructions`（Responses）或 `system`（Messages）；OpenAI `tools` 映射为
+  Responses 的 `{type:function,...}` 或 Messages 的 `input_schema`；`assistant.tool_calls` 映射为
+  Responses 的 `function_call` 条目 / Messages 的 `tool_use` 块；`role:tool` 映射为
+  `function_call_output` 或 `tool_result`。Messages 要求 `max_tokens`，缺省给 8192。
+- **响应**：文本、`tool_calls`、`finish_reason`（`max_tokens`→`length`、`tool_use`→`tool_calls`）、
+  `usage.prompt/completion` 与 cached tokens 全部还原成 OpenAI 结构。
+- **流式**：把上游 SSE 事件重新打包成 `chat.completion.chunk`，末尾补 `[DONE]`；调用方看到的是
+  标准 OpenAI 流，不会漏出 `content_block_delta` 或 `response.output_text.delta`。
+- **Codex 只支持流式**：所以对 `responses` 的非流式请求由网关内部读流并聚合，再返回一次性 JSON。
+- **鉴权**：`anthropic` + API key 用 `x-api-key`，OAuth 用 `Authorization` + `anthropic-beta:
+  oauth-2025-04-20`；`responses` + OAuth 额外带 `OpenAI-Beta: responses=experimental`、
+  `originator: codex_cli_rs` 与从 access token 里解出的 `chatgpt-account-id`。
+- 未翻译的字段（音频、文件、reasoning 配置）被丢弃而不是原样透传：上游报 400 比静默忽略更难查。
+
+测试覆盖请求/响应/流式三条路径、OAuth 头、配额失败后的换号，以及 `provider → proxy` 的端到端。
 
 ### 渠道目录
 

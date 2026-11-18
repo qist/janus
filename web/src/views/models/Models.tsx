@@ -148,6 +148,7 @@ export default function Models() {
     kind: "openai" as ProviderKind,
     base_url: "",
     channel: "",
+    protocol: "" as "" | "chat" | "responses" | "anthropic",
     oauthJson: "",
   });
   const [credentialForm, setCredentialForm] = useState({
@@ -262,6 +263,7 @@ export default function Models() {
         kind: providerForm.kind,
         base_url: providerForm.base_url.trim(),
         channel: providerForm.channel || undefined,
+        protocol: providerForm.protocol || undefined,
         oauth,
       });
       setProviderForm({
@@ -270,6 +272,7 @@ export default function Models() {
         kind: "openai",
         base_url: "",
         channel: "",
+        protocol: "",
         oauthJson: "",
       });
     });
@@ -534,6 +537,7 @@ export default function Models() {
                     kind: channel.kind,
                     base_url: channel.base_url || providerForm.base_url,
                     channel: channel.id,
+                    protocol: "",
                     oauthJson: providerForm.oauthJson,
                   });
                 }}
@@ -560,6 +564,22 @@ export default function Models() {
                 value={providerForm.name}
                 onChange={(event) => setProviderForm({ ...providerForm, name: event.target.value })}
               />
+            </Field>
+            <Field label={t("models.protocol")}>
+              <Select
+                value={providerForm.protocol}
+                onChange={(event) =>
+                  setProviderForm({
+                    ...providerForm,
+                    protocol: event.target.value as "" | "chat" | "responses" | "anthropic",
+                  })
+                }
+              >
+                <option value="">{t("models.protocolAuto")}</option>
+                <option value="chat">chat</option>
+                <option value="responses">responses</option>
+                <option value="anthropic">anthropic</option>
+              </Select>
             </Field>
             <Field label={t("models.providerKind")}>
               <Select

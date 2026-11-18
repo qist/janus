@@ -81,6 +81,25 @@ func (s Status) Valid() bool {
 	return false
 }
 
+// Protocol is the wire format an upstream speaks. Callers always use OpenAI
+// chat completions; janus translates to the upstream protocol.
+type Protocol string
+
+const (
+	ProtocolChat      Protocol = "chat"
+	ProtocolResponses Protocol = "responses"
+	ProtocolAnthropic Protocol = "anthropic"
+)
+
+// Valid reports whether p is a protocol janus can translate.
+func (p Protocol) Valid() bool {
+	switch p {
+	case ProtocolChat, ProtocolResponses, ProtocolAnthropic:
+		return true
+	}
+	return false
+}
+
 // Provider is one upstream endpoint.
 type Provider struct {
 	ID      string `json:"id"`
@@ -90,6 +109,10 @@ type Provider struct {
 	// Channel is the catalogue id this provider was modelled on. It is
 	// informational: routing only needs Kind and BaseURL.
 	Channel string `json:"channel,omitempty"`
+	// Protocol overrides the protocol implied by Kind and Channel. Empty means
+	// derived: Codex talks Responses, Claude Code and KindAnthropic talk
+	// Messages, everything else talks chat completions.
+	Protocol Protocol `json:"protocol,omitempty"`
 	// OAuth, when set, overrides the built-in flow. It lets an operator bring
 	// their own public client (PKCE) for a vendor janus has no preset for,
 	// instead of janus shipping somebody else's client id.
@@ -97,6 +120,23 @@ type Provider struct {
 	Enabled   bool         `json:"enabled"`
 	CreatedAt int64        `json:"created_at"`
 	UpdatedAt int64        `json:"updated_at"`
+}
+
+// EffectiveProtocol is what the gateway should speak to this provider.
+func (p Provider) EffectiveProtocol() Protocol {
+	if p.Protocol != "" {
+		return p.Protocol
+	}
+	switch p.Channel {
+	case "openai-codex":
+		return ProtocolResponses
+	case "claude-code":
+		return ProtocolAnthropic
+	}
+	if p.Kind == KindAnthropic {
+		return ProtocolAnthropic
+	}
+	return ProtocolChat
 }
 
 // OAuthConfig is a public-client authorization-code flow. No client secret is
@@ -268,6 +308,9 @@ func (s *Service) CreateProvider(ctx context.Context, p Provider) (Provider, err
 		return Provider{}, fmt.Errorf("%w: unknown channel %q", ErrInvalidInput, p.Channel)
 	}
 	p.Channel = strings.ToLower(strings.TrimSpace(p.Channel))
+	if p.Protocol != "" && !p.Protocol.Valid() {
+		return Provider{}, fmt.Errorf("%w: unknown protocol %q", ErrInvalidInput, p.Protocol)
+	}
 	if err := validateBaseURL(p.BaseURL); err != nil {
 		return Provider{}, err
 	}
@@ -301,6 +344,7 @@ type ProviderPatch struct {
 	Name       *string
 	BaseURL    *string
 	Enabled    *bool
+	Protocol   *string
 	OAuth      *OAuthConfig
 	ClearOAuth bool
 }
@@ -327,6 +371,13 @@ func (s *Service) UpdateProvider(ctx context.Context, id string, patch ProviderP
 	}
 	if patch.Enabled != nil {
 		p.Enabled = *patch.Enabled
+	}
+	if patch.Protocol != nil {
+		protocol := Protocol(strings.ToLower(strings.TrimSpace(*patch.Protocol)))
+		if protocol != "" && !protocol.Valid() {
+			return Provider{}, fmt.Errorf("%w: unknown protocol %q", ErrInvalidInput, protocol)
+		}
+		p.Protocol = protocol
 	}
 	if patch.OAuth != nil && patch.ClearOAuth {
 		return Provider{}, fmt.Errorf("%w: oauth and clear_oauth are mutually exclusive", ErrInvalidInput)
@@ -591,15 +642,17 @@ func (s *Service) Clients(ctx context.Context) (map[string]*gateway.Client, erro
 		}
 
 		client, err := gateway.New(gateway.Config{
-			Name:    p.Name,
-			BaseURL: p.BaseURL,
-			Model:   route.UpstreamModel,
+			Name:     p.Name,
+			BaseURL:  p.BaseURL,
+			Model:    route.UpstreamModel,
+			Protocol: string(p.EffectiveProtocol()),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", route.ExposedModel, err)
 		}
 
 		accounts := pool.New(s.now)
+		oauth := make(map[string]bool, len(byProvider[p.ID]))
 		for _, credential := range byProvider[p.ID] {
 			if credential.Disabled || credential.Status == StatusInvalid {
 				continue
@@ -625,12 +678,14 @@ func (s *Service) Clients(ctx context.Context) (map[string]*gateway.Client, erro
 			if err := accounts.Add(account); err != nil {
 				return nil, err
 			}
+			oauth[credential.ID] = credential.Kind == CredentialOAuth
 		}
 		if accounts.Len() > 0 {
 			client.Credentials = &credentialSource{
 				svc:      s,
 				provider: p,
 				accounts: accounts,
+				oauth:    oauth,
 				bindings: make(map[string]string),
 			}
 		}
@@ -650,6 +705,9 @@ type credentialSource struct {
 	svc      *Service
 	provider Provider
 	accounts *pool.Pool
+	// oauth marks which accounts are subscription grants, so the gateway can
+	// pick the right header form.
+	oauth map[string]bool
 
 	mu       sync.Mutex
 	bindings map[string]string

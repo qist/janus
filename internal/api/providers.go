@@ -10,18 +10,20 @@ import (
 )
 
 type createProviderRequest struct {
-	ID      string                `json:"id"`
-	Name    string                `json:"name"`
-	Kind    provider.Kind         `json:"kind"`
-	BaseURL string                `json:"base_url"`
-	Channel string                `json:"channel"`
-	OAuth   *provider.OAuthConfig `json:"oauth"`
+	ID       string                `json:"id"`
+	Name     string                `json:"name"`
+	Kind     provider.Kind         `json:"kind"`
+	BaseURL  string                `json:"base_url"`
+	Channel  string                `json:"channel"`
+	Protocol string                `json:"protocol"`
+	OAuth    *provider.OAuthConfig `json:"oauth"`
 }
 
 type updateProviderRequest struct {
 	Name       *string               `json:"name"`
 	BaseURL    *string               `json:"base_url"`
 	Enabled    *bool                 `json:"enabled"`
+	Protocol   *string               `json:"protocol"`
 	OAuth      *provider.OAuthConfig `json:"oauth"`
 	ClearOAuth bool                  `json:"clear_oauth"`
 }
@@ -111,12 +113,13 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request, _ 
 		req.Kind = provider.KindOpenAI
 	}
 	created, err := s.Providers.CreateProvider(r.Context(), provider.Provider{
-		ID:      req.ID,
-		Name:    req.Name,
-		Kind:    req.Kind,
-		BaseURL: req.BaseURL,
-		Channel: req.Channel,
-		OAuth:   req.OAuth,
+		ID:       req.ID,
+		Name:     req.Name,
+		Kind:     req.Kind,
+		BaseURL:  req.BaseURL,
+		Channel:  req.Channel,
+		Protocol: provider.Protocol(req.Protocol),
+		OAuth:    req.OAuth,
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -138,6 +141,7 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request, _ 
 		Name:       req.Name,
 		BaseURL:    req.BaseURL,
 		Enabled:    req.Enabled,
+		Protocol:   req.Protocol,
 		OAuth:      req.OAuth,
 		ClearOAuth: req.ClearOAuth,
 	})

@@ -40,6 +40,10 @@ type Config struct {
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 	// Headers adds provider-specific headers (e.g. anthropic-version).
 	Headers map[string]string `json:"headers,omitempty"`
+	// Protocol is what the upstream speaks: "chat" (default), "responses"
+	// (OpenAI Responses / Codex) or "anthropic" (Messages). Callers always use
+	// chat completions; the translation happens in this package.
+	Protocol string `json:"protocol,omitempty"`
 	// MaxTokens caps the completion. Zero means the provider default.
 	MaxTokens int `json:"max_tokens,omitempty"`
 	// Temperature defaults to 0: audits should be deterministic.
@@ -70,12 +74,17 @@ type Usage struct {
 	Model            string
 	PromptTokens     int
 	CompletionTokens int
+	// CachedTokens are prompt tokens the upstream served from a cache. They
+	// still count toward the prompt total but are billed differently.
+	CachedTokens int
 }
 
-// Credential is one upstream key.
+// Credential is one upstream key or OAuth grant. OAuth changes both the header
+// shape and, for Anthropic, the accepted token type.
 type Credential struct {
 	ID     string
 	APIKey string
+	OAuth  bool
 }
 
 // CredentialSource hands out keys and records what happened to them. The pool
@@ -91,12 +100,14 @@ type CredentialSource interface {
 // pool in a hot loop.
 const maxCredentialAttempts = 3
 
-// Client talks to one OpenAI-compatible endpoint.
+// Client talks to one upstream endpoint. Callers always send chat completions;
+// Protocol says how the upstream wants them translated.
 type Client struct {
 	Name        string
 	BaseURL     string
 	APIKey      string
 	Model       string
+	Protocol    Protocol
 	Headers     map[string]string
 	MaxTokens   int
 	Temperature *float64
@@ -139,12 +150,17 @@ func New(cfg Config) (*Client, error) {
 	if name == "" {
 		name = model
 	}
+	protocol, ok := ParseProtocol(cfg.Protocol)
+	if !ok {
+		return nil, fmt.Errorf("gateway protocol %q must be chat, responses or anthropic", cfg.Protocol)
+	}
 
 	return &Client{
 		Name:        name,
 		BaseURL:     base,
 		APIKey:      key,
 		Model:       model,
+		Protocol:    protocol,
 		Headers:     cfg.Headers,
 		MaxTokens:   cfg.MaxTokens,
 		Temperature: cfg.Temperature,
@@ -177,8 +193,11 @@ type chatResponse struct {
 }
 
 type usageWire struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
 }
 
 // Complete sends one structured chat completion, used by auditors. It builds
@@ -227,6 +246,12 @@ func (c *Client) Complete(ctx context.Context, req Request) (Response, error) {
 // the usage the provider reported. Failover only happens for account-specific
 // failures.
 func (c *Client) Chat(ctx context.Context, model string, body []byte) ([]byte, Usage, error) {
+	switch c.Protocol {
+	case ProtocolResponses:
+		return c.chatResponses(ctx, model, body)
+	case ProtocolAnthropic:
+		return c.chatAnthropic(ctx, model, body)
+	}
 	attempts := 1
 	if c.Credentials != nil {
 		attempts = maxCredentialAttempts
@@ -234,15 +259,16 @@ func (c *Client) Chat(ctx context.Context, model string, body []byte) ([]byte, U
 
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		key, credentialID, err := c.pick(ctx, model)
+		credential, err := c.pick(ctx, model)
 		if err != nil {
 			if lastErr != nil {
 				return nil, Usage{}, fmt.Errorf("gateway %s: %w (last error: %v)", c.Name, err, lastErr)
 			}
 			return nil, Usage{}, fmt.Errorf("gateway %s: %w", c.Name, err)
 		}
+		credentialID := credential.ID
 
-		status, retryAfter, raw, err := c.roundTrip(ctx, body, key)
+		status, retryAfter, raw, err := c.roundTrip(ctx, body, credential)
 		if err != nil {
 			c.report(credentialID, 0, err.Error(), 0)
 			return nil, Usage{}, fmt.Errorf("gateway %s: %w", c.Name, err)
@@ -275,6 +301,12 @@ func (c *Client) Chat(ctx context.Context, model string, body []byte) ([]byte, U
 // it. Nothing is written until the upstream accepted the request, so callers can
 // still send an error status on failure.
 func (c *Client) ChatStream(ctx context.Context, model string, body []byte, dst io.Writer) (Usage, error) {
+	switch c.Protocol {
+	case ProtocolResponses:
+		return c.streamResponses(ctx, model, body, dst)
+	case ProtocolAnthropic:
+		return c.streamAnthropic(ctx, model, body, dst)
+	}
 	attempts := 1
 	if c.Credentials != nil {
 		attempts = maxCredentialAttempts
@@ -282,15 +314,16 @@ func (c *Client) ChatStream(ctx context.Context, model string, body []byte, dst 
 
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		key, credentialID, err := c.pick(ctx, model)
+		credential, err := c.pick(ctx, model)
 		if err != nil {
 			if lastErr != nil {
 				return Usage{}, fmt.Errorf("gateway %s: %w (last error: %v)", c.Name, err, lastErr)
 			}
 			return Usage{}, fmt.Errorf("gateway %s: %w", c.Name, err)
 		}
+		credentialID := credential.ID
 
-		resp, err := c.openStream(ctx, body, key)
+		resp, err := c.openStream(ctx, body, credential)
 		if err != nil {
 			c.report(credentialID, 0, err.Error(), 0)
 			return Usage{}, fmt.Errorf("gateway %s: %w", c.Name, err)
@@ -325,19 +358,61 @@ func (c *Client) ChatStream(ctx context.Context, model string, body []byte, dst 
 	return Usage{}, fmt.Errorf("gateway %s: %w", c.Name, lastErr)
 }
 
-func (c *Client) pick(ctx context.Context, model string) (string, string, error) {
+func (c *Client) pick(ctx context.Context, model string) (Credential, error) {
 	if c.Credentials == nil {
-		return c.APIKey, "", nil
+		return Credential{APIKey: c.APIKey}, nil
 	}
 	credential, err := c.Credentials.Next(ctx, c.Name, model)
 	if err != nil {
-		return "", "", err
+		return Credential{}, err
 	}
-	key := credential.APIKey
-	if key == "" {
-		key = c.APIKey
+	if credential.APIKey == "" {
+		credential.APIKey = c.APIKey
 	}
-	return key, credential.ID, nil
+	return credential, nil
+}
+
+// send performs one upstream call with account failover. Adapters use it so the
+// retry and reporting policy is identical for every protocol.
+func (c *Client) send(ctx context.Context, model, endpoint string, body []byte, stream bool) (*http.Response, string, error) {
+	attempts := 1
+	if c.Credentials != nil {
+		attempts = maxCredentialAttempts
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		credential, err := c.pick(ctx, model)
+		if err != nil {
+			if lastErr != nil {
+				return nil, "", fmt.Errorf("gateway %s: %w (last error: %v)", c.Name, err, lastErr)
+			}
+			return nil, "", fmt.Errorf("gateway %s: %w", c.Name, err)
+		}
+
+		httpReq, err := c.protoRequest(ctx, endpoint, body, credential, stream)
+		if err != nil {
+			return nil, "", fmt.Errorf("gateway %s: %w", c.Name, err)
+		}
+		resp, err := c.HTTP.Do(httpReq)
+		if err != nil {
+			c.report(credential.ID, 0, err.Error(), 0)
+			return nil, "", fmt.Errorf("gateway %s: %w", c.Name, err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			c.report(credential.ID, resp.StatusCode, string(raw), retryAfter(resp))
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, excerpt(raw))
+			if switchable(resp.StatusCode) && attempt+1 < attempts {
+				continue
+			}
+			return nil, "", fmt.Errorf("gateway %s: %w", c.Name, lastErr)
+		}
+		c.report(credential.ID, resp.StatusCode, "", 0)
+		return resp, credential.ID, nil
+	}
+	return nil, "", fmt.Errorf("gateway %s: %w", c.Name, lastErr)
 }
 
 func (c *Client) fireUsage(used Usage) {
@@ -363,16 +438,24 @@ func (c *Client) report(credentialID string, status int, body string, retryAfter
 	c.Credentials.Report(context.Background(), credentialID, status, body, retryAfter)
 }
 
-func (c *Client) newRequest(ctx context.Context, body []byte, key string) (*http.Request, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(body))
+func (c *Client) newRequest(ctx context.Context, body []byte, credential Credential) (*http.Request, error) {
+	return c.protoRequest(ctx, c.BaseURL+"/chat/completions", body, credential, false)
+}
+
+// protoRequest builds one JSON POST for any protocol. Headers configured on the
+// client are applied last so an operator can override a vendor default.
+func (c *Client) protoRequest(ctx context.Context, endpoint string, body []byte, credential Credential, stream bool) (*http.Request, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("build chat request: %w", err)
+		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-	if key != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+key)
+	if stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	} else {
+		httpReq.Header.Set("Accept", "application/json")
 	}
+	c.applyAuth(httpReq, credential)
 	for name, value := range c.Headers {
 		httpReq.Header.Set(name, value)
 	}
@@ -380,8 +463,8 @@ func (c *Client) newRequest(ctx context.Context, body []byte, key string) (*http
 }
 
 // roundTrip performs one non-streaming HTTP call.
-func (c *Client) roundTrip(ctx context.Context, body []byte, key string) (int, time.Duration, []byte, error) {
-	httpReq, err := c.newRequest(ctx, body, key)
+func (c *Client) roundTrip(ctx context.Context, body []byte, credential Credential) (int, time.Duration, []byte, error) {
+	httpReq, err := c.newRequest(ctx, body, credential)
 	if err != nil {
 		return 0, 0, nil, err
 	}
@@ -400,8 +483,8 @@ func (c *Client) roundTrip(ctx context.Context, body []byte, key string) (int, t
 }
 
 // openStream starts one streaming HTTP call.
-func (c *Client) openStream(ctx context.Context, body []byte, key string) (*http.Response, error) {
-	httpReq, err := c.newRequest(ctx, body, key)
+func (c *Client) openStream(ctx context.Context, body []byte, credential Credential) (*http.Response, error) {
+	httpReq, err := c.newRequest(ctx, body, credential)
 	if err != nil {
 		return nil, err
 	}
@@ -453,11 +536,15 @@ func parseUsage(raw []byte) Usage {
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return Usage{}
 	}
-	return Usage{
+	used := Usage{
 		Model:            parsed.Model,
 		PromptTokens:     parsed.Usage.PromptTokens,
 		CompletionTokens: parsed.Usage.CompletionTokens,
 	}
+	if parsed.Usage.PromptTokensDetails != nil {
+		used.CachedTokens = parsed.Usage.PromptTokensDetails.CachedTokens
+	}
+	return used
 }
 
 // sseUsageWriter passes bytes through untouched and watches complete `data:`
@@ -511,6 +598,9 @@ func (w *sseUsageWriter) parseLine(line []byte) {
 	if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
 		w.usage.PromptTokens = chunk.Usage.PromptTokens
 		w.usage.CompletionTokens = chunk.Usage.CompletionTokens
+		if chunk.Usage.PromptTokensDetails != nil {
+			w.usage.CachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+		}
 	}
 }
 

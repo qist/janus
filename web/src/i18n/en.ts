@@ -195,6 +195,8 @@ export const en: Record<MessageKey, string> = {
   "models.deleteCredentialConfirm": "Delete this credential? Calls using it will fail immediately.",
   "models.deleteRouteConfirm": "Delete this route?",
   "models.channel": "Channel",
+  "models.protocol": "Upstream protocol",
+  "models.protocolAuto": "Auto (from channel)",
   "models.channelCustom": "Custom (fill in manually)",
   "models.quota": "Allowance",
   "models.quotaRefresh": "Refresh allowance",

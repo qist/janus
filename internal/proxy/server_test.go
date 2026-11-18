@@ -397,3 +397,158 @@ func TestSetRoutesHotSwap(t *testing.T) {
 		t.Fatalf("old model = %d %s", resp.StatusCode, body)
 	}
 }
+
+// TestProxyTranslatesAnthropicUpstream proves the whole chain: a caller sends
+// OpenAI chat, the upstream speaks Messages, and the caller gets chat back.
+func TestProxyTranslatesAnthropicUpstream(t *testing.T) {
+	var path string
+	var headers http.Header
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		headers = r.Header.Clone()
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		if stream, _ := body["stream"].(bool); stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5","usage":{"input_tokens":7}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hel"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`)
+			return
+		}
+		io.WriteString(w, `{"id":"msg_1","model":"claude-sonnet-4-5","stop_reason":"end_turn","content":[{"type":"text","text":"hello from claude"}],"usage":{"input_tokens":7,"output_tokens":3}}`)
+	}))
+	t.Cleanup(up.Close)
+
+	client, err := gateway.New(gateway.Config{
+		Name:     "claude",
+		BaseURL:  up.URL,
+		APIKey:   "sk-ant-test",
+		Model:    "claude-sonnet-4-5",
+		Protocol: "anthropic",
+	})
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	keys := auth.NewStaticKeys()
+	keys.Add(chatKey, auth.Identity{AgentID: "agent-chat", Scopes: []auth.Scope{auth.ScopeChat}})
+	ledger := usage.NewMemoryLedger(nil)
+	server := New(map[string]*gateway.Client{"fast": client}, keys, ledger)
+
+	call := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("X-API-Key", chatKey)
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := call(`{"model":"fast","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if path != "/v1/messages" {
+		t.Fatalf("upstream path = %q", path)
+	}
+	if headers.Get("x-api-key") != "sk-ant-test" {
+		t.Fatalf("x-api-key = %q", headers.Get("x-api-key"))
+	}
+	var completion map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &completion); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	message := completion["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if message["content"] != "hello from claude" {
+		t.Fatalf("content = %v", message["content"])
+	}
+	if usageField := completion["usage"].(map[string]any); usageField["prompt_tokens"] != float64(7) {
+		t.Fatalf("usage = %v", usageField)
+	}
+
+	rec = call(`{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream status = %d", rec.Code)
+	}
+	stream := rec.Body.String()
+	if !strings.Contains(stream, `"content":"hel"`) || !strings.Contains(stream, "data: [DONE]") {
+		t.Fatalf("stream = %s", stream)
+	}
+	if strings.Contains(stream, "content_block_delta") {
+		t.Fatalf("raw anthropic events leaked: %s", stream)
+	}
+
+	totals, err := ledger.Totals(t.Context(), usage.Filter{KeyID: "agent-chat"})
+	if err != nil {
+		t.Fatalf("totals: %v", err)
+	}
+	if totals.Entries != 2 || totals.PromptTokens != 14 {
+		t.Fatalf("totals = %+v", totals)
+	}
+}
+
+func TestProxyTranslatesResponsesUpstream(t *testing.T) {
+	var path string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5-codex"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"codex"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5-codex","status":"completed","usage":{"input_tokens":4,"output_tokens":2}}}
+
+`)
+	}))
+	t.Cleanup(up.Close)
+
+	client, err := gateway.New(gateway.Config{
+		Name:     "codex",
+		BaseURL:  up.URL + "/backend-api/codex",
+		APIKey:   "codex-token",
+		Model:    "gpt-5-codex",
+		Protocol: "responses",
+	})
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	keys := auth.NewStaticKeys()
+	keys.Add(chatKey, auth.Identity{AgentID: "agent-chat", Scopes: []auth.Scope{auth.ScopeChat}})
+	server := New(map[string]*gateway.Client{"fast": client}, keys, usage.NewMemoryLedger(nil))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"fast","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("X-API-Key", chatKey)
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if path != "/backend-api/codex/responses" {
+		t.Fatalf("upstream path = %q", path)
+	}
+	var completion map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &completion); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	message := completion["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if message["content"] != "codex" {
+		t.Fatalf("content = %v", message["content"])
+	}
+}

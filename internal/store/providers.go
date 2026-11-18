@@ -20,6 +20,8 @@ type ProviderModel struct {
 	Kind    string `gorm:"size:16"`
 	BaseURL string `gorm:"size:512"`
 	Channel string `gorm:"size:64"`
+	// Protocol is the upstream wire format; empty means derived from kind.
+	Protocol string `gorm:"size:16"`
 	// OAuthJSON is the operator-supplied public-client flow, opaque here.
 	OAuthJSON []byte `gorm:"column:oauth_json;type:blob"`
 	Enabled   bool   `gorm:"index"`
@@ -91,6 +93,7 @@ func (s *Store) SaveProvider(ctx context.Context, p provider.Provider) error {
 		Kind:      string(p.Kind),
 		BaseURL:   p.BaseURL,
 		Channel:   p.Channel,
+		Protocol:  string(p.Protocol),
 		OAuthJSON: oauthJSON,
 		Enabled:   p.Enabled,
 		CreatedAt: p.CreatedAt,
@@ -336,6 +339,7 @@ func providerFromModel(m ProviderModel) provider.Provider {
 		Kind:      provider.Kind(m.Kind),
 		BaseURL:   m.BaseURL,
 		Channel:   m.Channel,
+		Protocol:  provider.Protocol(m.Protocol),
 		Enabled:   m.Enabled,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,

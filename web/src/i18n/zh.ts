@@ -191,6 +191,8 @@ export const zh = {
   "models.deleteCredentialConfirm": "删除该凭据？使用它的调用会立即失败。",
   "models.deleteRouteConfirm": "删除该路由？",
   "models.channel": "渠道",
+  "models.protocol": "上游协议",
+  "models.protocolAuto": "自动（按渠道推断）",
   "models.channelCustom": "自定义（手动填写）",
   "models.quota": "余量",
   "models.quotaRefresh": "刷新余量",

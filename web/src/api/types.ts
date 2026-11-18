@@ -229,6 +229,7 @@ export type Provider = {
   kind: ProviderKind;
   base_url: string;
   channel?: string;
+  protocol?: "chat" | "responses" | "anthropic";
   oauth?: OAuthConfig;
   enabled: boolean;
   created_at: number;

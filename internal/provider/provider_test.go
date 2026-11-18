@@ -358,3 +358,31 @@ func keysOf[M ~map[string]V, V any](m M) []string {
 	}
 	return out
 }
+
+func TestEffectiveProtocol(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider Provider
+		want     Protocol
+	}{
+		{"default", Provider{Kind: KindOpenAI}, ProtocolChat},
+		{"anthropic kind", Provider{Kind: KindAnthropic}, ProtocolAnthropic},
+		{"codex channel", Provider{Kind: KindOpenAI, Channel: "openai-codex"}, ProtocolResponses},
+		{"claude channel", Provider{Kind: KindOpenAI, Channel: "claude-code"}, ProtocolAnthropic},
+		{"explicit wins", Provider{Kind: KindAnthropic, Protocol: ProtocolChat}, ProtocolChat},
+	}
+	for _, tc := range cases {
+		if got := tc.provider.EffectiveProtocol(); got != tc.want {
+			t.Fatalf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestCreateProviderRejectsUnknownProtocol(t *testing.T) {
+	svc := testService(t)
+	if _, err := svc.CreateProvider(context.Background(), Provider{
+		ID: "p1", Kind: KindOpenAI, BaseURL: "https://api.example.com/v1", Protocol: "grpc",
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+}

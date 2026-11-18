@@ -312,6 +312,7 @@ func usageRecorder(ledger usage.Ledger) func(gateway.Usage) {
 			Model:            u.Model,
 			PromptTokens:     u.PromptTokens,
 			CompletionTokens: u.CompletionTokens,
+			CachedTokens:     u.CachedTokens,
 		})
 	}
 }

@@ -1138,3 +1138,36 @@ func TestCancelItemEndpoint(t *testing.T) {
 	// Idempotent.
 	e.expect(t, http.MethodPost, "/api/v1/work-items/w1/cancel", adminKey, nil, http.StatusNoContent)
 }
+
+func TestMeReturnsIdentityAndScopes(t *testing.T) {
+	e := newTestEnv(t)
+
+	resp := e.expect(t, http.MethodGet, "/api/v1/me", adminKey, nil, http.StatusOK)
+	var admin Identity
+	decodeBody(t, resp, &admin)
+	if admin.AgentID != adminAgent {
+		t.Fatalf("agent = %q, want %q", admin.AgentID, adminAgent)
+	}
+	if len(admin.Scopes) != 1 || admin.Scopes[0] != ScopeAdmin {
+		t.Fatalf("scopes = %v", admin.Scopes)
+	}
+
+	resp = e.expect(t, http.MethodGet, "/api/v1/me", readerKey, nil, http.StatusOK)
+	var reader Identity
+	decodeBody(t, resp, &reader)
+	if reader.AgentID != "agent-reader" {
+		t.Fatalf("agent = %q", reader.AgentID)
+	}
+	if len(reader.Scopes) != 1 || reader.Scopes[0] != ScopeRead {
+		t.Fatalf("scopes = %v", reader.Scopes)
+	}
+
+}
+
+func TestMeRejectsAnonymous(t *testing.T) {
+	e := newTestEnv(t)
+	resp := e.expect(t, http.MethodGet, "/api/v1/me", "", nil, http.StatusUnauthorized)
+	if code := errCode(t, resp); code != "unauthenticated" {
+		t.Fatalf("code = %q", code)
+	}
+}

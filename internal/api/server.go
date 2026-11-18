@@ -74,6 +74,9 @@ func (s *Server) Handler() http.Handler {
 // catch-all so a parent mux can also serve other transports.
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/healthz", s.handleHealth)
+	// Any authenticated key may ask who it is: the console uses this to hide
+	// actions the key cannot perform instead of letting them 403.
+	mux.HandleFunc("GET /api/v1/me", s.handleMe)
 	mux.HandleFunc("GET /api/v1/work-items", s.handleList)
 	mux.HandleFunc("GET /api/v1/usage", s.protect(ScopeRead, s.handleUsage))
 	mux.HandleFunc("GET /api/v1/scores", s.protect(ScopeRead, s.handleScores))
@@ -140,6 +143,18 @@ func (s *Server) authenticate(r *http.Request) (Identity, error) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	id, err := s.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key")
+		return
+	}
+	if id.Scopes == nil {
+		id.Scopes = []Scope{}
+	}
+	writeJSON(w, http.StatusOK, id)
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {

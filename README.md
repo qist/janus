@@ -45,6 +45,7 @@ export JANUS_API_KEY='至少 16 字节的开发密钥'
 | 方法 | 路径 | Scope | 说明 |
 |---|---|---|---|
 | GET | `/api/v1/healthz` | 无 | 存活检查 |
+| GET | `/api/v1/me` | 登录即可 | 当前 key 的 `agent_id` 与 `scopes`；控制台据此隐藏无权限操作 |
 | GET | `/api/v1/work-items?status=&workspace=` | read | 列表 |
 | POST | `/api/v1/work-items` | write | 建项，body `{"item":{...}}` |
 | GET | `/api/v1/work-items/{id}` | read | 项 + 租约 + 胶囊 + 评审 |
@@ -98,7 +99,7 @@ React 19 + TypeScript + Vite + Tailwind 4 的 SPA（hash 路由），构建产�
 `GET /` 302 到 `/ui/`。架构与取舍见 [前端架构](docs/FRONTEND.md)。
 
 - 概览、目标（创建 / 进度 / 取消）、工作项（筛选 / 租约 / 证据输出 / 评审 / 强制派工 / 取消）、
-  模型、用量、评分；
+  模型（上游 / 凭据 / 路由的增删与启停）、用量、评分；
 - 登录即输入 API key，存本机 `localStorage`，服务端无会话；401 自动回登录；
 - 页面静态资源公开，数据全部经 `/api/v1` 且带 key。
 
@@ -107,8 +108,8 @@ make ui        # 重新构建并更新 internal/ui/dist（dist 随仓库提交�
 make ui-dev    # 本地 Vite 开发，/api 与 /v1 代理到 127.0.0.1:8080
 ```
 
-模型页目前只读。后端已经可以管理 provider / 凭据 / 路由（见下一节），控制台页面还未接上；
-OAuth 登录仍未实现，方案见 `docs/FRONTEND.md` §7。
+模型页已经接上 provider / 凭据 / 路由的增删与启停：未设置 `JANUS_MASTER_KEY` 时页面会明确说明
+管理接口未启用，而不是假装能改。OAuth 登录仍未实现，方案见 `docs/FRONTEND.md` §7。
 
 ## 目标与进度
 

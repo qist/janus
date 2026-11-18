@@ -151,3 +151,49 @@ export type ModelInfo = {
   object: string;
   owned_by?: string;
 };
+
+export type Me = {
+  agent_id: string;
+  scopes: string[];
+};
+
+export type ProviderKind = "openai" | "anthropic" | "custom";
+export type CredentialKind = "api_key" | "oauth";
+export type CredentialStatus = "unknown" | "ok" | "exhausted" | "rate_limited" | "invalid";
+
+export type Provider = {
+  id: string;
+  name: string;
+  kind: ProviderKind;
+  base_url: string;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+};
+
+export type Credential = {
+  id: string;
+  provider_id: string;
+  label?: string;
+  kind: CredentialKind;
+  status: CredentialStatus;
+  masked?: string;
+  has_secret: boolean;
+  remaining?: number;
+  total?: number;
+  expires_at?: number;
+  created_at: number;
+  updated_at: number;
+};
+
+export type Route = {
+  id: string;
+  exposed_model: string;
+  provider_id: string;
+  upstream_model: string;
+  aliases?: string[];
+  priority: number;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+};

@@ -70,7 +70,7 @@ func (s *Service) StartDevice(ctx context.Context, providerID, label string) (De
 	}
 	cfg, ok := s.deviceConfig(p)
 	if !ok {
-		return DeviceStart{}, fmt.Errorf("%w: %s", ErrOAuthUnsupported, p.ChannelOrKind())
+		return DeviceStart{}, fmt.Errorf("%w: channel %q has no device flow (github-copilot only)", ErrOAuthUnsupported, p.ChannelOrKind())
 	}
 
 	code, err := cfg.Start(ctx)
@@ -129,7 +129,7 @@ func (s *Service) PollDevice(ctx context.Context, providerID, sessionID string) 
 	cfg, ok := s.deviceConfig(p)
 	if !ok {
 		s.dropDeviceSession(sessionID)
-		return DevicePoll{}, fmt.Errorf("%w: %s", ErrOAuthUnsupported, p.ChannelOrKind())
+		return DevicePoll{}, fmt.Errorf("%w: channel %q has no device flow (github-copilot only)", ErrOAuthUnsupported, p.ChannelOrKind())
 	}
 
 	tokens, err := cfg.Poll(ctx, session.DeviceCode)

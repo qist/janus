@@ -64,7 +64,7 @@ func (s *Service) StartOAuth(ctx context.Context, providerID, credentialID strin
 	}
 	cfg, ok := s.oauthConfig(p)
 	if !ok {
-		return OAuthStart{}, fmt.Errorf("%w: %s", ErrOAuthUnsupported, p.ChannelOrKind())
+		return OAuthStart{}, fmt.Errorf("%w: channel %q has no authorization-code flow (use openai-codex, claude-code, or a custom oauth config)", ErrOAuthUnsupported, p.ChannelOrKind())
 	}
 	if credentialID != "" {
 		existing, err := s.credential(ctx, credentialID)

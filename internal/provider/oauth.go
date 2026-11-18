@@ -350,6 +350,13 @@ func (s *Service) credentialKey(ctx context.Context, p Provider, credential Cred
 		}
 	}
 
+	if cfg, ok := s.pollConfig(p); ok && tokens.RefreshToken != "" && tokens.Expired(s.now(), 120) {
+		if refreshed, err := cfg.Refresh(ctx, tokens.RefreshToken); err == nil && refreshed.Valid() {
+			s.persistTokens(ctx, credential, refreshed)
+			return refreshed.AccessToken, nil
+		}
+	}
+
 	if tokens.RefreshToken != "" && tokens.Expired(s.now(), 120) {
 		if cfg, ok := s.oauthConfig(p); ok {
 			refreshed, err := cfg.Refresh(ctx, tokens.RefreshToken)
@@ -398,6 +405,7 @@ func configFromOAuth(c OAuthConfig) oauth.Config {
 	return oauth.Config{
 		Kind:             "custom",
 		ClientID:         c.ClientID,
+		ClientSecret:     c.ClientSecret,
 		AuthorizeURL:     c.AuthorizeURL,
 		TokenURL:         c.TokenURL,
 		RedirectURI:      c.RedirectURI,

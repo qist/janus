@@ -407,3 +407,139 @@ func TestCapabilitiesTellWhichLoginActuallyWorks(t *testing.T) {
 		}
 	}
 }
+
+func pollRegistry(t *testing.T, pending int) *oauth.PollRegistry {
+	t.Helper()
+	mux := http.NewServeMux()
+	hits := 0
+	mux.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state": "s1", "auth_url": "https://login.example.com/start",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != "s1" {
+			t.Errorf("state = %q", r.URL.Query().Get("state"))
+		}
+		hits++
+		if hits <= pending {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"access_token": "poll-token", "refresh_token": "poll-refresh",
+				"expires_at": 1_700_003_600,
+			},
+		})
+	})
+	mux.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Refresh-Token") != "poll-refresh" {
+			t.Errorf("refresh header = %q", r.Header.Get("X-Refresh-Token"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "poll-token-2", "expires_in": 3600})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	registry := oauth.NewPollRegistry()
+	registry.Set(oauth.PollConfig{
+		Kind:       "workbuddy",
+		StateURL:   server.URL + "/state",
+		TokenURL:   server.URL + "/token",
+		RefreshURL: server.URL + "/refresh",
+	})
+	return registry
+}
+
+func TestPollLoginCreatesCredential(t *testing.T) {
+	ctx := context.Background()
+	svc := testService(t)
+	svc.Polls = pollRegistry(t, 1)
+
+	if _, err := svc.CreateProvider(ctx, Provider{
+		ID: "wb", Kind: KindOpenAI, Channel: "workbuddy",
+		BaseURL: "https://copilot.tencent.com/v2",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+
+	start, err := svc.StartDevice(ctx, "wb", "工作号", "")
+	if err != nil {
+		t.Fatalf("StartDevice: %v", err)
+	}
+	if start.UserCode != "" || start.VerificationURI != "https://login.example.com/start" {
+		t.Fatalf("start = %+v", start)
+	}
+
+	poll, err := svc.PollDevice(ctx, "wb", start.SessionID)
+	if err != nil {
+		t.Fatalf("poll pending: %v", err)
+	}
+	if poll.Status != "pending" {
+		t.Fatalf("status = %q", poll.Status)
+	}
+
+	poll, err = svc.PollDevice(ctx, "wb", start.SessionID)
+	if err != nil {
+		t.Fatalf("poll complete: %v", err)
+	}
+	if poll.Status != "complete" || poll.Credential == nil {
+		t.Fatalf("poll = %+v", poll)
+	}
+	if poll.Credential.Label != "工作号" || poll.Credential.Kind != CredentialOAuth {
+		t.Fatalf("credential = %+v", poll.Credential)
+	}
+
+	provider, _ := svc.Store.GetProvider(ctx, "wb")
+	rows, _ := svc.Store.ListCredentials(ctx, "wb")
+	key, err := svc.credentialKey(ctx, provider, rows[0])
+	if err != nil {
+		t.Fatalf("credentialKey: %v", err)
+	}
+	if key != "poll-token" {
+		t.Fatalf("key = %q", key)
+	}
+}
+
+func TestPollTokenRefresh(t *testing.T) {
+	ctx := context.Background()
+	svc := testService(t)
+	svc.Polls = pollRegistry(t, 0)
+
+	if _, err := svc.CreateProvider(ctx, Provider{
+		ID: "wb", Kind: KindOpenAI, Channel: "workbuddy",
+		BaseURL: "https://copilot.tencent.com/v2",
+	}); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	// An expired pair, as after sitting idle past the token lifetime.
+	credential, err := svc.storeTokens(ctx, "wb", "work", "work", "", oauth.TokenSet{
+		AccessToken: "stale", RefreshToken: "poll-refresh", ExpiresAt: 1,
+	})
+	if err != nil {
+		t.Fatalf("storeTokens: %v", err)
+	}
+
+	provider, _ := svc.Store.GetProvider(ctx, "wb")
+	key, err := svc.credentialKey(ctx, provider, credential)
+	if err != nil {
+		t.Fatalf("credentialKey: %v", err)
+	}
+	if key != "poll-token-2" {
+		t.Fatalf("key = %q", key)
+	}
+
+	rows, _ := svc.Store.ListCredentials(ctx, "wb")
+	plain, err := svc.Box.Open(rows[0].SecretCiphertext)
+	if err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	var tokens oauth.TokenSet
+	if err := json.Unmarshal([]byte(plain), &tokens); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if tokens.AccessToken != "poll-token-2" || tokens.RefreshToken != "poll-refresh" {
+		t.Fatalf("tokens = %+v", tokens)
+	}
+}

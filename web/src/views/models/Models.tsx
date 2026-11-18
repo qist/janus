@@ -199,7 +199,10 @@ export default function Models() {
   const quickChannel = channels.find((channel) => channel.id === quick.channel);
   const quickMethods = quickChannel?.auth ?? ["api_key"];
   const quickOAuth = quickChannel?.login === "oauth";
-  const quickDevice = quickChannel?.login === "device_code";
+  // "poll" vendors open a page and are approved out of band, exactly like a
+  // device code; the same panel and endpoints serve both.
+  const quickDevice =
+    quickChannel?.login === "device_code" || quickChannel?.login === "poll";
   const quickNeedsConfig =
     Boolean(quickChannel) &&
     quickMethods.includes("oauth") &&
@@ -1105,9 +1108,11 @@ export default function Models() {
                       {device.credentialID ? t("models.deviceReauthHint") : t("models.deviceCodeHint")}
                     </p>
                     <div className="flex flex-wrap items-center gap-3">
-                      <code className="rounded bg-muted px-3 py-1.5 font-mono text-lg tracking-widest">
-                        {device.userCode}
-                      </code>
+                      {device.userCode ? (
+                        <code className="rounded bg-muted px-3 py-1.5 font-mono text-lg tracking-widest">
+                          {device.userCode}
+                        </code>
+                      ) : null}
                       <a
                         href={device.verificationURI}
                         target="_blank"

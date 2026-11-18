@@ -39,7 +39,10 @@ type DevicePoll struct {
 type deviceSession struct {
 	ID         string
 	ProviderID string
+	// Mode is "device" (enter a code) or "poll" (open a URL and wait).
+	Mode       string
 	DeviceCode string
+	PollState  string
 	Interval   int
 	ExpiresAt  int64
 	Label      string
@@ -63,16 +66,17 @@ func (s *Service) deviceConfig(p Provider) (oauth.DeviceConfig, bool) {
 	return registry.Get(p.Channel)
 }
 
+// pollConfig is the state+poll variant of a device sign-in.
+func (s *Service) pollConfig(p Provider) (oauth.PollConfig, bool) {
+	return s.Polls.Get(p.Channel)
+}
+
 // StartDevice begins a device authorization. The operator visits
 // verification_uri, enters user_code, and the console polls PollDevice.
 func (s *Service) StartDevice(ctx context.Context, providerID, label, credentialID string) (DeviceStart, error) {
 	p, err := s.Store.GetProvider(ctx, providerID)
 	if err != nil {
 		return DeviceStart{}, err
-	}
-	cfg, ok := s.deviceConfig(p)
-	if !ok {
-		return DeviceStart{}, fmt.Errorf("%w: channel %q has no device flow (github-copilot only)", ErrOAuthUnsupported, p.ChannelOrKind())
 	}
 	if credentialID != "" {
 		existing, err := s.credential(ctx, credentialID)
@@ -87,19 +91,47 @@ func (s *Service) StartDevice(ctx context.Context, providerID, label, credential
 		}
 	}
 
-	code, err := cfg.Start(ctx)
-	if err != nil {
-		return DeviceStart{}, err
-	}
-
+	expiresIn := int64(900)
+	interval := 5
+	userCode := ""
+	verificationURI := ""
 	session := deviceSession{
 		ID:                 "dev_" + strings.TrimPrefix(newOAuthSessionID(), "oauth_"),
 		ProviderID:         p.ID,
-		DeviceCode:         code.DeviceCode,
-		Interval:           code.Interval,
-		ExpiresAt:          s.now() + int64(code.ExpiresIn),
 		Label:              strings.TrimSpace(label),
 		TargetCredentialID: strings.TrimSpace(credentialID),
+	}
+
+	switch {
+	case hasDeviceConfig(s, p):
+		cfg, _ := s.deviceConfig(p)
+		code, err := cfg.Start(ctx)
+		if err != nil {
+			return DeviceStart{}, err
+		}
+		session.Mode = "device"
+		session.DeviceCode = code.DeviceCode
+		session.Interval = code.Interval
+		session.ExpiresAt = s.now() + int64(code.ExpiresIn)
+		interval = code.Interval
+		expiresIn = int64(code.ExpiresIn)
+		userCode = code.UserCode
+		verificationURI = code.VerificationURI
+	default:
+		cfg, ok := s.pollConfig(p)
+		if !ok {
+			return DeviceStart{}, fmt.Errorf("%w: channel %q has no sign-in flow", ErrOAuthUnsupported, p.ChannelOrKind())
+		}
+		start, err := cfg.Begin(ctx)
+		if err != nil {
+			return DeviceStart{}, err
+		}
+		session.Mode = "poll"
+		session.PollState = start.State
+		session.Interval = 3
+		session.ExpiresAt = s.now() + expiresIn
+		interval = session.Interval
+		verificationURI = start.AuthURL
 	}
 
 	s.devices.mu.Lock()
@@ -116,10 +148,10 @@ func (s *Service) StartDevice(ctx context.Context, providerID, label, credential
 
 	return DeviceStart{
 		SessionID:       session.ID,
-		UserCode:        code.UserCode,
-		VerificationURI: code.VerificationURI,
-		ExpiresIn:       int64(code.ExpiresIn),
-		Interval:        code.Interval,
+		UserCode:        userCode,
+		VerificationURI: verificationURI,
+		ExpiresIn:       expiresIn,
+		Interval:        interval,
 	}, nil
 }
 
@@ -141,10 +173,14 @@ func (s *Service) PollDevice(ctx context.Context, providerID, sessionID string) 
 	if err != nil {
 		return DevicePoll{}, err
 	}
+	if session.Mode == "poll" {
+		return s.pollLogin(ctx, p, session)
+	}
+
 	cfg, ok := s.deviceConfig(p)
 	if !ok {
 		s.dropDeviceSession(sessionID)
-		return DevicePoll{}, fmt.Errorf("%w: channel %q has no device flow (github-copilot only)", ErrOAuthUnsupported, p.ChannelOrKind())
+		return DevicePoll{}, fmt.Errorf("%w: channel %q has no sign-in flow", ErrOAuthUnsupported, p.ChannelOrKind())
 	}
 
 	tokens, err := cfg.Poll(ctx, session.DeviceCode)
@@ -204,6 +240,48 @@ func (s *Service) PollDevice(ctx context.Context, providerID, sessionID string) 
 	}
 	s.dropDeviceSession(sessionID)
 	return DevicePoll{Status: "complete", Credential: &credential}, nil
+}
+
+// pollLogin finishes a state+poll sign-in. There is no device code and no
+// exchange: the vendor's token is the API token.
+func (s *Service) pollLogin(ctx context.Context, p Provider, session deviceSession) (DevicePoll, error) {
+	cfg, ok := s.pollConfig(p)
+	if !ok {
+		s.dropDeviceSession(session.ID)
+		return DevicePoll{}, fmt.Errorf("%w: channel %q has no sign-in flow", ErrOAuthUnsupported, p.ChannelOrKind())
+	}
+	tokens, pending, err := cfg.Poll(ctx, session.PollState)
+	if err != nil {
+		return DevicePoll{}, err
+	}
+	if pending {
+		return DevicePoll{Status: "pending", Interval: session.Interval}, nil
+	}
+
+	var credential Credential
+	if session.TargetCredentialID != "" {
+		credential, err = s.replaceTokens(ctx, session.TargetCredentialID, session.Label, "", "", tokens)
+	} else {
+		label := session.Label
+		account := label
+		if account == "" {
+			account = p.Channel
+		}
+		if label == "" {
+			label = p.Name
+		}
+		credential, err = s.CreateOAuthCredential(ctx, p.ID, label, account, "", tokens)
+	}
+	if err != nil {
+		return DevicePoll{}, err
+	}
+	s.dropDeviceSession(session.ID)
+	return DevicePoll{Status: "complete", Credential: &credential}, nil
+}
+
+func hasDeviceConfig(s *Service, p Provider) bool {
+	_, ok := s.deviceConfig(p)
+	return ok
 }
 
 func (s *Service) dropDeviceSession(id string) {

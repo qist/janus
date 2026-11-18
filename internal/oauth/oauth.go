@@ -53,8 +53,12 @@ func (t TokenSet) Expired(now int64, skew int64) bool {
 type Config struct {
 	// Kind names the flow, e.g. "openai-codex" or "claude-code". It is also
 	// the catalogue channel the registry is keyed by.
-	Kind         string
-	ClientID     string
+	Kind     string
+	ClientID string
+	// ClientSecret is only for vendors whose installed-app clients require it
+	// (Google). It stays in the plugin config or the sealed provider row, never
+	// in the console response.
+	ClientSecret string
 	AuthorizeURL string
 	TokenURL     string
 	RedirectURI  string
@@ -237,6 +241,9 @@ func (c Config) Exchange(ctx context.Context, code, verifier string) (TokenSet, 
 		"redirect_uri":  c.RedirectURI,
 		"code_verifier": verifier,
 	}
+	if c.ClientSecret != "" {
+		values["client_secret"] = c.ClientSecret
+	}
 	return c.postToken(ctx, values)
 }
 
@@ -246,6 +253,9 @@ func (c Config) Refresh(ctx context.Context, refreshToken string) (TokenSet, err
 		"grant_type":    "refresh_token",
 		"client_id":     c.ClientID,
 		"refresh_token": strings.TrimSpace(refreshToken),
+	}
+	if c.ClientSecret != "" {
+		values["client_secret"] = c.ClientSecret
 	}
 	return c.postToken(ctx, values)
 }

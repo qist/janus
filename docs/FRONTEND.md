@@ -211,6 +211,7 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
 | `codex` | `openai-codex` | 授权码 + PKCE |
 | `claude` | `claude-code` | 授权码 + PKCE |
 | `copilot` | `github-copilot` | 设备码 + 短期令牌交换 |
+| `workbuddy` | `workbuddy` | 网页登录 + 轮询取 token + 厂商刷新 |
 
 配置（`JANUS_PLUGINS` 指向 JSON，缺省表示全部按默认启用）：
 
@@ -231,6 +232,25 @@ Command Code、Devin、Factory、MiMo、Zed 等订阅迁到第三方 OpenCode �
   `device_url` 等），所以自带 client 不必改代码；
 - 单个插件失败（panic 或返回错误）只标记为 failed，其它插件继续；
 - `GET /api/v1/plugins` 返回每个插件的 state（active/off/failed）与错误，不含配置值。
+
+插件可以贡献三类登录流程：
+
+| 类型 | Ctx 方法 | 交互 |
+|---|---|---|
+| 授权码 + PKCE | `OAuthLogin` | 打开授权页，粘回授权码（或 `code#state`） |
+| 设备码 | `DeviceLogin` | 显示一次性代码并轮询 |
+| 状态轮询 | `PollLogin` | 打开授权页，自动轮询到 token 出现 |
+
+轮询式（`internal/oauth/poll.go`）把端点与字段名做成配置：`state_url / token_url / refresh_url /
+state_field / auth_url_field / token_field / refresh_field / expires_field / state_query /
+refresh_header`，字段名留空时按常见命名容错识别（含 `data` 包裹、秒/毫秒到期、`expires_in`）。
+刷新时按 `refresh_header` 带上 refresh token。WorkBuddy 属于这一类：登录后拿到的就是 API token，
+可直接用于 OpenAI chat 路径，不需要额外的协议适配。
+
+Google Code Assist / Antigravity 仍需要「自带 client」：它们是标准的授权码流程，
+但 janus 没内置对应 client；自定义 OAuth 支持 `client_secret`（confidential client），
+配置后 `oauth_ready` 立即为 true。注意 Code Assist 的推理走 Gemini 私有协议，
+登录成功之后仍需要 Gemini 适配器才能真正发请求。
 
 插件只负责"渠道 + 登录能力"：它给已有目录条目打上 `login` 标记并注册 flow，
 不重复定义渠道元数据。

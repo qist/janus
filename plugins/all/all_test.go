@@ -14,16 +14,17 @@ import (
 func TestCompiledPluginsProvideLogins(t *testing.T) {
 	registry := oauth.NewRegistry()
 	devices := oauth.NewDeviceRegistry()
+	polls := oauth.NewPollRegistry()
 
 	pluginrt.ApplyManifests(pluginrt.Registered(), pluginrt.File{}, pluginrt.Targets{
-		OAuth: registry, Devices: devices,
+		OAuth: registry, Devices: devices, Polls: polls,
 	})
 
 	states := map[string]pluginrt.State{}
 	for _, status := range pluginrt.LastStatus() {
 		states[status.ID] = status.State
 	}
-	for _, id := range []string{"codex", "claude", "copilot"} {
+	for _, id := range []string{"codex", "claude", "copilot", "workbuddy"} {
 		if states[id] != pluginrt.StateActive {
 			t.Fatalf("plugin %s state = %q", id, states[id])
 		}
@@ -38,11 +39,15 @@ func TestCompiledPluginsProvideLogins(t *testing.T) {
 	if config, ok := devices.Get("github-copilot"); !ok || config.ClientID == "" {
 		t.Fatalf("copilot flow = %+v (ok=%v)", config, ok)
 	}
+	if config, ok := polls.Get("workbuddy"); !ok || config.TokenURL == "" {
+		t.Fatalf("workbuddy flow = %+v (ok=%v)", config, ok)
+	}
 
 	for id, want := range map[string]string{
 		"openai-codex":   "oauth",
 		"claude-code":    "oauth",
 		"github-copilot": "device_code",
+		"workbuddy":      "poll",
 	} {
 		channel, ok := provider.ChannelByID(id)
 		if !ok {

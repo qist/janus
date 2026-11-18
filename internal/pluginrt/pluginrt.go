@@ -78,6 +78,7 @@ type Status struct {
 type Targets struct {
 	OAuth   *oauth.Registry
 	Devices *oauth.DeviceRegistry
+	Polls   *oauth.PollRegistry
 }
 
 // Ctx is what Apply is handed. Everything registered through it is undone when
@@ -172,6 +173,26 @@ var (
 	regMu    sync.Mutex
 	registry = map[string]Manifest{}
 )
+
+// PollLogin registers a state+poll sign-in. It reuses the device endpoints in
+// the console, so the UI needs no third mode.
+func (c *Ctx) PollLogin(channelID string, config oauth.PollConfig) error {
+	channel, ok := provider.ChannelByID(channelID)
+	if !ok {
+		return fmt.Errorf("poll login: unknown channel %q", channelID)
+	}
+	channel.Login = "poll"
+	channel.Source = "plugin"
+	if err := provider.RegisterChannel(channel); err != nil {
+		return err
+	}
+	if c.targets.Polls == nil {
+		return errors.New("poll registry is not configured")
+	}
+	config.Kind = channel.ID
+	c.targets.Polls.Set(config)
+	return nil
+}
 
 // Register adds a compiled plugin; packages call it from init. A duplicate id is
 // a programming error, so it panics at startup rather than at request time.
@@ -282,7 +303,11 @@ type Runtime struct {
 
 // Apply runs the compiled plugins with the file's settings.
 func Apply(file File) *Runtime {
-	return ApplyManifests(Registered(), file, Targets{OAuth: oauth.NewRegistry(), Devices: oauth.NewDeviceRegistry()})
+	return ApplyManifests(Registered(), file, Targets{
+		OAuth:   oauth.NewRegistry(),
+		Devices: oauth.NewDeviceRegistry(),
+		Polls:   oauth.NewPollRegistry(),
+	})
 }
 
 // ApplyManifests is Apply with explicit manifests and targets; tests and callers

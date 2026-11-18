@@ -248,7 +248,7 @@ export type Channel = {
   kind: ProviderKind;
   protocols: string[];
   auth: string[];
-  /** Built-in one-click sign-in: "oauth" or "device_code"; empty needs a custom client. */
+  /** Built-in one-click sign-in: "oauth", "device_code" or "poll"; empty needs a custom client. */
   login?: string;
   base_url: string;
   alt_base_urls?: string[];

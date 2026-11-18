@@ -5,4 +5,5 @@ import (
 	_ "janus/plugins/claude"
 	_ "janus/plugins/codex"
 	_ "janus/plugins/copilot"
+	_ "janus/plugins/workbuddy"
 )

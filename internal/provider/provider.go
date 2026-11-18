@@ -159,6 +159,9 @@ func (s *Service) WithCapabilities(p Provider) Provider {
 	if _, ok := s.deviceConfig(p); ok {
 		p.DeviceReady = true
 	}
+	if _, ok := s.pollConfig(p); ok {
+		p.DeviceReady = true
+	}
 	return p
 }
 
@@ -186,7 +189,10 @@ func (p Provider) EffectiveProtocol() Protocol {
 // accepted: a confidential client would need the secret sealed server-side,
 // which is a separate design. PKCE is mandatory.
 type OAuthConfig struct {
-	ClientID     string   `json:"client_id"`
+	ClientID string `json:"client_id"`
+	// ClientSecret is optional and only for vendors whose installed-app client
+	// requires it (Google). It is sealed with the provider row.
+	ClientSecret string   `json:"client_secret,omitempty"`
 	AuthorizeURL string   `json:"authorize_url"`
 	TokenURL     string   `json:"token_url"`
 	RedirectURI  string   `json:"redirect_uri"`
@@ -325,6 +331,9 @@ type Service struct {
 	OAuth *oauth.Registry
 	// Devices overrides the built-in device flows (GitHub Copilot).
 	Devices *oauth.DeviceRegistry
+	// Polls holds vendor sign-ins that use a state + poll instead of a device
+	// code. They reuse the device session/endpoints.
+	Polls *oauth.PollRegistry
 	// oauth holds sign-ins started from the console, in memory only.
 	oauth oauthSessions
 	// devices holds device-code sign-ins, also in memory only.

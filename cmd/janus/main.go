@@ -315,12 +315,15 @@ func loadProviderPlugins(svc *provider.Service) {
 	}
 	registry := oauth.NewRegistry()
 	devices := oauth.NewDeviceRegistry()
+	polls := oauth.NewPollRegistry()
 	pluginrt.ApplyManifests(pluginrt.Registered(), file, pluginrt.Targets{
 		OAuth:   registry,
 		Devices: devices,
+		Polls:   polls,
 	})
 	svc.OAuth = registry
 	svc.Devices = devices
+	svc.Polls = polls
 	for _, status := range pluginrt.LastStatus() {
 		if status.State == pluginrt.StateFailed {
 			log.Printf("plugin %s failed: %s", status.ID, status.Error)
